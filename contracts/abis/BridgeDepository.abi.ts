@@ -1,0 +1,170 @@
+import { ABIDataTypes, BitcoinAbiTypes, OP_NET_ABI } from 'opnet';
+
+export const BridgeDepositoryEvents = [
+    {
+        name: 'WrappedTokenSet',
+        values: [
+            { name: 'wrappedToken', type: ABIDataTypes.ADDRESS },
+            { name: 'enabled', type: ABIDataTypes.BOOL },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'SignerRotated',
+        values: [
+            { name: 'oldEpoch', type: ABIDataTypes.UINT32 },
+            { name: 'newEpoch', type: ABIDataTypes.UINT32 },
+            { name: 'newSignerHash', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'Paused',
+        values: [],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'Unpaused',
+        values: [],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'GovernorUpdated',
+        values: [
+            { name: 'oldGov', type: ABIDataTypes.ADDRESS },
+            { name: 'newGov', type: ABIDataTypes.ADDRESS },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'MintedFromVoucher',
+        values: [
+            { name: 'recipient', type: ABIDataTypes.ADDRESS },
+            { name: 'wrappedToken', type: ABIDataTypes.ADDRESS },
+            { name: 'sourceChainId', type: ABIDataTypes.UINT256 },
+            { name: 'sourceTxHash', type: ABIDataTypes.UINT256 },
+            { name: 'sourceLogIndex', type: ABIDataTypes.UINT32 },
+            { name: 'grossAmount', type: ABIDataTypes.UINT256 },
+            { name: 'feeAmount', type: ABIDataTypes.UINT256 },
+            { name: 'netAmount', type: ABIDataTypes.UINT256 },
+            { name: 'voucherId', type: ABIDataTypes.UINT256 },
+            { name: 'signerEpoch', type: ABIDataTypes.UINT32 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+];
+
+export const BridgeDepositoryAbi = [
+    {
+        name: 'addWrappedToken',
+        inputs: [{ name: 'wrappedToken', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'removeWrappedToken',
+        inputs: [{ name: 'wrappedToken', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'isWrappedToken',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'enabled', type: ABIDataTypes.BOOL }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'rotateSigner',
+        inputs: [{ name: 'signerPubKey', type: ABIDataTypes.BYTES }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setInitialSigner',
+        inputs: [{ name: 'signerPubKey', type: ABIDataTypes.BYTES }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setPaused',
+        inputs: [{ name: 'paused', type: ABIDataTypes.BOOL }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setGovernor',
+        inputs: [{ name: 'newGovernor', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'claimMintWithVoucher',
+        inputs: [
+            { name: 'voucher', type: ABIDataTypes.BYTES },
+            { name: 'mldsaSig', type: ABIDataTypes.BYTES },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'governor',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'governor', type: ABIDataTypes.ADDRESS }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'paused',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'paused', type: ABIDataTypes.BOOL }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'signerEpoch',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'signerEpoch', type: ABIDataTypes.UINT256 }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'signerHashAtEpoch',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'signerHash', type: ABIDataTypes.UINT256 }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'isVoucherUsed',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'used', type: ABIDataTypes.BOOL }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'isSourceEventUsed',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'used', type: ABIDataTypes.BOOL }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'storageVersion',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'storageVersion', type: ABIDataTypes.UINT256 }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'networkId',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'networkId', type: ABIDataTypes.UINT256 }],
+        type: BitcoinAbiTypes.Function,
+    },
+    ...BridgeDepositoryEvents,
+    ...OP_NET_ABI,
+];
+
+export default BridgeDepositoryAbi;

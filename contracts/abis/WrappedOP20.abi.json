@@ -1,0 +1,234 @@
+{
+    "functions": [
+        {
+            "name": "setBridgeDepository",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newBridge",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setGovernor",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newGovernor",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setPaused",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "paused",
+                    "type": "BOOL"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "mintTo",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "to",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "burnForRelease",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "ethRecipient",
+                    "type": "BYTES32"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "destChainId",
+                    "type": "UINT32"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "bridgeDepository",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "depository",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
+            "name": "governor",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "governor",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
+            "name": "burnNonce",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "burnNonce",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "storageVersion",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "storageVersion",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "paused",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "paused",
+                    "type": "BOOL"
+                }
+            ]
+        }
+    ],
+    "events": [
+        {
+            "name": "BridgeDepositoryUpdated",
+            "values": [
+                {
+                    "name": "oldAddr",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "newAddr",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "GovernorUpdated",
+            "values": [
+                {
+                    "name": "oldAddr",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "newAddr",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "Paused",
+            "values": [],
+            "type": "Event"
+        },
+        {
+            "name": "Unpaused",
+            "values": [],
+            "type": "Event"
+        },
+        {
+            "name": "Minted",
+            "values": [
+                {
+                    "name": "to",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "to",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "BurnedForRelease",
+            "values": [
+                {
+                    "name": "user",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "ethRecipient",
+                    "type": "BYTES"
+                },
+                {
+                    "name": "destChainId",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "burnNonce",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        }
+    ]
+}

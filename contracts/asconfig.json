@@ -1,0 +1,35 @@
+{
+    "$schema": "https://raw.githubusercontent.com/aspect-dev/asconfig/main/asconfig.schema.json",
+    "targets": {
+        "wrapped": {
+            "outFile": "build/WrappedOP20.wasm",
+            "textFile": "build/WrappedOP20.wat"
+        },
+        "depository": {
+            "outFile": "build/BridgeDepository.wasm",
+            "textFile": "build/BridgeDepository.wat"
+        }
+    },
+    "options": {
+        "transform": "@btc-vision/opnet-transform",
+        "sourceMap": false,
+        "optimizeLevel": 3,
+        "shrinkLevel": 1,
+        "converge": true,
+        "noAssert": false,
+        "enable": [
+            "sign-extension",
+            "mutable-globals",
+            "nontrapping-f2i",
+            "bulk-memory",
+            "simd",
+            "reference-types",
+            "multi-value"
+        ],
+        "runtime": "stub",
+        "memoryBase": 0,
+        "initialMemory": 1,
+        "exportStart": "start",
+        "use": []
+    }
+}

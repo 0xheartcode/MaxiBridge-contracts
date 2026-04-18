@@ -1,0 +1,320 @@
+{
+    "functions": [
+        {
+            "name": "addWrappedToken",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "wrappedToken",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "removeWrappedToken",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "wrappedToken",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "isWrappedToken",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "enabled",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
+            "name": "rotateSigner",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "signerPubKey",
+                    "type": "BYTES"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setInitialSigner",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "signerPubKey",
+                    "type": "BYTES"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setPaused",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "paused",
+                    "type": "BOOL"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setGovernor",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newGovernor",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "claimMintWithVoucher",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "voucher",
+                    "type": "BYTES"
+                },
+                {
+                    "name": "mldsaSig",
+                    "type": "BYTES"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "governor",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "governor",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
+            "name": "paused",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "paused",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
+            "name": "signerEpoch",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "signerEpoch",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "signerHashAtEpoch",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "signerHash",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "isVoucherUsed",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "used",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
+            "name": "isSourceEventUsed",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "used",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
+            "name": "storageVersion",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "storageVersion",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "networkId",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "networkId",
+                    "type": "UINT256"
+                }
+            ]
+        }
+    ],
+    "events": [
+        {
+            "name": "WrappedTokenSet",
+            "values": [
+                {
+                    "name": "wrappedToken",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "enabled",
+                    "type": "BOOL"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "SignerRotated",
+            "values": [
+                {
+                    "name": "oldEpoch",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "newEpoch",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "newSignerHash",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "Paused",
+            "values": [],
+            "type": "Event"
+        },
+        {
+            "name": "Unpaused",
+            "values": [],
+            "type": "Event"
+        },
+        {
+            "name": "GovernorUpdated",
+            "values": [
+                {
+                    "name": "oldGov",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "newGov",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "MintedFromVoucher",
+            "values": [
+                {
+                    "name": "recipient",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "wrappedToken",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "sourceChainId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "sourceTxHash",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "sourceLogIndex",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "grossAmount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "feeAmount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "netAmount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "voucherId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "signerEpoch",
+                    "type": "UINT32"
+                }
+            ],
+            "type": "Event"
+        }
+    ]
+}

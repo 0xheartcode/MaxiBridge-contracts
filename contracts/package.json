@@ -1,0 +1,28 @@
+{
+    "name": "bridge-contracts",
+    "version": "1.0.0",
+    "description": "Bridge OPNet contracts: WrappedOP20 + BridgeDepository",
+    "type": "module",
+    "scripts": {
+        "build": "npm run build:wrapped && npm run build:depository",
+        "build:wrapped": "asc src/wrapped/index.ts --config asconfig.json --target wrapped --use abort=src/wrapped/index/abort",
+        "build:depository": "asc src/bridge/index.ts --config asconfig.json --target depository --use abort=src/bridge/index/abort",
+        "test": "npm run test:wrapped && npm run test:bridge",
+        "test:wrapped": "npx tsx __test__/unit/tests/wrapped.ts",
+        "test:bridge": "npx tsx __test__/unit/tests/bridge.ts",
+        "clean": "rm -rf build/*"
+    },
+    "dependencies": {
+        "@btc-vision/as-bignum": "^1.0.0",
+        "@btc-vision/btc-runtime": "^1.11.0",
+        "@btc-vision/transaction": "^1.8.2",
+        "@btc-vision/unit-test-framework": "^1.0.0",
+        "@noble/hashes": "^1.4.0",
+        "opnet": "^1.8.6",
+        "tsx": "^4.21.0"
+    },
+    "devDependencies": {
+        "@btc-vision/assemblyscript": "^0.29.3",
+        "@btc-vision/opnet-transform": "^1.2.2"
+    }
+}
