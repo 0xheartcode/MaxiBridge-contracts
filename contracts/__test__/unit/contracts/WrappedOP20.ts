@@ -37,6 +37,33 @@ export class WrappedOP20 extends OP20 {
         ABIDataTypes.BOOL,
     );
 
+    // ─── OP20S (peg oracle) selectors ───────────────────────────────────────
+    // Note: base-class methods are declared with @method() (no inputs) so the
+    // selector uses empty parens, matching the Solidity-style convention.
+    private readonly pegRateSelector: number = encodeNumericSelector('pegRate()');
+    private readonly pegAuthoritySelector: number = encodeNumericSelector('pegAuthority()');
+    private readonly pegUpdatedAtSelector: number = encodeNumericSelector('pegUpdatedAt()');
+    private readonly maxStalenessSelector: number = encodeNumericSelector('maxStaleness()');
+    private readonly isStaleSelector: number = encodeNumericSelector('isStale()');
+    private readonly updatePegRateSelector: number = encodeSelectorWithParams(
+        'updatePegRate',
+        ABIDataTypes.UINT256,
+    );
+    private readonly updateMaxStalenessSelector: number = encodeSelectorWithParams(
+        'updateMaxStaleness',
+        ABIDataTypes.UINT64,
+    );
+    private readonly transferPegAuthoritySelector: number = encodeSelectorWithParams(
+        'transferPegAuthority',
+        ABIDataTypes.ADDRESS,
+    );
+    private readonly acceptPegAuthoritySelector: number = encodeNumericSelector(
+        'acceptPegAuthority()',
+    );
+    private readonly renouncePegAuthoritySelector: number = encodeNumericSelector(
+        'renouncePegAuthority()',
+    );
+
     constructor(details: ContractDetails) {
         super(details);
     }
@@ -126,6 +153,76 @@ export class WrappedOP20 extends OP20 {
         const w = new BinaryWriter();
         w.writeSelector(this.setPausedSelector);
         w.writeBoolean(paused);
+        await this.getResponse(w.getBuffer());
+    }
+
+    // ─── OP20S peg methods ──────────────────────────────────────────────────
+
+    public async pegRate(): Promise<bigint> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.pegRateSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readU256();
+    }
+
+    public async pegAuthority(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.pegAuthoritySelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
+    }
+
+    public async pegUpdatedAt(): Promise<bigint> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.pegUpdatedAtSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readU64();
+    }
+
+    public async maxStaleness(): Promise<bigint> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.maxStalenessSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readU64();
+    }
+
+    public async isStale(): Promise<boolean> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.isStaleSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readBoolean();
+    }
+
+    public async updatePegRate(newRate: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.updatePegRateSelector);
+        w.writeU256(newRate);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async updateMaxStaleness(newStaleness: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.updateMaxStalenessSelector);
+        w.writeU64(newStaleness);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async transferPegAuthority(newAuthority: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.transferPegAuthoritySelector);
+        w.writeAddress(newAuthority);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async acceptPegAuthority(): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.acceptPegAuthoritySelector);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async renouncePegAuthority(): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.renouncePegAuthoritySelector);
         await this.getResponse(w.getBuffer());
     }
 

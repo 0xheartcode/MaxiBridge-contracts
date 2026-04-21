@@ -68,9 +68,16 @@ await opnet('WrappedOP20 — deployment + mint gate', async (vm: OPNetUnit) => {
         Blockchain.dispose();
     });
 
-    await vm.it('fresh deploy reports storageVersion=1 and governor=deployer', async () => {
-        Assert.expect(await token.storageVersion()).toEqual(1n);
+    await vm.it('fresh deploy reports storageVersion=2 and governor=deployer', async () => {
+        Assert.expect(await token.storageVersion()).toEqual(2n);
         Assert.expect((await token.governor()).equals(deployer)).toEqual(true);
+    });
+
+    await vm.it('fresh deploy initializes OP20S peg: rate=1e8, authority=deployer, not stale', async () => {
+        Assert.expect(await token.pegRate()).toEqual(100_000_000n);
+        Assert.expect((await token.pegAuthority()).equals(deployer)).toEqual(true);
+        Assert.expect(await token.maxStaleness()).toEqual(1008n);
+        Assert.expect(await token.isStale()).toEqual(false);
     });
 
     await vm.it('mintTo reverts when bridge not set', async () => {
@@ -319,5 +326,105 @@ await opnet('WrappedOP20 — Fix #6: burnForRelease pause gate', async (vm: OPNe
         setSender(bridgeAddr);
         await token.mintTo(alice, 100n);
         Assert.expect(await token.balanceOf(alice)).toEqual(1_100n);
+    });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. OP20S peg oracle — rate updates, authority transfer, staleness
+// ─────────────────────────────────────────────────────────────────────────────
+
+await opnet('WrappedOP20 — OP20S peg oracle', async (vm: OPNetUnit) => {
+    let token: WrappedOP20;
+
+    vm.beforeEach(async () => {
+        Blockchain.dispose();
+        Blockchain.clearContracts();
+        await Blockchain.init();
+        setSender(deployer);
+        token = await makeWrapped();
+    });
+
+    vm.afterEach(() => {
+        token.dispose();
+        Blockchain.dispose();
+    });
+
+    await vm.it('only peg authority can updatePegRate', async () => {
+        setSender(alice);
+        await Assert.expect(async () => {
+            await token.updatePegRate(200_000_000n);
+        }).toThrow();
+
+        setSender(deployer);
+        await token.updatePegRate(200_000_000n);
+        Assert.expect(await token.pegRate()).toEqual(200_000_000n);
+    });
+
+    await vm.it('updatePegRate rejects zero rate', async () => {
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await token.updatePegRate(0n);
+        }).toThrow();
+    });
+
+    await vm.it('updateMaxStaleness is authority-gated and zero-rejected', async () => {
+        setSender(alice);
+        await Assert.expect(async () => {
+            await token.updateMaxStaleness(500n);
+        }).toThrow();
+
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await token.updateMaxStaleness(0n);
+        }).toThrow();
+
+        setSender(deployer);
+        await token.updateMaxStaleness(500n);
+        Assert.expect(await token.maxStaleness()).toEqual(500n);
+    });
+
+    await vm.it('transferPegAuthority requires acceptance by the pending authority', async () => {
+        setSender(deployer);
+        await token.transferPegAuthority(alice);
+
+        // Bob (not pending) cannot accept.
+        setSender(bob);
+        await Assert.expect(async () => {
+            await token.acceptPegAuthority();
+        }).toThrow();
+
+        // Alice (pending) accepts — authority rotates.
+        setSender(alice);
+        await token.acceptPegAuthority();
+        Assert.expect((await token.pegAuthority()).equals(alice)).toEqual(true);
+
+        // Old authority (deployer) can no longer update the rate.
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await token.updatePegRate(300_000_000n);
+        }).toThrow();
+
+        // New authority (alice) can.
+        setSender(alice);
+        await token.updatePegRate(300_000_000n);
+        Assert.expect(await token.pegRate()).toEqual(300_000_000n);
+    });
+
+    await vm.it('transferPegAuthority rejects zero address', async () => {
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await token.transferPegAuthority(Address.zero());
+        }).toThrow();
+    });
+
+    await vm.it('renouncePegAuthority clears the authority permanently', async () => {
+        setSender(deployer);
+        await token.renouncePegAuthority();
+
+        // Nobody can call authority-gated methods now.
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await token.updatePegRate(400_000_000n);
+        }).toThrow();
     });
 });

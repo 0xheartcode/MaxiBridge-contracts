@@ -4,8 +4,8 @@ import {
     Blockchain,
     BytesWriter,
     Calldata,
-    OP20,
     OP20InitParameters,
+    OP20S,
     SafeMath,
 } from '@btc-vision/btc-runtime/runtime';
 import { StoredAddress } from '@btc-vision/btc-runtime/runtime/storage/StoredAddress';
@@ -28,6 +28,12 @@ import {
  *
  * Deployed twice (wUSDC and wUSDT). 6 decimals to match USDC/USDT.
  *
+ * Extends OP20S so MotoSwap's stablecoin pools can read a 1:1 USD peg rate
+ * (`pegRate()` = 1e8). Peg authority = governor (same deployer) and must
+ * heartbeat `updatePegRate` within `maxStaleness` blocks (default 1008 ≈ 7d).
+ * Bridge redemptions are NOT gated on peg freshness — voucher correctness is
+ * orthogonal to the oracle.
+ *
  * Mint is gated: only `_bridgeDepository` can call `mintTo`. The depository
  * in turn only mints when a valid ML-DSA voucher was produced by the
  * current-epoch bridge signer.
@@ -42,7 +48,7 @@ import {
  * "Five Upgrade Commandments".
  */
 @final
-export class WrappedOP20 extends OP20 {
+export class WrappedOP20 extends OP20S {
     // ─── STORAGE VERSION — MUST BE FIRST FIELD (append-only invariant) ──
     private _storageVersion: StoredU256 = new StoredU256(
         Blockchain.nextPointer,
@@ -76,31 +82,54 @@ export class WrappedOP20 extends OP20 {
     public override onDeployment(calldata: Calldata): void {
         super.onDeployment(calldata);
 
-        // Accept token metadata from calldata so the same bytecode deploys
-        // both wUSDC and wUSDT. Regtest may send an empty calldata on first
-        // deployment — in that case fall back to a generic placeholder and
-        // let the deployer overwrite name/symbol later if needed.
+        // Accept token metadata + peg config from calldata so the same
+        // bytecode deploys both wUSDC and wUSDT. Regtest may send empty
+        // calldata on first deployment — in that case fall back to a generic
+        // placeholder + 1:1 peg defaults.
+        //
+        // Layout:
+        //   name           stringU32
+        //   symbol         stringU32
+        //   decimals       u8
+        //   maxSupply      u256
+        //   initialPegRate u256    (OP20S — 1:1 USD = 1e8)
+        //   maxStaleness   u64     (OP20S — blocks before isStale())
+        //
+        // Peg authority is ALWAYS the deployer (also governor). Rotate later
+        // via transferPegAuthority + acceptPegAuthority if needed.
         let maxSupply: u256 = u256.fromString('1000000000000000000000000'); // 1e24 (soft cap, per-asset)
         let decimals: u8 = 6;
         let name: string = 'Wrapped Bridge Token';
         let symbol: string = 'wBRIDGE';
+        let initialPegRate: u256 = u256.fromU64(100_000_000); // 1:1 USD, 8 decimals
+        let maxStaleness: u64 = 1008; // ~7 days of Bitcoin blocks
 
         if (calldata.byteLength >= 2) {
-            // Layout: name (stringU32) || symbol (stringU32) || decimals (u8) || maxSupply (u256)
             name = calldata.readStringWithLength();
             symbol = calldata.readStringWithLength();
             decimals = calldata.readU8();
             maxSupply = calldata.readU256();
+            // Peg params are optional in calldata for backward compat with
+            // older deploy scripts — if the buffer is exhausted we keep the
+            // defaults above.
+            if (calldata.byteLength - calldata.getOffset() >= 32) {
+                initialPegRate = calldata.readU256();
+            }
+            if (calldata.byteLength - calldata.getOffset() >= 8) {
+                maxStaleness = calldata.readU64();
+            }
         }
 
         this.instantiate(new OP20InitParameters(maxSupply, decimals, name, symbol));
 
-        // Deployer is the initial governor. They can re-point the bridge
-        // depository and transfer governance later.
+        // Deployer is the initial governor AND the initial peg authority.
+        // They can re-point the bridge depository, transfer governance, and
+        // transfer/renounce peg authority later.
         this._governor.value = Blockchain.tx.sender;
+        this.initializePeg(Blockchain.tx.sender, initialPegRate, maxStaleness);
 
-        // Storage version 1 for fresh v1 deployments.
-        this._storageVersion.value = u256.One;
+        // Storage version 2 for fresh v2 (OP20S) deployments.
+        this._storageVersion.value = u256.fromU32(2);
     }
 
     public override onUpdate(calldata: Calldata): void {
