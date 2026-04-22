@@ -280,6 +280,69 @@ ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32
 
 ---
 
+## 6b. Two-wallet key model — NEVER MIX (CRITICAL)
+
+The bridge operates with **two distinct OPNet wallets**, and confusing them
+on-chain bricks every voucher:
+
+| Role | Env vars | What it signs | Authority |
+|------|---------|---------------|-----------|
+| **Deployer / Governor** | `OPNET_DEPLOYER_WIF` / `OPNET_DEPLOYER_MLDSA` | The Bitcoin tx that carries OPNet calldata (deploy, wire, rotateSigner, pause/unpause). Its identity is `msg.sender` inside the contract, which `onlyGovernor` methods check against. | `BridgeDepository._governor` |
+| **Voucher signer** | `MLDSA_SIGNER_WIF` / `MLDSA_SIGNER_KEY` | 460-byte ML-DSA voucher preimages (off-chain). Its **pubkey hash** is stored at `BridgeDepository._bridgeSigners[epoch]`. The contract verifies every claim's ML-DSA blob against this hash. | Registered at epoch via `setInitialSigner` / `rotateSigner` |
+
+### The failure mode we already hit on mainnet
+
+A one-off script called `setInitialSigner(wallet.mldsaKeypair.publicKey)`
+where `wallet` was built from the DEPLOYER env vars. On-chain hash became
+`sha256(DEPLOYER_pubkey)`. The server signs vouchers with the SIGNER wallet
+(correctly — it reads `MLDSA_SIGNER_*`), so every voucher carried a pubkey
+blob whose hash didn't match the stored slot. Contract reverted with
+`rogue signer pubkey`. Fix required a `rotateSigner` tx (epoch bump).
+
+### Rules
+
+- **The pubkey passed to `setInitialSigner` / `rotateSigner` MUST be the
+  `MLDSA_SIGNER_*` wallet's pubkey, never the DEPLOYER's.** `wire-contracts.ts`
+  gets this right by explicitly constructing a second `Wallet.fromWif` from
+  `MLDSA_SIGNER_WIF` + `MLDSA_SIGNER_KEY` just for the pubkey — do not refactor
+  it to reuse `createOpnetContext().wallet`.
+- **The Bitcoin tx carrying that call IS signed by the DEPLOYER keypair**
+  (it's the governor). That's correct — do not swap it.
+- Any one-off / ops script that touches the signer slot MUST use the same
+  two-wallet pattern. If you need a quick `tmp-*.mts`, build both wallets
+  explicitly; don't shortcut through `createOpnetContext()` defaults.
+- Pre-flight check before rotating: compute `sha256(SIGNER.pubkey)` locally
+  and compare to what the server reports at `/api/stats/public →
+  opnetSignerHash`. If they differ, you're about to brick the chain. Abort.
+
+### Quick pubkey-derivation snippet (put in ops scripts, never in tmp files)
+
+```typescript
+import { Wallet } from '@btc-vision/transaction';
+import { requireEnv } from '../lib/env.js';
+import { getOpnetNetwork } from '../lib/opnet-client.js';
+
+const signerWallet = Wallet.fromWif(
+    requireEnv('MLDSA_SIGNER_WIF'),
+    requireEnv('MLDSA_SIGNER_KEY'),
+    getOpnetNetwork(),
+);
+const signerPubKey = signerWallet.mldsaKeypair.publicKey; // 1312 B
+```
+
+### Upgrading SIGNER keys
+
+Rotating the signer off a compromised or lost key:
+1. `MLDSA_SIGNER_*` → new mainnet WIF + MLDSA hex in `.env` **and** Railway.
+2. `npm run rotate:opnet -- 0x<new_signer_pubkey_hex>` from the deployer
+   session (pubkey hex derived from the SNIPPET above).
+3. Server re-signs every `voucher_ready` row with the new epoch — do it in
+   a single DB transaction from the admin endpoint, per §6.
+4. Verify `signerHashAtEpoch(newEpoch) == sha256(newPubkey)` matches
+   `/api/stats/public → opnetSignerHash` before touching anything else.
+
+---
+
 ## 7. ML-DSA signature blob format (CRITICAL)
 
 The `mldsaSig` arg passed to `claimMintWithVoucher(voucher, mldsaSig)` is **NOT** a raw ML-DSA signature. It is a prefix-packed blob so the contract can recover which signer pubkey produced the sig and verify the pubkey is the currently-allowed signer for the voucher's epoch:
