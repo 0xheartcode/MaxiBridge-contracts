@@ -74,7 +74,7 @@ EVM → OPNet (deposit)                    OPNet → EVM (withdraw)
 ├── Dockerfile                # multi-stage: builds all three + single runtime container
 ├── railway.toml              # BitBrace workspace volume mount
 │
-├── evm-contracts/            # Solidity + Foundry (UUPS BridgeEscrow)
+├── contracts/evm-contracts/            # Solidity + Foundry (UUPS BridgeEscrow)
 │   ├── src/BridgeEscrow.sol
 │   ├── test/                 # 46/46 passing (+ fork tests behind SEPOLIA_RPC_URL)
 │   ├── script/Deploy.s.sol
@@ -82,7 +82,7 @@ EVM → OPNet (deposit)                    OPNet → EVM (withdraw)
 │   ├── storage-layout.json   # COMMITTED snapshot — CI diff gate for upgrades
 │   └── foundry.toml          # extra_output = ["storageLayout"]
 │
-├── contracts/                # OPNet AssemblyScript
+├── contracts/op-contracts/                # OPNet AssemblyScript
 │   ├── src/
 │   │   ├── wrapped/WrappedOP20.ts
 │   │   ├── wrapped/events.ts
@@ -366,7 +366,7 @@ Contract verification flow:
 6. Extract `rawSig = blob[4+pubLen : end]`
 7. Verify `Blockchain.verifyMLDSASignature(LEVEL2, signerPubKey, rawSig, sha256(voucher))`
 
-Server MUST pack in exactly this order. Frontend passes the blob through unchanged. Reference: `bridge/contracts/__test__/unit/tests/bridge.ts:packSigBlob`.
+Server MUST pack in exactly this order. Frontend passes the blob through unchanged. Reference: `bridge/contracts/op-contracts/__test__/unit/tests/bridge.ts:packSigBlob`.
 
 ---
 
@@ -451,7 +451,7 @@ Server scanner parses `netAmount` at offset 196, `voucherId` at offset 228. **Of
 
 ## 9. Package versions (SACRED — never guess)
 
-### OPNet contracts (`contracts/package.json`)
+### OPNet contracts (`contracts/op-contracts/package.json`)
 - `@btc-vision/btc-runtime` `^1.11.0`
 - `@btc-vision/as-bignum` `^1.0.0`
 - `@btc-vision/assemblyscript` `^0.29.3`
@@ -514,7 +514,7 @@ Server scanner parses `netAmount` at offset 196, `voucherId` at offset 228. **Of
   - `_authorizeUpgrade` onlyOwner
   - No `selfdestruct`, no arbitrary `delegatecall`
   - `uint256[49] private __gap` trailing the storage layout (was 50; shrunk 1 when `expectedOpnetChainId` was appended)
-  - Storage-layout CI gate via `evm-contracts/storage-layout.json`
+  - Storage-layout CI gate via `contracts/evm-contracts/storage-layout.json`
   - Foundry `extra_output = ["storageLayout"]`
 - Recipient `to` in signed struct — anyone may submit, only `to` receives (front-run safe)
 - `ReentrancyGuardUpgradeable` + CEI on `lock`/`claim`/`emergencyWithdraw`

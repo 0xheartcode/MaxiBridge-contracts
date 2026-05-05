@@ -162,4 +162,4 @@ Both OPNet contracts implement the upgrade commandments from `CLAUDE.md`: append
 
 ---
 
-*For implementation specifics: contracts in `contracts/` and `evm-contracts/`; server in `server/`; frontend in `frontend/`. For ops procedures: `docs/RUNBOOK.md`.*
+*For implementation specifics: contracts in `contracts/op-contracts/` and `contracts/evm-contracts/`; server in `server/`; frontend in `frontend/`. For ops procedures: `docs/RUNBOOK.md`.*

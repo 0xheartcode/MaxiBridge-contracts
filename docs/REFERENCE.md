@@ -58,8 +58,8 @@ Exact order matters — OPNet contracts reference each other.
 
 # 2. Build everything first so WASMs + artifacts exist
 cd bridge
-npm run build:contracts         # contracts/build/*.wasm
-npm run build:evm               # evm-contracts/out/
+npm run build:contracts         # contracts/op-contracts/build/*.wasm
+npm run build:evm               # contracts/evm-contracts/out/
 
 # 3. Deploy
 cd scripts
@@ -111,7 +111,7 @@ Without it, the script polls every 30s for up to 30 min per contract. That's ~1h
 #    new storage goes BEFORE __gap and __gap shrinks by same amount).
 
 # 2. Rebuild + test
-cd evm-contracts
+cd contracts/evm-contracts
 forge build && forge test
 
 # 3. Refresh committed storage-layout snapshot (ONLY if your changes touch
@@ -140,7 +140,7 @@ npm run upgrade:evm -- BridgeEscrow
 # - Updates addresses.json
 
 # 5. Refresh committed snapshot to match new state for future upgrades:
-cd ../evm-contracts
+cd ../contracts/evm-contracts
 python3 -c "..."   # same block as step 3
 ```
 
@@ -199,7 +199,7 @@ Without it, `forge inspect` returns "Could not get storage layout" and the layou
 - Mixing them silently produces plain BTC transfers instead of contract calls. This is the #1 OPNet workspace bug.
 
 ### Cross-package `opnet` type narrowing
-When ABIs are generated under `contracts/abis/` (with the contracts' version of `opnet` types) and imported into `scripts/` (with its own version of `opnet`), TS enum members don't line up. Cast to `any` at the import boundary (per workspace CLAUDE.md "Cross-package type mismatch" guidance).
+When ABIs are generated under `contracts/op-contracts/abis/` (with the contracts' version of `opnet` types) and imported into `scripts/` (with its own version of `opnet`), TS enum members don't line up. Cast to `any` at the import boundary (per workspace CLAUDE.md "Cross-package type mismatch" guidance).
 
 ### Server's `multipart.fieldSize` silently truncates at 4KB
 ML-DSA sigs are ~4840 chars. Default `multipart` silently truncates to 4KB, corrupts the blob, sig verification fails downstream. Set `fieldSize: 64 * 1024` on every multipart body handler.
@@ -243,7 +243,7 @@ Plus scripts-dev's cross-codebase consistency audit which caught **2 BLOCKERs + 
 - ✅ `MintedFromVoucher` parser offsets (server read wrong fields) — consistency audit BLOCKER #2
 
 **Deferred (pre-mainnet-with-real-volume, not blocking current test):**
-- 🟨 **HIGH** Pin `@btc-vision/btc-runtime` package version + commit a full storage layout snapshot including base-class slots (analogous to `evm-contracts/storage-layout.json`) — mitigates drift when the runtime bumps.
+- 🟨 **HIGH** Pin `@btc-vision/btc-runtime` package version + commit a full storage layout snapshot including base-class slots (analogous to `contracts/evm-contracts/storage-layout.json`) — mitigates drift when the runtime bumps.
 - 🟨 **MEDIUM** Replace `unchecked { amountReceived_ = balAfter - balBefore; }` with a `require(balAfter > balBefore)` check. Canonical USDC/USDT are safe; only matters if `setSupportedToken` ever enables a rebasing/receiver-fee token later.
 - 🟨 **MEDIUM** Runbook note: always call `setInitialSigner` immediately after depo deploy (already done this run).
 - 🟨 **LOW** `setSupportedToken(disabled)` blocks in-flight signed claims for that token — emergency kill switch, intentional; document.
@@ -268,7 +268,7 @@ Full Mainnet Pre-Launch Checklist lives at the bottom of the plan file.
 | Suite | Count | Command | Harness |
 |-------|-------|---------|---------|
 | EVM Foundry unit + fork | 46 | `forge test` | forge-std |
-| OPNet contracts | 41 | `npm test` in `contracts/` | `@btc-vision/unit-test-framework` |
+| OPNet contracts | 41 | `npm test` in `contracts/op-contracts/` | `@btc-vision/unit-test-framework` |
 | Server (core) | 30 | `npm test` in `server/` | `node --test` |
 | Server (monitoring) | 15 | same suite | same |
 | Frontend smoke | 6 | `npm test` in `frontend/` | vitest |
@@ -325,7 +325,7 @@ CI workflows in `.github/workflows/` run per-subdir on path filters.
 - OPNet indexer: `/Users/dippy/Documents/code/opnet/utxobot/src/indexer/{scanner,state,provider}.ts`
 - OPWallet connect + two-key: `/Users/dippy/Documents/code/opnet/slohmV2/frontend/src/hooks/{useWallet,useMLDSAIdentity}.ts`
 - Admin auth (session + bcrypt): `/Users/dippy/Documents/code/opnet/slohmV2/server/src/routes/auth.ts`
-- OP20 base template: `/Users/dippy/Documents/code/opnet/tokens/contracts/contracts/src/dippy/DippyToken.ts`
+- OP20 base template: `/Users/dippy/Documents/code/opnet/tokens/contracts/src/dippy/DippyToken.ts`
 - ECDSA claim pattern (EVM inspiration, NOT code to copy): `/Users/dippy/Documents/code/barkbridgeback/`
 
 ### Project docs
