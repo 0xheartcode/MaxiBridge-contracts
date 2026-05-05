@@ -18,6 +18,21 @@ export const WrappedOP20Events = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'AuthorityAddressSet',
+        values: [{ name: 'authority', type: ABIDataTypes.ADDRESS }],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'MinterGranted',
+        values: [{ name: 'minter', type: ABIDataTypes.ADDRESS }],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'MinterRevoked',
+        values: [{ name: 'minter', type: ABIDataTypes.ADDRESS }],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'Paused',
         values: [],
         type: BitcoinAbiTypes.Event,
@@ -61,6 +76,38 @@ export const WrappedOP20Abi = [
         name: 'setGovernor',
         inputs: [{ name: 'newGovernor', type: ABIDataTypes.ADDRESS }],
         outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setAuthorityAddress',
+        inputs: [{ name: 'authority', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'grantMinter',
+        inputs: [{ name: 'minter', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'revokeMinter',
+        inputs: [{ name: 'minter', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'isMinter',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'authorized', type: ABIDataTypes.BOOL }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'authorityAddress',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'authority', type: ABIDataTypes.ADDRESS }],
         type: BitcoinAbiTypes.Function,
     },
     {

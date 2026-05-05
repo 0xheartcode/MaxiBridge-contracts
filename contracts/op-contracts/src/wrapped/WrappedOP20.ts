@@ -11,13 +11,18 @@ import {
 import { StoredAddress } from '@btc-vision/btc-runtime/runtime/storage/StoredAddress';
 import { StoredU256 } from '@btc-vision/btc-runtime/runtime/storage/StoredU256';
 import { StoredBoolean } from '@btc-vision/btc-runtime/runtime/storage/StoredBoolean';
+import { StoredMapU256 } from '@btc-vision/btc-runtime/runtime/storage/maps/StoredMapU256';
 import { Revert } from '@btc-vision/btc-runtime/runtime/types/Revert';
 import { EMPTY_POINTER } from '@btc-vision/btc-runtime/runtime/math/bytes';
 import { ADDRESS_BYTE_LENGTH } from '@btc-vision/btc-runtime/runtime/utils';
+import { sha256 } from '@btc-vision/btc-runtime/runtime/env/global';
 import { UpdatablePlugin } from '@btc-vision/btc-runtime/runtime/plugins/UpdatablePlugin';
 import {
+    AuthorityAddressSet,
     BridgeDepositoryUpdated,
     GovernorUpdated,
+    MinterGranted,
+    MinterRevoked,
     BurnedForRelease,
     Paused,
     Unpaused,
@@ -65,8 +70,21 @@ export class WrappedOP20 extends OP20S {
     // ─── Pause flag (Fix #6 — governor can halt burnForRelease so incident
     //     response can stop new EVM release liabilities from accruing while
     //     BridgeDepository is also paused) ───────────────────────────────
-    // Declared last to preserve append-only storage discipline.
     private _paused: StoredBoolean = new StoredBoolean(Blockchain.nextPointer, false);
+
+    // ─── Minter role separation ──────────────────────────────────────────
+    // Phase 1.2 — replaces the single-bridge `onlyBridge()` gate with a
+    // per-address minter set so BridgeAuthority can grant/revoke mint
+    // authority without re-pointing `_bridgeDepository`. The legacy
+    // `_bridgeDepository` slot is preserved as an IMPLICIT minter for
+    // backward compat — anything wired via `setBridgeDepository` retains
+    // mint authority without an explicit `grantMinter` call.
+    //
+    // _minters: sha256(addr) → u256.One when authorized.
+    private _minters: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    // BridgeAuthority address allowed to grant/revoke minters in addition
+    // to the governor. Set via `setAuthorityAddress`. Zero by default.
+    private _authorityAddress: StoredAddress = new StoredAddress(Blockchain.nextPointer);
 
     public constructor() {
         super();
@@ -162,14 +180,42 @@ export class WrappedOP20 extends OP20S {
         }
     }
 
-    private onlyBridge(): void {
+    /**
+     * Phase 1.2 — `mintTo` access gate. Accepts:
+     *   - the legacy `_bridgeDepository` (backward compat — anything wired
+     *     via `setBridgeDepository` retains mint authority without an
+     *     explicit `grantMinter` call);
+     *   - any address explicitly added to `_minters` via `grantMinter`.
+     *
+     * The governor is NOT a minter by default — minting is a privileged
+     * operation that the governor delegates to the BridgeDepository (and
+     * any future depository the BridgeAuthority hands a minter role to)
+     * but does not perform itself.
+     */
+    private onlyMinter(): void {
+        const sender = Blockchain.tx.sender;
+
+        // Legacy bridge fallback.
         const bridge = this._bridgeDepository.value;
-        if (bridge.isZero()) {
-            throw new Revert('WrappedOP20: bridge not set');
-        }
-        if (!Blockchain.tx.sender.equals(bridge)) {
-            throw new Revert('WrappedOP20: not bridge');
-        }
+        if (!bridge.isZero() && sender.equals(bridge)) return;
+
+        // Explicit minter set.
+        if (!this._minters.get(_minterKey(sender)).isZero()) return;
+
+        throw new Revert('WrappedOP20: not minter');
+    }
+
+    /**
+     * Either the governor OR the registered BridgeAuthority may grant /
+     * revoke minters. Helper centralises the check.
+     */
+    private onlyGovernorOrAuthority(): void {
+        const sender = Blockchain.tx.sender;
+        const gov = this._governor.value;
+        if (!gov.isZero() && sender.equals(gov)) return;
+        const auth = this._authorityAddress.value;
+        if (!auth.isZero() && sender.equals(auth)) return;
+        throw new Revert('WrappedOP20: not governor or authority');
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -205,6 +251,64 @@ export class WrappedOP20 extends OP20S {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    //  Phase 1.2 — minter role + authority address
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @method({ name: 'authority', type: ABIDataTypes.ADDRESS })
+    @emit('AuthorityAddressSet')
+    public setAuthorityAddress(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const newAuth: Address = calldata.readAddress();
+        this._authorityAddress.value = newAuth;
+        this.emitEvent(new AuthorityAddressSet(newAuth));
+        return new BytesWriter(0);
+    }
+
+    @method({ name: 'minter', type: ABIDataTypes.ADDRESS })
+    @emit('MinterGranted')
+    public grantMinter(calldata: Calldata): BytesWriter {
+        this.onlyGovernorOrAuthority();
+        const minter: Address = calldata.readAddress();
+        if (minter.isZero()) {
+            throw new Revert('WrappedOP20: zero minter');
+        }
+        this._minters.set(_minterKey(minter), u256.One);
+        this.emitEvent(new MinterGranted(minter));
+        return new BytesWriter(0);
+    }
+
+    @method({ name: 'minter', type: ABIDataTypes.ADDRESS })
+    @emit('MinterRevoked')
+    public revokeMinter(calldata: Calldata): BytesWriter {
+        this.onlyGovernorOrAuthority();
+        const minter: Address = calldata.readAddress();
+        this._minters.set(_minterKey(minter), u256.Zero);
+        this.emitEvent(new MinterRevoked(minter));
+        return new BytesWriter(0);
+    }
+
+    @view
+    @returns({ name: 'authorized', type: ABIDataTypes.BOOL })
+    public isMinter(calldata: Calldata): BytesWriter {
+        const addr: Address = calldata.readAddress();
+        const r = new BytesWriter(1);
+        // Legacy bridge OR explicit minter set membership.
+        const bridge = this._bridgeDepository.value;
+        const isLegacyBridge = !bridge.isZero() && addr.equals(bridge);
+        const isExplicit = !this._minters.get(_minterKey(addr)).isZero();
+        r.writeBoolean(isLegacyBridge || isExplicit);
+        return r;
+    }
+
+    @view
+    @returns({ name: 'authority', type: ABIDataTypes.ADDRESS })
+    public authorityAddress(_calldata: Calldata): BytesWriter {
+        const r = new BytesWriter(ADDRESS_BYTE_LENGTH);
+        r.writeAddress(this._authorityAddress.value);
+        return r;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     //  Governor: pause (Fix #6 — gate burnForRelease)
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -236,7 +340,7 @@ export class WrappedOP20 extends OP20S {
     )
     @emit('Minted')
     public mintTo(calldata: Calldata): BytesWriter {
-        this.onlyBridge();
+        this.onlyMinter();
         const to: Address = calldata.readAddress();
         const amount: u256 = calldata.readU256();
         if (to.isZero()) {
@@ -369,4 +473,15 @@ export class WrappedOP20 extends OP20S {
         response.writeBoolean(this._paused.value);
         return response;
     }
+}
+
+/**
+ * sha256 hash of a 32-byte address — used as the StoredMapU256 key for
+ * `_minters[addr]`. Module-level so the @final class doesn't have to
+ * carry it as an instance method.
+ */
+function _minterKey(addr: Address): u256 {
+    const buf = new BytesWriter(32);
+    buf.writeAddress(addr);
+    return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
 }

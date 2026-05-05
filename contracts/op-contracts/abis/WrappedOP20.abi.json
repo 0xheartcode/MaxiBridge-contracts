@@ -27,6 +27,71 @@
             "outputs": []
         },
         {
+            "name": "setAuthorityAddress",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "authority",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "grantMinter",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "minter",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "revokeMinter",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "minter",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "isMinter",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "authorized",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
+            "name": "authorityAddress",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "authority",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
             "name": "setPaused",
             "type": "Function",
             "payable": false,
@@ -167,6 +232,36 @@
                 },
                 {
                     "name": "newAddr",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "AuthorityAddressSet",
+            "values": [
+                {
+                    "name": "authority",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "MinterGranted",
+            "values": [
+                {
+                    "name": "minter",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "MinterRevoked",
+            "values": [
+                {
+                    "name": "minter",
                     "type": "ADDRESS"
                 }
             ],

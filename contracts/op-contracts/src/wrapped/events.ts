@@ -66,3 +66,27 @@ export class BurnedForRelease extends NetEvent {
         super('BurnedForRelease', data);
     }
 }
+
+export class MinterGranted extends NetEvent {
+    constructor(minter: Address) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH);
+        data.writeAddress(minter);
+        super('MinterGranted', data);
+    }
+}
+
+export class MinterRevoked extends NetEvent {
+    constructor(minter: Address) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH);
+        data.writeAddress(minter);
+        super('MinterRevoked', data);
+    }
+}
+
+export class AuthorityAddressSet extends NetEvent {
+    constructor(authority: Address) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH);
+        data.writeAddress(authority);
+        super('AuthorityAddressSet', data);
+    }
+}

@@ -428,3 +428,103 @@ await opnet('WrappedOP20 — OP20S peg oracle', async (vm: OPNetUnit) => {
         }).toThrow();
     });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// Phase 1.2 — minter role separation
+// ════════════════════════════════════════════════════════════════════════════
+
+await opnet('WrappedOP20 — Phase 1.2 minter role', async (vm: OPNetUnit) => {
+    let token: WrappedOP20;
+
+    vm.beforeEach(async () => {
+        Blockchain.dispose();
+        Blockchain.clearContracts();
+        await Blockchain.init();
+        setSender(deployer);
+        token = await makeWrapped();
+        // Wire the legacy bridge — it should remain an implicit minter
+        // for backward compat.
+        await token.setBridgeDepository(bridgeAddr);
+    });
+
+    vm.afterEach(() => {
+        token.dispose();
+        Blockchain.dispose();
+    });
+
+    await vm.it('legacy bridge address is implicitly a minter (no grantMinter needed)', async () => {
+        Assert.expect(await token.isMinter(bridgeAddr)).toEqual(true);
+    });
+
+    await vm.it('grantMinter: governor can grant; isMinter() reflects it', async () => {
+        const newMinter = Blockchain.generateRandomAddress();
+        Assert.expect(await token.isMinter(newMinter)).toEqual(false);
+
+        setSender(deployer);
+        await token.grantMinter(newMinter);
+        Assert.expect(await token.isMinter(newMinter)).toEqual(true);
+    });
+
+    await vm.it('grantMinter: non-governor / non-authority reverts', async () => {
+        setSender(alice);
+        await Assert.expect(async () => {
+            await token.grantMinter(bob);
+        }).toThrow();
+    });
+
+    await vm.it('grantMinter: zero address reverts', async () => {
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await token.grantMinter(Address.zero());
+        }).toThrow();
+    });
+
+    await vm.it('mintTo: granted minter can mint (parity with legacy bridge path)', async () => {
+        const newMinter = Blockchain.generateRandomAddress();
+        setSender(deployer);
+        await token.grantMinter(newMinter);
+
+        // The granted minter mints to alice — must succeed.
+        setSender(newMinter);
+        await token.mintTo(alice, 1_000_000n);
+        Assert.expect(await token.balanceOf(alice)).toEqual(1_000_000n);
+    });
+
+    await vm.it('mintTo: legacy bridge still works after the v2 onlyMinter switch', async () => {
+        setSender(bridgeAddr);
+        await token.mintTo(alice, 500_000n);
+        Assert.expect(await token.balanceOf(alice)).toEqual(500_000n);
+    });
+
+    await vm.it('mintTo: non-minter reverts', async () => {
+        setSender(alice); // alice was never granted minter
+        await Assert.expect(async () => {
+            await token.mintTo(bob, 1_000_000n);
+        }).toThrow();
+    });
+
+    await vm.it('revokeMinter: revoked address can no longer mint', async () => {
+        const newMinter = Blockchain.generateRandomAddress();
+        setSender(deployer);
+        await token.grantMinter(newMinter);
+        await token.revokeMinter(newMinter);
+        Assert.expect(await token.isMinter(newMinter)).toEqual(false);
+
+        setSender(newMinter);
+        await Assert.expect(async () => {
+            await token.mintTo(alice, 1n);
+        }).toThrow();
+    });
+
+    await vm.it('setAuthorityAddress: registered authority can grant minters', async () => {
+        // Pretend `bob` is the BridgeAuthority address.
+        setSender(deployer);
+        await token.setAuthorityAddress(bob);
+        Assert.expect((await token.authorityAddress()).equals(bob)).toEqual(true);
+
+        const newMinter = Blockchain.generateRandomAddress();
+        setSender(bob);
+        await token.grantMinter(newMinter);
+        Assert.expect(await token.isMinter(newMinter)).toEqual(true);
+    });
+});

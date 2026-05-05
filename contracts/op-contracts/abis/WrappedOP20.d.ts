@@ -12,6 +12,15 @@ export type GovernorUpdatedEvent = {
     readonly oldAddr: Address;
     readonly newAddr: Address;
 };
+export type AuthorityAddressSetEvent = {
+    readonly authority: Address;
+};
+export type MinterGrantedEvent = {
+    readonly minter: Address;
+};
+export type MinterRevokedEvent = {
+    readonly minter: Address;
+};
 export type PausedEvent = {};
 export type UnpausedEvent = {};
 export type MintedEvent = {
@@ -41,6 +50,41 @@ export type SetBridgeDepository = CallResult<{}, OPNetEvent<BridgeDepositoryUpda
  * @description Represents the result of the setGovernor function call.
  */
 export type SetGovernor = CallResult<{}, OPNetEvent<GovernorUpdatedEvent>[]>;
+
+/**
+ * @description Represents the result of the setAuthorityAddress function call.
+ */
+export type SetAuthorityAddress = CallResult<{}, OPNetEvent<AuthorityAddressSetEvent>[]>;
+
+/**
+ * @description Represents the result of the grantMinter function call.
+ */
+export type GrantMinter = CallResult<{}, OPNetEvent<MinterGrantedEvent>[]>;
+
+/**
+ * @description Represents the result of the revokeMinter function call.
+ */
+export type RevokeMinter = CallResult<{}, OPNetEvent<MinterRevokedEvent>[]>;
+
+/**
+ * @description Represents the result of the isMinter function call.
+ */
+export type IsMinter = CallResult<
+    {
+        authorized: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the authorityAddress function call.
+ */
+export type AuthorityAddress = CallResult<
+    {
+        authority: Address;
+    },
+    OPNetEvent<never>[]
+>;
 
 /**
  * @description Represents the result of the setPaused function call.
@@ -113,6 +157,11 @@ export type Paused = CallResult<
 export interface IWrappedOP20 extends IOP_NETContract {
     setBridgeDepository(newBridge: Address): Promise<SetBridgeDepository>;
     setGovernor(newGovernor: Address): Promise<SetGovernor>;
+    setAuthorityAddress(authority: Address): Promise<SetAuthorityAddress>;
+    grantMinter(minter: Address): Promise<GrantMinter>;
+    revokeMinter(minter: Address): Promise<RevokeMinter>;
+    isMinter(): Promise<IsMinter>;
+    authorityAddress(): Promise<AuthorityAddress>;
     setPaused(paused: boolean): Promise<SetPaused>;
     mintTo(to: Address, amount: bigint): Promise<MintTo>;
     burnForRelease(ethRecipient: Uint8Array, amount: bigint, destChainId: number): Promise<BurnForRelease>;

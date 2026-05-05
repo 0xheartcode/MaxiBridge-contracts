@@ -36,6 +36,20 @@ export class WrappedOP20 extends OP20 {
         'setPaused',
         ABIDataTypes.BOOL,
     );
+    private readonly setAuthorityAddressSelector: number = encodeSelectorWithParams(
+        'setAuthorityAddress',
+        ABIDataTypes.ADDRESS,
+    );
+    private readonly grantMinterSelector: number = encodeSelectorWithParams(
+        'grantMinter',
+        ABIDataTypes.ADDRESS,
+    );
+    private readonly revokeMinterSelector: number = encodeSelectorWithParams(
+        'revokeMinter',
+        ABIDataTypes.ADDRESS,
+    );
+    private readonly isMinterSelector: number = encodeNumericSelector('isMinter()');
+    private readonly authorityAddressSelector: number = encodeNumericSelector('authorityAddress()');
 
     // ─── OP20S (peg oracle) selectors ───────────────────────────────────────
     // Note: base-class methods are declared with @method() (no inputs) so the
@@ -154,6 +168,42 @@ export class WrappedOP20 extends OP20 {
         w.writeSelector(this.setPausedSelector);
         w.writeBoolean(paused);
         await this.getResponse(w.getBuffer());
+    }
+
+    public async setAuthorityAddress(addr: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setAuthorityAddressSelector);
+        w.writeAddress(addr);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async grantMinter(minter: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.grantMinterSelector);
+        w.writeAddress(minter);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async revokeMinter(minter: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.revokeMinterSelector);
+        w.writeAddress(minter);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async isMinter(addr: Address): Promise<boolean> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.isMinterSelector);
+        w.writeAddress(addr);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readBoolean();
+    }
+
+    public async authorityAddress(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.authorityAddressSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
     }
 
     // ─── OP20S peg methods ──────────────────────────────────────────────────
