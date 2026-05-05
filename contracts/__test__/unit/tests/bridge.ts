@@ -978,3 +978,101 @@ await opnet('BridgeDepository — Fix #2: networkId view', async (vm: OPNetUnit)
         Assert.expect(await depository.networkId()).toEqual(VOUCHER_NETWORK_ID);
     });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// 17. Phase 1.6 — voucher cancellation (Tier-3 refund support)
+//
+// `cancelVoucher` mirrors the EVM-side `BridgeEscrow.cancelVoucher`. Once a
+// voucher is cancelled the user can never claim it; the server moves the row
+// to the refund pipeline. Cancellation must be governor-only and idempotent.
+// ════════════════════════════════════════════════════════════════════════════
+
+await opnet('BridgeDepository — Phase 1.6 voucher cancellation', async (vm: OPNetUnit) => {
+    let setup: BridgeSetup;
+
+    vm.beforeEach(async () => {
+        Blockchain.dispose();
+        Blockchain.clearContracts();
+        await Blockchain.init();
+        setSender(deployer);
+        setup = await setupContracts();
+    });
+
+    vm.afterEach(() => disposeSetup(setup));
+
+    await vm.it('cancelVoucher marks a voucherId cancelled (idempotent)', async () => {
+        const { depository } = setup;
+        const voucherId = 0xdeadc0den;
+
+        // Initially not cancelled
+        Assert.expect(await depository.isVoucherCancelled(voucherId)).toEqual(false);
+
+        setSender(deployer);
+        await depository.cancelVoucher(voucherId);
+        Assert.expect(await depository.isVoucherCancelled(voucherId)).toEqual(true);
+
+        // Idempotent — second call must succeed without changing the result.
+        await depository.cancelVoucher(voucherId);
+        Assert.expect(await depository.isVoucherCancelled(voucherId)).toEqual(true);
+    });
+
+    await vm.it('cancelVoucher is governor-only — non-governor reverts', async () => {
+        const { depository } = setup;
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.cancelVoucher(0x1234n);
+        }).toThrow();
+    });
+
+    await vm.it('claimMintWithVoucher rejects a cancelled voucher', async () => {
+        const { depository, signerWallet } = setup;
+        const fields = defaultFields(setup, alice);
+        const { preimage, hash } = buildVoucher(fields);
+        const sig = signVoucher(signerWallet, hash);
+
+        // Governor cancels the voucher BEFORE the user attempts to claim.
+        setSender(deployer);
+        await depository.cancelVoucher(fields.voucherId);
+        Assert.expect(await depository.isVoucherCancelled(fields.voucherId)).toEqual(true);
+
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(preimage, sig);
+        }).toThrow();
+    });
+
+    await vm.it('cancellation does not block other voucherIds', async () => {
+        const { depository, signerWallet, wusdc, wusdcAddress } = setup;
+
+        // Voucher A — cancelled
+        const fieldsA = defaultFields(setup, alice);
+        fieldsA.voucherId = 0x1111111111n;
+        fieldsA.sourceTxHash = 0x1111aaaaaaaaaaaan;
+        const built = buildVoucher(fieldsA);
+        const sigA = signVoucher(signerWallet, built.hash);
+
+        setSender(deployer);
+        await depository.cancelVoucher(fieldsA.voucherId);
+
+        // Voucher B — clean, different voucherId + sourceTxHash, must succeed
+        const fieldsB = defaultFields(setup, bob);
+        fieldsB.voucherId = 0x2222222222n;
+        fieldsB.sourceTxHash = 0x2222bbbbbbbbbbbbn;
+        const builtB = buildVoucher(fieldsB);
+        const sigB = signVoucher(signerWallet, builtB.hash);
+
+        setSender(bob);
+        await depository.claimMintWithVoucher(builtB.preimage, sigB);
+
+        // Sanity — bob got minted, alice's cancelled voucher cannot be claimed.
+        Assert.expect(await wusdc.balanceOf(bob)).toEqual(fieldsB.netAmount);
+
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(built.preimage, sigA);
+        }).toThrow();
+
+        // Touch wusdcAddress to satisfy unused-var lint without changing logic.
+        Assert.expect(wusdcAddress.toString().length > 0).toEqual(true);
+    });
+});

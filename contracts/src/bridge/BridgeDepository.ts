@@ -130,6 +130,13 @@ export class BridgeDepository extends ReentrancyGuard {
     // sha256(sourceTxHash || sourceLogIndex(4B BE)) → u256.One once consumed.
     private _usedSourceEvents: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
+    // ─── Phase 1.6 — voucher cancellation (Tier-3 refund support) ──────
+    // voucherId → u256.One when explicitly cancelled by governor. Mirrors
+    // the EVM `BridgeEscrow.cancelledVouchers` slot. Checked alongside the
+    // standard replay guard in `claimMintWithVoucher`. Append-only — slot
+    // assigned at end of declared storage to preserve upgrade discipline.
+    private _cancelledVouchers: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+
     public constructor() {
         super();
         // AddressMemoryMap MUST be initialized in the constructor body.
@@ -314,6 +321,35 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    //  Governor: voucher cancellation (Phase 1.6 — Tier-3 refund support)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Mark a specific `voucherId` as cancelled so it can never be claimed.
+     * Used in the three-tier refund flow (Tier-3) when an in-flight voucher
+     * needs to be invalidated without rotating the entire signer set.
+     *
+     * Idempotent — calling on an already-cancelled voucher is a no-op.
+     * Mirrors `BridgeEscrow.cancelVoucher(bytes32)` on the EVM side.
+     */
+    @method({ name: 'voucherId', type: ABIDataTypes.UINT256 })
+    public cancelVoucher(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const voucherId: u256 = calldata.readU256();
+        this._cancelledVouchers.set(voucherId, u256.One);
+        return new BytesWriter(0);
+    }
+
+    @view
+    @returns({ name: 'cancelled', type: ABIDataTypes.BOOL })
+    public isVoucherCancelled(calldata: Calldata): BytesWriter {
+        const voucherId: u256 = calldata.readU256();
+        const response = new BytesWriter(1);
+        response.writeBoolean(!this._cancelledVouchers.get(voucherId).isZero());
+        return response;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     //  Governor: pause
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -487,6 +523,13 @@ export class BridgeDepository extends ReentrancyGuard {
         );
         if (!valid) {
             throw new Revert('BridgeDepository: invalid signature');
+        }
+
+        // ── Step 7b: voucher cancellation (Phase 1.6 — Tier-3 refund) ──
+        // Cancellation is checked BEFORE the replay guard so a cancelled
+        // voucher always surfaces a clear, distinct error.
+        if (!this._cancelledVouchers.get(parsed.voucherId).isZero()) {
+            throw new Revert('BridgeDepository: voucher cancelled');
         }
 
         // ── Step 8: voucherId replay guard ──

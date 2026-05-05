@@ -43,6 +43,13 @@ export class BridgeDepository extends ContractRuntime {
     private readonly signerHashAtEpochSelector: number = encodeNumericSelector('signerHashAtEpoch()');
     private readonly isVoucherUsedSelector: number = encodeNumericSelector('isVoucherUsed()');
     private readonly isSourceEventUsedSelector: number = encodeNumericSelector('isSourceEventUsed()');
+    private readonly cancelVoucherSelector: number = encodeSelectorWithParams(
+        'cancelVoucher',
+        ABIDataTypes.UINT256,
+    );
+    private readonly isVoucherCancelledSelector: number = encodeNumericSelector(
+        'isVoucherCancelled()',
+    );
     private readonly storageVersionSelector: number = encodeNumericSelector('storageVersion()');
     private readonly networkIdSelector: number = encodeNumericSelector('networkId()');
 
@@ -165,6 +172,21 @@ export class BridgeDepository extends ContractRuntime {
         w.writeAddress(sourceTokenAddr);
         w.writeU256(sourceTxHash);
         w.writeU32(sourceLogIndex);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readBoolean();
+    }
+
+    public async cancelVoucher(voucherId: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.cancelVoucherSelector);
+        w.writeU256(voucherId);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async isVoucherCancelled(voucherId: bigint): Promise<boolean> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.isVoucherCancelledSelector);
+        w.writeU256(voucherId);
         const r = await this.getResponse(w.getBuffer());
         return r.readBoolean();
     }
