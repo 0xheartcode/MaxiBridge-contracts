@@ -87,6 +87,19 @@ export const BridgeDepositoryAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
+        name: 'cancelVoucher',
+        inputs: [{ name: 'voucherId', type: ABIDataTypes.UINT256 }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'isVoucherCancelled',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'cancelled', type: ABIDataTypes.BOOL }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
         name: 'setPaused',
         inputs: [{ name: 'paused', type: ABIDataTypes.BOOL }],
         outputs: [],

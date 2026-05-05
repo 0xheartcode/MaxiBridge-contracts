@@ -67,6 +67,21 @@ export type RotateSigner = CallResult<{}, OPNetEvent<SignerRotatedEvent>[]>;
 export type SetInitialSigner = CallResult<{}, OPNetEvent<SignerRotatedEvent>[]>;
 
 /**
+ * @description Represents the result of the cancelVoucher function call.
+ */
+export type CancelVoucher = CallResult<{}, OPNetEvent<never>[]>;
+
+/**
+ * @description Represents the result of the isVoucherCancelled function call.
+ */
+export type IsVoucherCancelled = CallResult<
+    {
+        cancelled: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
  * @description Represents the result of the setPaused function call.
  */
 export type SetPaused = CallResult<{}, OPNetEvent<PausedEvent | UnpausedEvent>[]>;
@@ -170,6 +185,8 @@ export interface IBridgeDepository extends IOP_NETContract {
     isWrappedToken(): Promise<IsWrappedToken>;
     rotateSigner(signerPubKey: Uint8Array): Promise<RotateSigner>;
     setInitialSigner(signerPubKey: Uint8Array): Promise<SetInitialSigner>;
+    cancelVoucher(voucherId: bigint): Promise<CancelVoucher>;
+    isVoucherCancelled(): Promise<IsVoucherCancelled>;
     setPaused(paused: boolean): Promise<SetPaused>;
     setGovernor(newGovernor: Address): Promise<SetGovernor>;
     claimMintWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<ClaimMintWithVoucher>;

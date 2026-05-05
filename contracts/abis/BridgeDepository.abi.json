@@ -66,6 +66,32 @@
             "outputs": []
         },
         {
+            "name": "cancelVoucher",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "voucherId",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "isVoucherCancelled",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "cancelled",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
             "name": "setPaused",
             "type": "Function",
             "payable": false,

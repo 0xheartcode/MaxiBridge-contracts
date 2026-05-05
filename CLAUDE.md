@@ -212,8 +212,8 @@ npm run integration:drills             # security drills (replay, rotation, reor
 1. **Chains v1:** Ethereum mainnet + OPNet testnet. Hybrid: real USDC/USDT locked on-chain, wrapped tokens on OPNet testnet for safety during initial testing.
 2. **Wrapped tokens:** unified — one `wUSDC`, one `wUSDT` on OPNet, 1:1 backed, 6 decimals (matches USDC/USDT). Future multi-chain expansion means same wUSDC is backed by all chains' USDC combined (fungibility risk to re-audit when adding BSC/Arb/Base).
 3. **Both sides upgradeable:**
-   - **EVM:** OZ UUPS proxy with full hardening (`_disableInitializers` in impl ctor, `initializer` gated init, `_authorizeUpgrade` onlyOwner, no `selfdestruct`, no arbitrary `delegatecall`, `uint256[49] __gap`, storage-layout CI diff gate).
-   - **OPNet:** `UpdatablePlugin(144 blocks)` registered in every contract ctor; `onUpdate()` runs migrations gated by `_storageVersion: StoredU256`; storage APPEND-ONLY per workspace "Five Upgrade Commandments".
+   - **EVM:** OZ UUPS proxy with full hardening (`_disableInitializers` in impl ctor, `initializer` gated init, `_authorizeUpgrade` onlyOwner, no `selfdestruct`, no arbitrary `delegatecall`, `uint256[43] __gap` post-Phase-1 — was 49 pre-redesign; storage-layout CI diff gate is `astId`-insensitive).
+   - **OPNet:** `UpdatablePlugin(1008 blocks)` (~7 days at 10min/block) registered in every contract ctor — Phase 2.2 raised this from 144 (~24h) to give users a full week to exit before any upgrade lands. `onUpdate()` runs migrations gated by `_storageVersion: StoredU256`; storage APPEND-ONLY per workspace "Five Upgrade Commandments".
 4. **Single root `.env`** at `/Users/dippy/Documents/code/opnet/bridge/.env` shared by server / scripts / contracts. Frontend + admin-panel read it via Vite `envDir: '../'`.
 5. **No protocol limits.** No floor, no daily caps, no per-wallet velocity. Security comes from:
    - AWS KMS signer (Phase 3; hot wallet for v1 dev)
@@ -221,7 +221,11 @@ npm run integration:drills             # security drills (replay, rotation, reor
    - Strong source-event binding in every voucher/sig (chainId + bridgeAddr + tokenAddr + txHash + logIndex)
 6. **No voucher deadlines.** A voucher is valid as long as its `signerEpoch` is the current epoch. Rotating the signer invalidates all unclaimed vouchers from the old epoch instantly; server re-signs honest pending rows with the new epoch.
 7. **Fee:** 0.5% (50 bps), deducted on the source side of each direction. `fee = max(minFee, amount * feeBps / 10_000)`; reject if `fee == 0n` OR `amount <= fee`.
-8. **`emergencyWithdraw` exists on `BridgeEscrow`** (added post-deploy via upgrade #1). `onlyOwner + nonReentrant`; drains any ERC-20 held by the escrow to an arbitrary recipient. For v1 test only; long-term the `owner` role moves to a Safe multisig + timelock.
+8. **`emergencyWithdraw` on `BridgeEscrow`** — Phase 1 hardened. Signature is now `(address token, uint256 amount)`; gated `onlyGuardian + whenPaused + nonReentrant`; drains exclusively to the set-once `treasury` slot. Owner cannot drain unilaterally; the pauser path must be exercised first.
+9. **M-of-N signer set on `BridgeEscrow`** (Phase 1.4). `mapping(address => bool) isSigner` + `signerCount` + `signerThreshold`. `claim()` accepts either a legacy 65-byte single ECDSA sig (1-of-1 mode, backward compat) OR a length-prefixed `[uint8 numSigs][sig_0(65)]…` blob. Distinct-signer enforced; `cancelledVouchers[opnetNonce]` blocks Tier-3 cancelled vouchers. Set-once `treasury` and `guardian` complete the role lattice.
+10. **Voucher cancellation on `BridgeDepository`** (Phase 1.6). `cancelVoucher(uint256)` (governor-only, idempotent) + `_cancelledVouchers` map; `claimMintWithVoucher` rejects cancelled vouchers before the standard replay guard. Mirrors EVM `BridgeEscrow.cancelVoucher(bytes32)`.
+11. **Deterministic CREATE2 deploy** (Phase 2.1). `scripts/src/deploy/evm-deploy-create2.ts` deploys the ERC1967 proxy via the canonical Arachnid factory `0x4e59b44847b379578588920cA78FbF26c0B4956C` with salt `keccak256("opnet-bridge-escrow-v1")`. Same proxy address on every EVM chain.
+12. **Independent watchdog** (Phase 2.3). `bridge-watchdog/` is a separate Node service that polls EVM escrow balances + OPNet wrapped totalSupply directly, raises Slack/Telegram alerts, and can fire `/api/admin/pause` on critical divergence. Hard-clamps crit-bps to `[10, 500]` so a hostile config cannot disable detection.
 
 ---
 
@@ -381,7 +385,26 @@ Server MUST pack in exactly this order. Frontend passes the blob through unchang
 | `networkId` (view) | `networkId()` | `0x63d10908` |
 | `paused` (view) | `paused()` | `0x5c0ff0ee` |
 
-Both `BridgeDepository` and `WrappedOP20` register `UpdatablePlugin(144)` which adds standard upgrade selectors: `submitUpdate(address)`, `applyUpdate(address,bytes)`, `cancelUpdate()`, `pendingUpdate()`, `updateDelay()`. Governor-only.
+**Phase 1/2 additions — EVM `BridgeEscrow` (keccak256 selectors):**
+
+| Method | Signature | Selector |
+|--------|-----------|----------|
+| `cancelVoucher` | `cancelVoucher(bytes32)` | `0x5df2af98` |
+| `setTreasury` | `setTreasury(address)` | `0xf0f44260` |
+| `setGuardian` | `setGuardian(address)` | `0x8a0dac4a` |
+| `addSigner` | `addSigner(address)` | `0xeb12d61e` |
+| `removeSigner` | `removeSigner(address)` | `0x0e316ab7` |
+| `setThreshold` | `setThreshold(uint256)` | `0x960bfe04` |
+| `migrateSignerSet` | `migrateSignerSet(address[],address[],uint256)` | `0x3332b1ff` |
+| `migrateToMofN` | `migrateToMofN()` | `0x709ea1d3` |
+
+**Phase 1 additions — OPNet `BridgeDepository` (sha256 selectors):**
+
+| Method | Signature | Selector |
+|--------|-----------|----------|
+| `cancelVoucher` | `cancelVoucher(uint256)` | `0xdf78268e` |
+
+Both `BridgeDepository` and `WrappedOP20` register `UpdatablePlugin(1008)` (Phase 2.2; was 144 pre-redesign) which adds standard upgrade selectors: `submitUpdate(address)`, `applyUpdate(address,bytes)`, `cancelUpdate()`, `pendingUpdate()`, `updateDelay()`. Governor-only.
 
 **`BridgeDepository.onDeployment` calldata:** pass exactly 32 bytes representing a u256 big-endian `networkId` (`1`=mainnet, `2`=testnet). Stored in `_networkId`; enforced on every voucher. `WrappedOP20.onDeployment` calldata: unchanged from OP20 template `(name, symbol, decimals, maxSupply)`.
 
