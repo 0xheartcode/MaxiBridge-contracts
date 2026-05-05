@@ -75,9 +75,10 @@ contract Create2DeployTest is Test {
         require(deployed != address(0), "create2 reverted");
         assertEq(deployed, predicted, "CREATE2 address must match predict");
 
-        // Sanity — proxy is functional.
+        // Sanity — proxy is functional. v2: no legacy `signer` slot;
+        // initial signer is in the M-of-N set.
         BridgeEscrow proxied = BridgeEscrow(deployed);
-        assertEq(proxied.signer(), signerAddr);
+        assertTrue(proxied.isSigner(signerAddr));
         assertEq(proxied.expectedOpnetChainId(), 2);
         assertEq(proxied.signerThreshold(), 1);
     }

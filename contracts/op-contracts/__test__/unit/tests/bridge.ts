@@ -177,15 +177,41 @@ function buildVoucher(v: VoucherFields): { preimage: Uint8Array; hash: Uint8Arra
 }
 
 /**
- * Wrap a pubkey and raw ML-DSA signature into the sig-blob format the
- * depository expects: [pubLen(u32 BE)][pubkey bytes][raw sig bytes].
+ * Wrap a pubkey and raw ML-DSA signature into the M-of-N sig-blob format
+ * the v2 depository expects:
+ *   [u32 BE numSigs=1]
+ *   [u32 BE pubLen] [pubkey] [u32 BE sigLen] [rawSig]
+ *
+ * For higher M-of-N counts use `packSigBlobMulti(parts)` below.
  */
 function packSigBlob(pubKey: Uint8Array, rawSig: Uint8Array): Uint8Array {
-    const out = new Uint8Array(4 + pubKey.length + rawSig.length);
+    const total = 4 + 4 + pubKey.length + 4 + rawSig.length;
+    const out = new Uint8Array(total);
     const view = new DataView(out.buffer);
-    view.setUint32(0, pubKey.length, false); // big-endian
-    out.set(pubKey, 4);
-    out.set(rawSig, 4 + pubKey.length);
+    view.setUint32(0, 1, false); // numSigs=1
+    view.setUint32(4, pubKey.length, false);
+    out.set(pubKey, 8);
+    view.setUint32(8 + pubKey.length, rawSig.length, false);
+    out.set(rawSig, 12 + pubKey.length);
+    return out;
+}
+
+/**
+ * Multi-sig blob packer for M-of-N=N (N>=1). Used by the M-of-N tests.
+ */
+function packSigBlobMulti(parts: { pubKey: Uint8Array; rawSig: Uint8Array }[]): Uint8Array {
+    let total = 4;
+    for (const p of parts) total += 4 + p.pubKey.length + 4 + p.rawSig.length;
+    const out = new Uint8Array(total);
+    const view = new DataView(out.buffer);
+    view.setUint32(0, parts.length, false);
+    let off = 4;
+    for (const p of parts) {
+        view.setUint32(off, p.pubKey.length, false); off += 4;
+        out.set(p.pubKey, off); off += p.pubKey.length;
+        view.setUint32(off, p.rawSig.length, false); off += 4;
+        out.set(p.rawSig, off); off += p.rawSig.length;
+    }
     return out;
 }
 
@@ -1098,24 +1124,25 @@ await opnet('BridgeDepository — Phase 1.3 M-of-N admin (direct)', async (vm: O
 
     vm.afterEach(() => disposeSetup(setup));
 
-    await vm.it('post-deploy: M-of-N storage starts empty', async () => {
+    await vm.it('post-deploy via setInitialSigner seeds 1-of-1 M-of-N', async () => {
         const { depository } = setup;
-        // Fresh deploy bypasses onUpdate, so the M-of-N set + threshold
-        // both start at zero until the governor seeds them (or until an
-        // upgrade triggers the v1→v2 migration in onUpdate).
-        Assert.expect(await depository.signerCount()).toEqual(0n);
-        Assert.expect(await depository.requiredSignatures()).toEqual(0n);
+        // v2 — setInitialSigner is the bootstrap shim; it seeds the
+        // M-of-N set + threshold = 1 in one call. setupContracts above
+        // already calls it so we observe count=1, threshold=1.
+        Assert.expect(await depository.signerCount()).toEqual(1n);
+        Assert.expect(await depository.requiredSignatures()).toEqual(1n);
     });
 
-    await vm.it('addSignerToSet: governor adds a hash, count + view reflect it', async () => {
+    await vm.it('addSignerToSet: governor adds a hash, count grows from 1 → 2', async () => {
         const { depository } = setup;
         const hash = 0xdeadbeefn;
         Assert.expect(await depository.isSignerAuthorized(hash)).toEqual(false);
+        Assert.expect(await depository.signerCount()).toEqual(1n);
 
         setSender(deployer);
         await depository.addSignerToSet(hash);
         Assert.expect(await depository.isSignerAuthorized(hash)).toEqual(true);
-        Assert.expect(await depository.signerCount()).toEqual(1n);
+        Assert.expect(await depository.signerCount()).toEqual(2n);
     });
 
     await vm.it('addSignerToSet: non-governor reverts', async () => {
@@ -1146,20 +1173,22 @@ await opnet('BridgeDepository — Phase 1.3 M-of-N admin (direct)', async (vm: O
     await vm.it('setRequiredSignatures: bumps epoch + threshold view', async () => {
         const { depository } = setup;
         setSender(deployer);
+        // setupContracts already seeded 1 signer; add two more → count=3.
         await depository.addSignerToSet(0x1n);
         await depository.addSignerToSet(0x2n);
         const epochBefore = await depository.signerEpoch();
-        await depository.setRequiredSignatures(2n);
-        Assert.expect(await depository.requiredSignatures()).toEqual(2n);
+        await depository.setRequiredSignatures(3n);
+        Assert.expect(await depository.requiredSignatures()).toEqual(3n);
         Assert.expect(await depository.signerEpoch()).toEqual(epochBefore + 1n);
     });
 
     await vm.it('setRequiredSignatures: threshold > count reverts', async () => {
         const { depository } = setup;
         setSender(deployer);
+        // setupContracts seeded 1 + add one more → count=2.
         await depository.addSignerToSet(0x1n);
         await Assert.expect(async () => {
-            await depository.setRequiredSignatures(2n); // count is 1
+            await depository.setRequiredSignatures(5n); // count is 2
         }).toThrow();
     });
 
@@ -1175,12 +1204,13 @@ await opnet('BridgeDepository — Phase 1.3 M-of-N admin (direct)', async (vm: O
     await vm.it('removeSignerFromSet: bumps epoch + count', async () => {
         const { depository } = setup;
         setSender(deployer);
+        // setupContracts seeded 1; add two more → count=3, threshold=1.
         await depository.addSignerToSet(0x1n);
         await depository.addSignerToSet(0x2n);
         await depository.setRequiredSignatures(1n);
         const epochBefore = await depository.signerEpoch();
         await depository.removeSignerFromSet(0x2n);
-        Assert.expect(await depository.signerCount()).toEqual(1n);
+        Assert.expect(await depository.signerCount()).toEqual(2n);
         Assert.expect(await depository.isSignerAuthorized(0x2n)).toEqual(false);
         Assert.expect(await depository.signerEpoch()).toEqual(epochBefore + 1n);
     });
@@ -1188,10 +1218,11 @@ await opnet('BridgeDepository — Phase 1.3 M-of-N admin (direct)', async (vm: O
     await vm.it('removeSignerFromSet: would violate threshold reverts', async () => {
         const { depository } = setup;
         setSender(deployer);
+        // setupContracts seeded 1; add two more → count=3, threshold=3.
         await depository.addSignerToSet(0x1n);
         await depository.addSignerToSet(0x2n);
-        await depository.setRequiredSignatures(2n);
-        // Removing either signer would push count below threshold (2 → 1).
+        await depository.setRequiredSignatures(3n);
+        // Removing any signer would push count below threshold (3 → 2).
         await Assert.expect(async () => {
             await depository.removeSignerFromSet(0x1n);
         }).toThrow();

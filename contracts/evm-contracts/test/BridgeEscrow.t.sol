@@ -118,6 +118,9 @@ contract BridgeEscrowTest is Test {
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(verifyingContract), structHash));
     }
 
+    /// @dev v2 — claim() only accepts the M-of-N blob format
+    /// `[uint8 numSigs][sig_0(65)]…`. `_sign` returns a numSigs=1 envelope
+    /// (66 bytes) so every existing test still works without per-call rewrites.
     function _sign(
         uint256 pk,
         BridgeEscrow.ReleaseIntent memory intent,
@@ -125,7 +128,29 @@ contract BridgeEscrowTest is Test {
     ) internal view returns (bytes memory) {
         bytes32 d = _digest(intent, verifyingContract);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, d);
+        bytes memory raw = abi.encodePacked(r, s, v);
+        return abi.encodePacked(uint8(1), raw);
+    }
+
+    /// @dev Raw 65-byte sig (no envelope) — fed into `_packMofN` for M-of-N
+    /// tests that assemble the blob themselves, and used to assert the
+    /// bare-sig path is rejected by the v2 contract.
+    function _signRaw65(
+        uint256 pk,
+        BridgeEscrow.ReleaseIntent memory intent,
+        address verifyingContract
+    ) internal view returns (bytes memory) {
+        bytes32 d = _digest(intent, verifyingContract);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, d);
         return abi.encodePacked(r, s, v);
+    }
+
+    function _signRaw65(uint256 pk, BridgeEscrow.ReleaseIntent memory intent)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return _signRaw65(pk, intent, address(escrow));
     }
 
     function _sign(uint256 pk, BridgeEscrow.ReleaseIntent memory intent)
@@ -376,11 +401,16 @@ contract BridgeEscrowTest is Test {
         BridgeEscrow.ReleaseIntent memory intent = _defaultIntent(address(usdc), bob, 100e6);
         bytes memory sig = _sign(signerPk, intent);
 
-        // rotate
+        // v2 rotation — atomic add+remove via migrateSignerSet (1-of-1 → 1-of-1
+        // with a different key, no intermediate weakening).
         uint256 newPk = 0xDEAFBEEF;
         address newSigner = vm.addr(newPk);
+        address[] memory addList = new address[](1);
+        addList[0] = newSigner;
+        address[] memory removeList = new address[](1);
+        removeList[0] = signerAddr;
         vm.prank(owner);
-        escrow.rotateSigner(newSigner);
+        escrow.migrateSignerSet(addList, removeList, 1);
 
         vm.expectRevert(BridgeEscrow.InvalidSignerEpoch.selector);
         escrow.claim(intent, sig);
@@ -552,20 +582,29 @@ contract BridgeEscrowTest is Test {
     }
 
     function test_Admin_RotateSigner_OnlyOwner() public {
+        // v2 — rotation = atomic migrateSignerSet([new], [old], 1). Each
+        // migrate increments currentEpoch and the new signer must be
+        // authorized in `isSigner`.
+        address[] memory addList = new address[](1);
+        addList[0] = address(0xFEED);
+        address[] memory removeList = new address[](1);
+        removeList[0] = signerAddr;
+
         vm.expectRevert();
-        escrow.rotateSigner(address(0xFEED));
+        escrow.migrateSignerSet(addList, removeList, 1);
 
         uint32 oldEpoch = escrow.currentEpoch();
         vm.prank(owner);
-        escrow.rotateSigner(address(0xFEED));
+        escrow.migrateSignerSet(addList, removeList, 1);
         assertEq(escrow.currentEpoch(), oldEpoch + 1);
-        assertEq(escrow.signer(), address(0xFEED));
+        assertTrue(escrow.isSigner(address(0xFEED)));
+        assertFalse(escrow.isSigner(signerAddr));
     }
 
-    function test_Admin_RotateSigner_ZeroReverts() public {
+    function test_Admin_AddSigner_ZeroReverts() public {
         vm.prank(owner);
         vm.expectRevert(BridgeEscrow.ZeroAddress.selector);
-        escrow.rotateSigner(address(0));
+        escrow.addSigner(address(0));
     }
 
     // =====================================================================
@@ -583,7 +622,7 @@ contract BridgeEscrowTest is Test {
         assertEq(BridgeEscrowV2(address(escrow)).version(), "v2");
         // State preserved
         assertTrue(escrow.supportedToken(address(usdc)));
-        assertEq(escrow.signer(), signerAddr);
+        assertTrue(escrow.isSigner(signerAddr));
     }
 
     function test_Upgrade_DoesNotCorruptState() public {
@@ -900,8 +939,8 @@ contract BridgeEscrowTest is Test {
 
         BridgeEscrow.ReleaseIntent memory intent = _defaultIntent(address(usdc), bob, 100e6);
         bytes[] memory sigs = new bytes[](2);
-        sigs[0] = _sign(signerPk, intent);
-        sigs[1] = _sign(s2pk, intent);
+        sigs[0] = _signRaw65(signerPk, intent);
+        sigs[1] = _signRaw65(s2pk, intent);
         bytes memory blob = _packMofN(sigs);
 
         escrow.claim(intent, blob);
@@ -923,8 +962,8 @@ contract BridgeEscrowTest is Test {
 
         BridgeEscrow.ReleaseIntent memory intent = _defaultIntent(address(usdc), bob, 100e6);
         bytes[] memory sigs = new bytes[](2);
-        sigs[0] = _sign(s2pk, intent);
-        sigs[1] = _sign(s3pk, intent); // s2 + s3 quorum, original signer not used
+        sigs[0] = _signRaw65(s2pk, intent);
+        sigs[1] = _signRaw65(s3pk, intent); // s2 + s3 quorum, original signer not used
         bytes memory blob = _packMofN(sigs);
 
         escrow.claim(intent, blob);
@@ -944,7 +983,7 @@ contract BridgeEscrowTest is Test {
         BridgeEscrow.ReleaseIntent memory intent = _defaultIntent(address(usdc), bob, 100e6);
         // Only 1 sig provided when 2 required.
         bytes[] memory sigs = new bytes[](1);
-        sigs[0] = _sign(signerPk, intent);
+        sigs[0] = _signRaw65(signerPk, intent);
         bytes memory blob = _packMofN(sigs);
 
         vm.expectRevert(BridgeEscrow.InsufficientSignatures.selector);
@@ -964,8 +1003,8 @@ contract BridgeEscrowTest is Test {
         BridgeEscrow.ReleaseIntent memory intent = _defaultIntent(address(usdc), bob, 100e6);
         // Same signer twice — must NOT count as 2 distinct.
         bytes[] memory sigs = new bytes[](2);
-        sigs[0] = _sign(signerPk, intent);
-        sigs[1] = _sign(signerPk, intent);
+        sigs[0] = _signRaw65(signerPk, intent);
+        sigs[1] = _signRaw65(signerPk, intent);
         bytes memory blob = _packMofN(sigs);
 
         vm.expectRevert(BridgeEscrow.DuplicateSigner.selector);
@@ -978,10 +1017,10 @@ contract BridgeEscrowTest is Test {
         uint256 randomPk = 0xDEADBEEF;
         BridgeEscrow.ReleaseIntent memory intent = _defaultIntent(address(usdc), bob, 100e6);
         bytes[] memory sigs = new bytes[](1);
-        sigs[0] = _sign(randomPk, intent);
+        sigs[0] = _signRaw65(randomPk, intent);
         bytes memory blob = _packMofN(sigs);
 
-        vm.expectRevert(BridgeEscrow.NotASigner.selector);
+        vm.expectRevert(BridgeEscrow.InvalidSignature.selector);
         escrow.claim(intent, blob);
     }
 

@@ -340,21 +340,36 @@ export class BridgeDepository extends ReentrancyGuard {
         const newEpoch: u256 = SafeMath.add(oldEpoch, u256.One);
         this._signerEpoch.value = newEpoch;
 
-        const signerHash: u256 = u256.fromUint8ArrayBE(sha256(pubKey));
-        this._bridgeSignerHashes.set(newEpoch, signerHash);
+        const newHash: u256 = u256.fromUint8ArrayBE(sha256(pubKey));
 
-        this.emitEvent(new SignerRotated(oldEpoch.toU32(), newEpoch.toU32(), signerHash));
+        // v2 — also rotate the M-of-N set so the new claim path stays in
+        // sync. This is a 1-of-1 rotation: clear the previous single
+        // signer (if any) from the set, add the new one, keep threshold=1.
+        const oldHash: u256 = this._bridgeSignerHashes.get(oldEpoch);
+        if (!oldHash.isZero() && !this._signerKeyHashSet.get(oldHash).isZero()) {
+            this._signerKeyHashSet.set(oldHash, u256.Zero);
+            // _signerCount stays bounded — decrement only if it was tracking the old hash.
+            if (!this._signerCount.value.isZero()) {
+                this._signerCount.value = SafeMath.sub(this._signerCount.value, u256.One);
+            }
+        }
+        this._signerKeyHashSet.set(newHash, u256.One);
+        this._signerCount.value = SafeMath.add(this._signerCount.value, u256.One);
+        if (this._requiredSignatures.value.isZero()) {
+            this._requiredSignatures.value = u256.One;
+        }
+
+        this._bridgeSignerHashes.set(newEpoch, newHash);
+
+        this.emitEvent(new SignerRotated(oldEpoch.toU32(), newEpoch.toU32(), newHash));
         return new BytesWriter(0);
     }
 
     /**
-     * Set the signer pubkey for the CURRENT epoch. Used at bootstrap time
-     * (right after deployment) when `_signerEpoch` is already 1 but no hash
-     * has been stored yet. Governor-only; overwrites any existing hash for
-     * the current epoch. NOTE: overwriting on an already-active epoch would
-     * effectively accept a DIFFERENT signer with the same epoch tag — use
-     * with care; prefer `rotateSigner` in production so unclaimed vouchers
-     * invalidate.
+     * Set the signer pubkey for the CURRENT epoch (bootstrap shim).
+     * v2: also seeds the M-of-N signer set so the new claim path
+     * authorizes this pubkey. Governor-only; reverts if a signer is
+     * already set for the current epoch.
      */
     @method({ name: 'signerPubKey', type: ABIDataTypes.BYTES })
     @emit('SignerRotated')
@@ -370,6 +385,14 @@ export class BridgeDepository extends ReentrancyGuard {
         }
         const signerHash: u256 = u256.fromUint8ArrayBE(sha256(pubKey));
         this._bridgeSignerHashes.set(epoch, signerHash);
+
+        // v2 — seed the M-of-N set so claim() finds the signer.
+        this._signerKeyHashSet.set(signerHash, u256.One);
+        this._signerCount.value = SafeMath.add(this._signerCount.value, u256.One);
+        if (this._requiredSignatures.value.isZero()) {
+            this._requiredSignatures.value = u256.One;
+        }
+
         this.emitEvent(new SignerRotated(epoch.toU32(), epoch.toU32(), signerHash));
         return new BytesWriter(0);
     }
@@ -667,47 +690,100 @@ export class BridgeDepository extends ReentrancyGuard {
         // no further manual lock is required here. We still order state
         // writes BEFORE the external mintTo call (CEI).
         //
-        // NOTE: The MLDSA runtime call wants the pubkey bytes. We accept
-        // them as part of the signature blob: the caller concatenates
-        // pubkey || sig, or — simpler — passes pubkey separately. Since the
-        // ABI above fixes `mldsaSig` as a single bytes arg, we split by a
-        // length prefix on the pubkey inside the sig blob.
+        // ── M-of-N ML-DSA verification (no-legacy v2) ──
+        // Sig blob layout:
+        //   [u32 BE numSigs]
+        //   for each i in [0, numSigs):
+        //     [u32 BE pubLen_i] [pubKey_i bytes] [u32 BE sigLen_i] [rawSig_i bytes]
         //
-        // Layout of `sig`:
-        //   pubkey (lengthU32 || raw pubkey bytes) || signature (raw bytes to end)
-        //
-        // Fix #4 — enforce the CANONICAL ML-DSA Level-2 blob shape before any
-        // slicing. Reject any non-canonical length outright rather than
-        // letting `pubEnd = 4 + pubLen` silently wrap on a malicious pubLen.
-        if (<u32>sig.length != MLDSA_SIG_BLOB_LEN) {
+        // Each pubKey must be the canonical ML-DSA L2 size (1312) and each
+        // rawSig the canonical sig size (2420). At numSigs=1 the total
+        // blob is 3744 bytes; at numSigs=N it is 4 + N * (8 + 1312 + 2420).
+        // Each signer must be in the authorized set, must not appear twice
+        // in the same blob, and the count of valid recovers must be at
+        // least `_requiredSignatures.value`.
+        if (<u32>sig.length < 4) {
             throw new Revert('BridgeDepository: bad sig blob length');
         }
-        const pubLen: u32 = readU32BE(sig, 0);
-        if (pubLen != MLDSA_LEVEL2_PUBKEY_LEN) {
-            throw new Revert('BridgeDepository: bad pubkey length in sig');
+        const numSigs: u32 = readU32BE(sig, 0);
+        if (numSigs == 0) {
+            throw new Revert('BridgeDepository: zero numSigs');
         }
-        const pubEnd: u32 = u32(4) + pubLen;
-        const pubKey: Uint8Array = slice(sig, 4, pubEnd);
-        const rawSig: Uint8Array = slice(sig, pubEnd, <u32>sig.length);
-
-        const pubHash: u256 = u256.fromUint8ArrayBE(sha256(pubKey));
-        const expectedHash: u256 = this._bridgeSignerHashes.get(currentEpoch);
-        if (expectedHash.isZero()) {
-            throw new Revert('BridgeDepository: no signer for epoch');
-        }
-        if (!u256.eq(pubHash, expectedHash)) {
-            throw new Revert('BridgeDepository: unknown signer pubkey');
+        if (numSigs > 16) {
+            throw new Revert('BridgeDepository: too many sigs');
         }
 
-        const hash: Uint8Array = sha256(voucher);
-        const valid: boolean = Blockchain.verifyMLDSASignature(
-            MLDSASecurityLevel.Level2,
-            pubKey,
-            rawSig,
-            hash,
-        );
-        if (!valid) {
-            throw new Revert('BridgeDepository: invalid signature');
+        const voucherHash: Uint8Array = sha256(voucher);
+        const required: u32 = this._requiredSignatures.value.toU32();
+        if (required == 0) {
+            throw new Revert('BridgeDepository: signer set not initialized');
+        }
+
+        const seen: Array<u256> = new Array<u256>(0);
+        let validCount: u32 = 0;
+        let off: u32 = 4;
+
+        for (let i: u32 = 0; i < numSigs; i++) {
+            if (off + 4 > <u32>sig.length) {
+                throw new Revert('BridgeDepository: truncated pubLen');
+            }
+            const pubLen: u32 = readU32BE(sig, off);
+            off += 4;
+            if (pubLen != MLDSA_LEVEL2_PUBKEY_LEN) {
+                throw new Revert('BridgeDepository: bad pubLen');
+            }
+            if (off + pubLen > <u32>sig.length) {
+                throw new Revert('BridgeDepository: truncated pubKey');
+            }
+            const pubKey: Uint8Array = slice(sig, off, off + pubLen);
+            off += pubLen;
+
+            if (off + 4 > <u32>sig.length) {
+                throw new Revert('BridgeDepository: truncated sigLen');
+            }
+            const sigLen: u32 = readU32BE(sig, off);
+            off += 4;
+            if (sigLen != MLDSA_LEVEL2_SIG_LEN) {
+                throw new Revert('BridgeDepository: bad sigLen');
+            }
+            if (off + sigLen > <u32>sig.length) {
+                throw new Revert('BridgeDepository: truncated rawSig');
+            }
+            const rawSig: Uint8Array = slice(sig, off, off + sigLen);
+            off += sigLen;
+
+            // Bounded duplicate-signer check (numSigs ≤ 16 → ≤ 256 cmps).
+            const pubHash: u256 = u256.fromUint8ArrayBE(sha256(pubKey));
+            for (let j: i32 = 0; j < seen.length; j++) {
+                if (u256.eq(seen[j], pubHash)) {
+                    throw new Revert('BridgeDepository: duplicate signer');
+                }
+            }
+            seen.push(pubHash);
+
+            // Authorization check — silently skip non-members so callers
+            // can include "candidate" sigs without aborting the whole
+            // verification. (Threshold check below gates the final yes/no.)
+            if (this._signerKeyHashSet.get(pubHash).isZero()) {
+                continue;
+            }
+
+            const valid: boolean = Blockchain.verifyMLDSASignature(
+                MLDSASecurityLevel.Level2,
+                pubKey,
+                rawSig,
+                voucherHash,
+            );
+            if (valid) {
+                validCount++;
+            }
+        }
+
+        if (off != <u32>sig.length) {
+            throw new Revert('BridgeDepository: trailing sig bytes');
+        }
+        if (validCount < required) {
+            throw new Revert('BridgeDepository: insufficient valid signatures');
         }
 
         // ── Step 7b: voucher cancellation (Phase 1.6 — Tier-3 refund) ──

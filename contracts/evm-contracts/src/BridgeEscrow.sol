@@ -11,18 +11,17 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
-/// @title BridgeEscrow
+/// @title BridgeEscrow (v2 — no legacy)
 /// @notice UUPS upgradeable EVM side of the OPNet bridge.
-///         Users `lock()` USDC/USDT to bridge to OPNet; the off-chain signer
-///         set issues an EIP-712 ReleaseIntent that anyone can submit via `claim()`.
-/// @dev Phase 1 hardening:
-///        - M-of-N ECDSA signer set (single-signer mode = 1-of-1, default after migration)
-///        - Treasury (set-once) + Guardian roles
-///        - emergencyWithdraw is `onlyGuardian` + `whenPaused`, sends to fixed treasury
-///        - cancelVoucher per-voucher invalidation
-///        - Backward-compat: legacy 65-byte single ECDSA sig still accepted while
-///          `signerThreshold == 0` (pre-migration). Once `migrateToMofN` runs, only
-///          length-prefixed M-of-N blobs verify.
+///         Users `lock()` USDC/USDT to bridge to OPNet; the off-chain
+///         M-of-N signer set issues an EIP-712 ReleaseIntent that anyone
+///         can submit via `claim()`.
+/// @dev The legacy single-sig storage slot was dropped before the first
+///      production deploy — there is no `signer` field, no
+///      `migrateToMofN()` shim, and no dual-sig acceptance path. Every
+///      `claim()` requires the length-prefixed M-of-N blob format
+///      `[uint8 numSigs][sig_0(65)][sig_1(65)]…`. A 1-of-1 deploy uses
+///      `numSigs=1` (66-byte blob).
 contract BridgeEscrow is
     Initializable,
     UUPSUpgradeable,
@@ -34,7 +33,7 @@ contract BridgeEscrow is
     using SafeERC20 for IERC20;
 
     // ---------------------------------------------------------------------
-    // EIP-712 type — UNCHANGED (typehash + struct order are LOCKED)
+    // EIP-712 type — LOCKED (typehash + struct field order both fixed)
     // ---------------------------------------------------------------------
 
     struct ReleaseIntent {
@@ -56,62 +55,53 @@ contract BridgeEscrow is
         );
 
     // ---------------------------------------------------------------------
-    // Storage  (append-only — NEVER reorder/delete/retype)
+    // Storage layout (clean — append-only from here on)
     // ---------------------------------------------------------------------
 
-    /// @notice Legacy signer slot — kept for backward compat. After migration
-    ///         to M-of-N (`migrateToMofN`) this is *deprecated in place*: the
-    ///         `claim()` path no longer reads it for verification.
-    address public signer;
-
-    /// @notice Current signer epoch; incremented on rotation/threshold change.
+    /// @notice Current signer-set epoch. Incremented on `removeSigner` and
+    ///         `setThreshold`; vouchers signed under the old epoch stop
+    ///         verifying immediately.
     uint32 public currentEpoch;
 
-    /// @notice Monotonic deposit nonce; incremented per lock.
+    /// @notice Monotonic deposit nonce; incremented per `lock`.
     uint256 public depositNonce;
 
-    /// @notice Token address => supported flag.
+    /// @notice Token allowlist.
     mapping(address => bool) public supportedToken;
 
-    /// @notice opnetNonce => used. Per-voucher replay guard.
+    /// @notice opnetNonce → used. Per-voucher replay guard.
     mapping(bytes32 => bool) public signaturesUsed;
 
-    /// @notice opnetTxHash => opnetEventIndex => used. Composite source-event replay guard.
+    /// @notice (opnetTxHash, opnetEventIndex) → used. Composite source-event replay guard.
     mapping(bytes32 => mapping(uint32 => bool)) public usedSourceEvent;
 
-    /// @notice Expected OPNet source-chain network id. Set once at init.
-    ///         Mainnet = 1, testnet = 2. Enforced in `claim()`.
+    /// @notice opnetNonce → cancelled. Tier-3 governance kill-switch.
+    mapping(bytes32 => bool) public cancelledVouchers;
+
+    /// @notice OPNet source-chain network id (1=mainnet, 2=testnet).
+    ///         Enforced on every `claim()`.
     uint256 public expectedOpnetChainId;
 
-    // ─── Phase 1 additions (append-only) ─────────────────────────────────
-
-    /// @notice Guardian — can pause via owner pipeline AND call emergencyWithdraw
-    ///         (which is `whenPaused`). Set-once via `setGuardian`.
-    address public guardian;
-
-    /// @notice Set-once destination for emergencyWithdraw. After it is non-zero
-    ///         it can never be changed. Prevents a compromised owner from
-    ///         redirecting emergency drains.
-    address public treasury;
-
-    /// @notice M-of-N signer set. address => isAuthorized.
+    /// @notice M-of-N signer set. address → isAuthorized.
     mapping(address => bool) public isSigner;
 
     /// @notice Number of authorized signers in `isSigner`.
     uint256 public signerCount;
 
-    /// @notice Required number of valid signatures to claim. Once non-zero,
-    ///         the contract is in M-of-N mode and `claim()` only accepts
-    ///         length-prefixed blobs.
+    /// @notice Required number of distinct valid signatures to claim.
     uint256 public signerThreshold;
 
-    /// @notice opnetNonce => cancelled. Per-voucher governance kill-switch.
-    ///         Cancellation is checked alongside the standard replay guard.
-    mapping(bytes32 => bool) public cancelledVouchers;
+    /// @notice Guardian — gates `emergencyWithdraw` (alongside `whenPaused`).
+    ///         Set-once via `setGuardian`.
+    address public guardian;
 
-    // 49-slot gap reduced by 6 (guardian, treasury, isSigner mapping slot,
-    // signerCount, signerThreshold, cancelledVouchers mapping slot) = 43.
-    uint256[43] private __gap;
+    /// @notice Set-once destination for `emergencyWithdraw`. Once non-zero,
+    ///         cannot be changed — prevents redirection by a compromised owner.
+    address public treasury;
+
+    /// @dev Reserved for future appends. New slots go BEFORE the gap and the
+    ///      gap shrinks by the same count to preserve layout.
+    uint256[50] private __gap;
 
     // ---------------------------------------------------------------------
     // Events
@@ -136,7 +126,7 @@ contract BridgeEscrow is
     event SignerEpochRotated(
         uint32 indexed oldEpoch,
         uint32 indexed newEpoch,
-        address indexed newSigner
+        address indexed reason
     );
 
     event SupportedTokenUpdated(address indexed token, bool enabled);
@@ -148,14 +138,11 @@ contract BridgeEscrow is
         address indexed by
     );
 
-    // ─── Phase 1 events ───────────────────────────────────────────────────
-
     event TreasurySet(address indexed treasury);
     event GuardianSet(address indexed guardian);
     event SignerAdded(address indexed signer, uint256 newCount);
     event SignerRemoved(address indexed signer, uint256 newCount);
     event ThresholdSet(uint256 indexed oldThreshold, uint256 indexed newThreshold);
-    event MigratedToMofN(uint256 epoch, uint256 threshold);
     event VoucherCancelled(bytes32 indexed opnetNonce, address indexed by);
     event SignerSetMigrated(
         uint32 indexed oldEpoch,
@@ -179,9 +166,6 @@ contract BridgeEscrow is
     error AlreadyClaimed();
     error SourceEventAlreadyUsed();
     error InvalidSignature();
-
-    // ─── Phase 1 errors ───────────────────────────────────────────────────
-
     error TreasuryAlreadySet();
     error TreasuryNotSet();
     error GuardianAlreadySet();
@@ -193,8 +177,6 @@ contract BridgeEscrow is
     error InsufficientSignatures();
     error DuplicateSigner();
     error VoucherCancelled_();
-    error AlreadyMigrated();
-    error MofNNotInitialized();
 
     // ---------------------------------------------------------------------
     // Init
@@ -205,20 +187,19 @@ contract BridgeEscrow is
         _disableInitializers();
     }
 
-    /// @notice Initialize proxy state.
+    /// @notice Initialize proxy state. Seeds 1-of-1 M-of-N with `initialSigner_`.
     /// @param owner_ Initial owner (Safe multisig in prod).
-    /// @param signer_ Initial EIP-712 signer EOA. Also seeded into `isSigner`
-    ///        so a fresh deploy is implicitly 1-of-1 M-of-N from day one.
-    /// @param expectedOpnetChainId_ OPNet source-chain network id (mainnet=1, testnet=2).
-    ///        Every `claim()` enforces `intent.srcChainId == this value`.
+    /// @param initialSigner_ Seed signer; written into `isSigner` and used
+    ///        as the only authorized signer until governance adds more.
+    /// @param expectedOpnetChainId_ OPNet network id (1=mainnet, 2=testnet).
     /// @param supportedTokens_ Canonical token allowlist at deploy time.
     function initialize(
         address owner_,
-        address signer_,
+        address initialSigner_,
         uint256 expectedOpnetChainId_,
         address[] calldata supportedTokens_
     ) external initializer {
-        if (owner_ == address(0) || signer_ == address(0)) revert ZeroAddress();
+        if (owner_ == address(0) || initialSigner_ == address(0)) revert ZeroAddress();
         if (expectedOpnetChainId_ == 0) revert ZeroChainId();
 
         __UUPSUpgradeable_init();
@@ -227,14 +208,12 @@ contract BridgeEscrow is
         __ReentrancyGuard_init();
         __EIP712_init("BridgeEscrow", "1");
 
-        signer = signer_;
         currentEpoch = 1;
         expectedOpnetChainId = expectedOpnetChainId_;
 
-        // Phase 1: fresh deploys come up in M-of-N mode at 1-of-1 with the
-        // initial signer. UUPS upgrades from a pre-Phase-1 impl land with
-        // signerThreshold == 0 and need a one-time `migrateToMofN` call.
-        isSigner[signer_] = true;
+        // 1-of-1 by default. Governance can add more signers + raise threshold
+        // via `migrateSignerSet` for atomic 1-of-1 → 2-of-2 transitions.
+        isSigner[initialSigner_] = true;
         signerCount = 1;
         signerThreshold = 1;
 
@@ -250,21 +229,8 @@ contract BridgeEscrow is
         }
     }
 
-    /// @notice One-time post-upgrade migration: seed M-of-N state from the
-    ///         legacy single `signer` slot. Idempotent — reverts after first
-    ///         success. Required after UUPS-upgrading a pre-Phase-1 impl.
-    function migrateToMofN() external onlyOwner {
-        if (signerThreshold != 0) revert AlreadyMigrated();
-        address legacy = signer;
-        if (legacy == address(0)) revert ZeroAddress();
-        isSigner[legacy] = true;
-        signerCount = 1;
-        signerThreshold = 1;
-        emit MigratedToMofN(currentEpoch, 1);
-    }
-
     // ---------------------------------------------------------------------
-    // Core — lock (UNCHANGED)
+    // Core — lock
     // ---------------------------------------------------------------------
 
     function lock(
@@ -295,33 +261,24 @@ contract BridgeEscrow is
             depositNonce_ = ++depositNonce;
         }
 
-        emit Locked(
-            token,
-            msg.sender,
-            amount,
-            amountReceived_,
-            opnetRecipient,
-            depositNonce_
-        );
+        emit Locked(token, msg.sender, amount, amountReceived_, opnetRecipient, depositNonce_);
     }
 
     // ---------------------------------------------------------------------
-    // Core — claim (M-of-N + legacy single-sig fallback)
+    // Core — claim (M-of-N only)
     // ---------------------------------------------------------------------
 
-    /// @notice Claim a release authorized by the current signer set.
-    /// @dev Strict EIP-712 typehash unchanged. The `sig` arg is now one of:
-    ///        (a) Legacy single-sig: `bytes` of length 65 — recovered against
-    ///            the legacy `signer` slot. Only accepted when
-    ///            `signerThreshold == 0` (pre-migration).
-    ///        (b) M-of-N blob: `[uint8 numSigs][sig_0 (65B)][sig_1 (65B)]...`
-    ///            Each sig is independently recovered, must come from a
-    ///            distinct authorized `isSigner`, and the count of valid
-    ///            recovers must be `>= signerThreshold`.
-    function claim(
-        ReleaseIntent calldata intent,
-        bytes calldata sig
-    ) external whenNotPaused nonReentrant {
+    /// @notice Claim a release authorized by the M-of-N signer set.
+    /// @dev `sig` is the length-prefixed M-of-N blob:
+    ///        `[uint8 numSigs][sig_0(65)][sig_1(65)]…[sig_{numSigs-1}(65)]`
+    ///      Each sig is independently `ECDSA.recover`'d, must come from a
+    ///      distinct authorized `isSigner`, and the count of valid recovers
+    ///      must be `>= signerThreshold`.
+    function claim(ReleaseIntent calldata intent, bytes calldata sig)
+        external
+        whenNotPaused
+        nonReentrant
+    {
         if (!supportedToken[intent.token]) revert TokenNotSupported();
         if (intent.to == address(0)) revert InvalidRecipient();
         if (intent.amount == 0) revert AmountZero();
@@ -347,55 +304,23 @@ contract BridgeEscrow is
         IERC20(intent.token).safeTransfer(intent.to, intent.amount);
     }
 
-    /// @dev Reverts on any verification failure. Sig formats:
-    ///        - Legacy (sig.length == 65): one ECDSA recover, must equal
-    ///          `signer`. Only accepted while `signerThreshold == 0`.
-    ///        - M-of-N (sig.length == 1 + 65*numSigs): parse `numSigs`,
-    ///          recover each, require all signers in `isSigner`, no
-    ///          duplicates, and `validCount >= signerThreshold`.
+    /// @dev Reverts on any verification failure. Sig format:
+    ///      `[uint8 numSigs][sig_0(65)][sig_1(65)]…`. Signers must be
+    ///      distinct, all in `isSigner`, count >= `signerThreshold`.
     function _verifySignatures(bytes32 digest, bytes calldata sig) internal view {
         uint256 threshold = signerThreshold;
-
-        // ── Single-sig path (65 raw bytes, no length prefix) ──
-        // Accepted in two scenarios:
-        //   (a) Pre-migration (`threshold == 0`): recovered signer must equal
-        //       the legacy `signer` slot.
-        //   (b) Post-migration with `threshold == 1`: recovered signer must be
-        //       a member of the M-of-N set. This preserves backward compat for
-        //       clients submitting 65-byte sigs while in 1-of-N mode.
-        // Threshold > 1 with a single 65-byte sig is rejected — the caller
-        // must use the length-prefixed M-of-N blob format.
-        if (sig.length == 65) {
-            address recovered = ECDSA.recover(digest, sig);
-            if (recovered == address(0)) revert InvalidSignature();
-            if (threshold == 0) {
-                if (recovered != signer) revert InvalidSignature();
-                return;
-            }
-            if (threshold > 1) revert InsufficientSignatures();
-            // For backward compat with the legacy single-sig error surface,
-            // an unauthorized recovered signer surfaces as InvalidSignature.
-            if (!isSigner[recovered]) revert InvalidSignature();
-            return;
-        }
-
-        // ── M-of-N length-prefixed blob path ──
-        if (threshold == 0) revert MofNNotInitialized();
         if (sig.length < 1) revert InvalidSigBlob();
 
         uint256 numSigs = uint256(uint8(sig[0]));
         if (numSigs == 0) revert InvalidSigBlob();
         if (sig.length != 1 + numSigs * 65) revert InvalidSigBlob();
 
-        // Collect distinct, authorized signers. With max 255 sigs the
-        // bounded O(n²) duplicate check remains cheap.
         address[] memory seen = new address[](numSigs);
         uint256 validCount = 0;
 
         for (uint256 i = 0; i < numSigs; ) {
             uint256 off = 1 + i * 65;
             bytes memory single = new bytes(65);
-            // copy 65 bytes [off .. off+65) from calldata into memory
             for (uint256 j = 0; j < 65; ) {
                 single[j] = sig[off + j];
                 unchecked {
@@ -404,9 +329,12 @@ contract BridgeEscrow is
             }
             address recovered = ECDSA.recover(digest, single);
             if (recovered == address(0)) revert InvalidSignature();
-            if (!isSigner[recovered]) revert NotASigner();
+            // Unauthorized recovered signer (or wrong-digest case where the
+            // recover lands on a random address) surfaces as InvalidSignature
+            // — keeps the error surface stable across "wrong key" and
+            // "valid key but wrong digest" cases.
+            if (!isSigner[recovered]) revert InvalidSignature();
 
-            // Duplicate-signer check
             for (uint256 k = 0; k < i; ) {
                 if (seen[k] == recovered) revert DuplicateSigner();
                 unchecked {
@@ -427,42 +355,6 @@ contract BridgeEscrow is
     // Admin — signer set management (M-of-N)
     // ---------------------------------------------------------------------
 
-    /// @notice Legacy single-rotation flow. Replaces the entire signer set
-    ///         with `newSigner` AND keeps backward compat by writing the
-    ///         legacy `signer` slot. Bumps epoch; old-epoch sigs invalidated.
-    function rotateSigner(address newSigner) external onlyOwner {
-        if (newSigner == address(0)) revert ZeroAddress();
-        // Atomically swap the entire set: clear current, set new, keep threshold.
-        address oldLegacy = signer;
-        if (oldLegacy != address(0) && isSigner[oldLegacy]) {
-            isSigner[oldLegacy] = false;
-            unchecked {
-                --signerCount;
-            }
-        }
-        signer = newSigner;
-        if (!isSigner[newSigner]) {
-            isSigner[newSigner] = true;
-            unchecked {
-                ++signerCount;
-            }
-        }
-        if (signerThreshold == 0) {
-            signerThreshold = 1;
-        }
-
-        uint32 oldEpoch = currentEpoch;
-        uint32 newEpoch;
-        unchecked {
-            newEpoch = oldEpoch + 1;
-        }
-        currentEpoch = newEpoch;
-        emit SignerEpochRotated(oldEpoch, newEpoch, newSigner);
-    }
-
-    /// @notice Add an authorized signer. Threshold unchanged. Does NOT bump
-    ///         the epoch — vouchers signed by the prior set remain valid (any
-    ///         single sig still resolves to a member of the new superset).
     function addSigner(address newSigner) external onlyOwner {
         if (newSigner == address(0)) revert ZeroAddress();
         if (isSigner[newSigner]) revert AlreadyASigner();
@@ -473,10 +365,6 @@ contract BridgeEscrow is
         emit SignerAdded(newSigner, signerCount);
     }
 
-    /// @notice Remove an authorized signer. Bumps the epoch — any voucher
-    ///         signed exclusively by the removed signer immediately stops
-    ///         verifying. Reverts if the removal would push count below
-    ///         threshold.
     function removeSigner(address oldSigner) external onlyOwner {
         if (!isSigner[oldSigner]) revert NotASigner();
         unchecked {
@@ -493,11 +381,9 @@ contract BridgeEscrow is
         }
         currentEpoch = newEpoch;
         emit SignerRemoved(oldSigner, signerCount);
-        emit SignerEpochRotated(oldEpoch, newEpoch, address(0));
+        emit SignerEpochRotated(oldEpoch, newEpoch, oldSigner);
     }
 
-    /// @notice Update the M-of-N threshold. Bumps the epoch. Threshold must
-    ///         be 1 ≤ m ≤ signerCount.
     function setThreshold(uint256 newThreshold) external onlyOwner {
         if (newThreshold == 0 || newThreshold > signerCount) revert InvalidThreshold();
         uint256 oldThreshold = signerThreshold;
@@ -513,14 +399,13 @@ contract BridgeEscrow is
         emit SignerEpochRotated(oldEpoch, newEpoch, address(0));
     }
 
-    /// @notice Atomic add+remove+threshold update. Required for safe
+    /// @notice Atomic add+remove+threshold update — required for safe
     ///         transitions like 1-of-1 → 2-of-2 (no intermediate weakening).
     function migrateSignerSet(
         address[] calldata addList,
         address[] calldata removeList,
         uint256 newThreshold
     ) external onlyOwner {
-        // Removes first so adds aren't undone if a name collides.
         uint256 rLen = removeList.length;
         for (uint256 i = 0; i < rLen; ) {
             address s = removeList[i];
@@ -554,11 +439,8 @@ contract BridgeEscrow is
         emit SignerSetMigrated(oldEpoch, newEpoch, signerCount, newThreshold);
     }
 
-    /// @notice Cancel a specific voucher (by opnetNonce) so it can never be
-    ///         claimed. Used by Tier-3 incident response in concert with the
-    ///         server's refund flow.
     function cancelVoucher(bytes32 opnetNonce) external onlyOwner {
-        if (cancelledVouchers[opnetNonce]) return; // idempotent
+        if (cancelledVouchers[opnetNonce]) return;
         cancelledVouchers[opnetNonce] = true;
         emit VoucherCancelled(opnetNonce, msg.sender);
     }
@@ -581,9 +463,6 @@ contract BridgeEscrow is
         _unpause();
     }
 
-    /// @notice Set the treasury (set-once). Called immediately after
-    ///         deployment / upgrade. Cannot be re-pointed by a compromised
-    ///         owner — the slot becomes immutable after first write.
     function setTreasury(address newTreasury) external onlyOwner {
         if (treasury != address(0)) revert TreasuryAlreadySet();
         if (newTreasury == address(0)) revert ZeroAddress();
@@ -591,9 +470,6 @@ contract BridgeEscrow is
         emit TreasurySet(newTreasury);
     }
 
-    /// @notice Set the guardian (set-once). Single EOA on an independent
-    ///         device, paged via PagerDuty. Authorized to call
-    ///         `emergencyWithdraw` while the contract is paused.
     function setGuardian(address newGuardian) external onlyOwner {
         if (guardian != address(0)) revert GuardianAlreadySet();
         if (newGuardian == address(0)) revert ZeroAddress();
@@ -601,9 +477,6 @@ contract BridgeEscrow is
         emit GuardianSet(newGuardian);
     }
 
-    /// @notice Emergency drain to the pre-set treasury. Gated on
-    ///         `onlyGuardian` AND `whenPaused` — owner cannot drain
-    ///         unilaterally; pauser path must be exercised first.
     function emergencyWithdraw(address token, uint256 amount)
         external
         nonReentrant

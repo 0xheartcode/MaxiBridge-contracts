@@ -1,23 +1,15 @@
 {
   "storage": [
     {
-      "astId": 47656,
-      "contract": "src/BridgeEscrow.sol:BridgeEscrow",
-      "label": "signer",
-      "offset": 0,
-      "slot": "0",
-      "type": "t_address"
-    },
-    {
-      "astId": 47659,
+      "astId": 47381,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "currentEpoch",
-      "offset": 20,
+      "offset": 0,
       "slot": "0",
       "type": "t_uint32"
     },
     {
-      "astId": 47662,
+      "astId": 47384,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "depositNonce",
       "offset": 0,
@@ -25,7 +17,7 @@
       "type": "t_uint256"
     },
     {
-      "astId": 47667,
+      "astId": 47389,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "supportedToken",
       "offset": 0,
@@ -33,7 +25,7 @@
       "type": "t_mapping(t_address,t_bool)"
     },
     {
-      "astId": 47672,
+      "astId": 47394,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "signaturesUsed",
       "offset": 0,
@@ -41,7 +33,7 @@
       "type": "t_mapping(t_bytes32,t_bool)"
     },
     {
-      "astId": 47679,
+      "astId": 47401,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "usedSourceEvent",
       "offset": 0,
@@ -49,68 +41,68 @@
       "type": "t_mapping(t_bytes32,t_mapping(t_uint32,t_bool))"
     },
     {
-      "astId": 47682,
+      "astId": 47406,
+      "contract": "src/BridgeEscrow.sol:BridgeEscrow",
+      "label": "cancelledVouchers",
+      "offset": 0,
+      "slot": "5",
+      "type": "t_mapping(t_bytes32,t_bool)"
+    },
+    {
+      "astId": 47409,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "expectedOpnetChainId",
       "offset": 0,
-      "slot": "5",
+      "slot": "6",
       "type": "t_uint256"
     },
     {
-      "astId": 47685,
-      "contract": "src/BridgeEscrow.sol:BridgeEscrow",
-      "label": "guardian",
-      "offset": 0,
-      "slot": "6",
-      "type": "t_address"
-    },
-    {
-      "astId": 47688,
-      "contract": "src/BridgeEscrow.sol:BridgeEscrow",
-      "label": "treasury",
-      "offset": 0,
-      "slot": "7",
-      "type": "t_address"
-    },
-    {
-      "astId": 47693,
+      "astId": 47414,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "isSigner",
       "offset": 0,
-      "slot": "8",
+      "slot": "7",
       "type": "t_mapping(t_address,t_bool)"
     },
     {
-      "astId": 47696,
+      "astId": 47417,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "signerCount",
+      "offset": 0,
+      "slot": "8",
+      "type": "t_uint256"
+    },
+    {
+      "astId": 47420,
+      "contract": "src/BridgeEscrow.sol:BridgeEscrow",
+      "label": "signerThreshold",
       "offset": 0,
       "slot": "9",
       "type": "t_uint256"
     },
     {
-      "astId": 47699,
+      "astId": 47423,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
-      "label": "signerThreshold",
+      "label": "guardian",
       "offset": 0,
       "slot": "10",
-      "type": "t_uint256"
+      "type": "t_address"
     },
     {
-      "astId": 47704,
+      "astId": 47426,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
-      "label": "cancelledVouchers",
+      "label": "treasury",
       "offset": 0,
       "slot": "11",
-      "type": "t_mapping(t_bytes32,t_bool)"
+      "type": "t_address"
     },
     {
-      "astId": 47708,
+      "astId": 47431,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "__gap",
       "offset": 0,
       "slot": "12",
-      "type": "t_array(t_uint256)43_storage"
+      "type": "t_array(t_uint256)50_storage"
     }
   ],
   "types": {
@@ -119,10 +111,10 @@
       "label": "address",
       "numberOfBytes": "20"
     },
-    "t_array(t_uint256)43_storage": {
+    "t_array(t_uint256)50_storage": {
       "encoding": "inplace",
-      "label": "uint256[43]",
-      "numberOfBytes": "1376",
+      "label": "uint256[50]",
+      "numberOfBytes": "1600",
       "base": "t_uint256"
     },
     "t_bool": {
