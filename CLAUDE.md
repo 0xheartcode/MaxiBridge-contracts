@@ -37,7 +37,8 @@ EVM → OPNet (deposit)                    OPNet → EVM (withdraw)
 | | Address |
 |---|---|
 | `BridgeEscrow` proxy | `0xc63BF445E59607Ae30AB377fAe10260BA626bF68` |
-| `BridgeEscrow` implementation (v2, post-emergencyWithdraw) | `0x5c8194FbeF33f499B92d8199d1C62cFA5cD4a9Bc` |
+| `BridgeEscrow` implementation (v2, post-emergencyWithdraw — **pre Phase 1**) | `0x5c8194FbeF33f499B92d8199d1C62cFA5cD4a9Bc` |
+| `BridgeEscrow` implementation (Phase 1 M-of-N + treasury/guardian + cancelVoucher) | **NOT YET DEPLOYED** — code on `main`, awaiting upgrade ceremony |
 | Canonical USDC | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` |
 | Canonical USDT | `0xdAC17F958D2ee523a2206206994597C13D831ec7` |
 | Owner / deployer | `0x5DB730b89351F286fE1825B02d68d09C1bA6Efc6` |
@@ -56,6 +57,7 @@ EVM → OPNet (deposit)                    OPNet → EVM (withdraw)
 | `networkId` | `2` (testnet) |
 | Current signer epoch | `1` |
 | ML-DSA signer pubkey hash @ epoch 1 | derived from `MLDSA_SIGNER_WIF`/`MLDSA_SIGNER_KEY` in `.env` |
+| `_storageVersion` | `1` — **Phase 1 storageVersion `→ 2` migration (cancelVoucher + future M-of-N appends) NOT YET APPLIED** |
 
 **Source of truth:** `scripts/src/addresses.json` (updated by deploy / wire / upgrade scripts). Root `.env` mirrors these for server + frontend runtime use.
 
@@ -64,7 +66,7 @@ EVM → OPNet (deposit)                    OPNet → EVM (withdraw)
 ## 3. Directory structure
 
 ```
-/Users/dippy/Documents/code/opnet/bridge/
+Bridge-Monorepo/
 ├── .env                      # SECRETS + ADDRESSES — gitignored, do not edit fields other than append
 ├── .env.example              # shape + Sepolia commented alt
 ├── CLAUDE.md                 # THIS FILE
@@ -76,7 +78,7 @@ EVM → OPNet (deposit)                    OPNet → EVM (withdraw)
 │
 ├── contracts/evm-contracts/            # Solidity + Foundry (UUPS BridgeEscrow)
 │   ├── src/BridgeEscrow.sol
-│   ├── test/                 # 46/46 passing (+ fork tests behind SEPOLIA_RPC_URL)
+│   ├── test/                 # 82/82 passing — BridgeEscrow + Create2Deploy + fork-tests-behind-SEPOLIA_RPC_URL
 │   ├── script/Deploy.s.sol
 │   ├── script/check-storage-layout.sh
 │   ├── storage-layout.json   # COMMITTED snapshot — CI diff gate for upgrades
@@ -88,7 +90,7 @@ EVM → OPNet (deposit)                    OPNet → EVM (withdraw)
 │   │   ├── wrapped/events.ts
 │   │   ├── bridge/BridgeDepository.ts
 │   │   └── bridge/events.ts
-│   ├── __test__/unit/        # 41/41 passing
+│   ├── __test__/unit/        # 52/52 passing — BridgeDepository + WrappedOP20 + cancelVoucher
 │   ├── abis/                 # Auto-generated ABIs (BridgeDepository.*, WrappedOP20.*, OP20.*)
 │   ├── asconfig.json
 │   ├── tsconfig.json
@@ -214,7 +216,7 @@ npm run integration:drills             # security drills (replay, rotation, reor
 3. **Both sides upgradeable:**
    - **EVM:** OZ UUPS proxy with full hardening (`_disableInitializers` in impl ctor, `initializer` gated init, `_authorizeUpgrade` onlyOwner, no `selfdestruct`, no arbitrary `delegatecall`, `uint256[43] __gap` post-Phase-1 — was 49 pre-redesign; storage-layout CI diff gate is `astId`-insensitive).
    - **OPNet:** `UpdatablePlugin(1008 blocks)` (~7 days at 10min/block) registered in every contract ctor — Phase 2.2 raised this from 144 (~24h) to give users a full week to exit before any upgrade lands. `onUpdate()` runs migrations gated by `_storageVersion: StoredU256`; storage APPEND-ONLY per workspace "Five Upgrade Commandments".
-4. **Single root `.env`** at `/Users/dippy/Documents/code/opnet/bridge/.env` shared by server / scripts / contracts. Frontend + admin-panel read it via Vite `envDir: '../'`.
+4. **Single root `.env`** at `Bridge-Monorepo/.env` shared by server / scripts / contracts. Frontend + admin-panel read it via Vite `envDir: '../'`.
 5. **No protocol limits.** No floor, no daily caps, no per-wallet velocity. Security comes from:
    - AWS KMS signer (Phase 3; hot wallet for v1 dev)
    - Epoch-based signer invalidation (instantaneous rotation)
@@ -513,7 +515,7 @@ Server scanner parses `netAmount` at offset 196, `voucherId` at offset 228. **Of
   - `initialize` gated by `initializer` modifier
   - `_authorizeUpgrade` onlyOwner
   - No `selfdestruct`, no arbitrary `delegatecall`
-  - `uint256[49] private __gap` trailing the storage layout (was 50; shrunk 1 when `expectedOpnetChainId` was appended)
+  - `uint256[43] private __gap` trailing the storage layout (was 50 → 49 → 48 → 43 across appends: `expectedOpnetChainId`, `treasury`, then Phase 1's six new slots: `guardian`, `treasury`, `isSigner`, `signerCount`, `signerThreshold`, `cancelledVouchers`)
   - Storage-layout CI gate via `contracts/evm-contracts/storage-layout.json`
   - Foundry `extra_output = ["storageLayout"]`
 - Recipient `to` in signed struct — anyone may submit, only `to` receives (front-run safe)

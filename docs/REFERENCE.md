@@ -4,44 +4,66 @@ Extracted from bridge/CLAUDE.md to keep main context small. Read on-demand for o
 
 ## 14. Emergency withdraw (`BridgeEscrow.emergencyWithdraw`)
 
-Added post-deploy via upgrade #1. Owner-only escape hatch that bypasses the voucher/claim flow. Useful for:
-- Reclaiming test deposits without a full round-trip
-- Migrating escrowed funds before a contract upgrade
-- Pulling funds during an incident while forensics run
+Phase 1.4 hardened this function — it is no longer a single-key escape hatch.
 
-### Interface
+### Phase 1 interface (current)
 
 ```solidity
 function emergencyWithdraw(
     address token,     // USDC, USDT, or any ERC-20 the escrow holds
-    address to,        // recipient
     uint256 amount     // in token base units (6 dec for USDC/USDT)
-) external onlyOwner nonReentrant;
+) external nonReentrant whenPaused;
+//        ^ onlyGuardian (msg.sender check, not modifier)
 ```
 
-Emits `EmergencyWithdraw(token indexed, to indexed, amount, by indexed)`.
+Funds always go to the **set-once** `treasury` slot; the destination is no longer caller-controlled. Emits `EmergencyWithdraw(token indexed, treasury indexed, amount, by indexed)`.
 
-### Usage via `cast`
+Three independent guards now apply:
+1. `whenPaused` — the contract MUST be paused via the owner pipeline first; the guardian alone cannot drain a live bridge.
+2. `msg.sender == guardian` — the guardian role is set ONCE via `setGuardian(address)` (set-once; reverts on second call).
+3. `treasury != address(0)` — the destination is set ONCE via `setTreasury(address)`. Drain attempts before treasury is set revert with `TreasuryNotSet()`.
+
+Useful for:
+- Migrating escrowed funds before a contract upgrade
+- Pulling funds during an incident while forensics run
+
+NOT useful for:
+- Reclaiming individual test deposits without a full round-trip — the user's three-tier refund path (`cancelVoucher` + `refund` server endpoint) is the right tool now.
+
+### Pre-flight (one-time, after every fresh deploy)
 
 ```bash
-# 1. Withdraw 100 USDC back to yourself
+# Set the guardian (set-once — pick an EOA on an independent device, paged)
 cast send $EVM_BRIDGE_ESCROW \
-  "emergencyWithdraw(address,address,uint256)" \
-  $EVM_USDC $BRIDGE_OWNER 100000000 \
-  --private-key $DEPLOYER_PRIVATE_KEY --rpc-url $EVM_RPC_URL
+  "setGuardian(address)" $GUARDIAN_ADDR \
+  --private-key $OWNER_KEY --rpc-url $EVM_RPC_URL
 
-# 2. Drain ALL USDC the escrow holds
+# Set the treasury (set-once — pick the prod Safe address)
+cast send $EVM_BRIDGE_ESCROW \
+  "setTreasury(address)" $TREASURY_ADDR \
+  --private-key $OWNER_KEY --rpc-url $EVM_RPC_URL
+```
+
+### Usage via `cast` (incident response)
+
+```bash
+# 1. Owner pauses the bridge (REQUIRED — emergencyWithdraw is whenPaused)
+cast send $EVM_BRIDGE_ESCROW "pause()" \
+  --private-key $OWNER_KEY --rpc-url $EVM_RPC_URL
+
+# 2. Guardian drains balances to the pre-set treasury
 BAL=$(cast call $EVM_USDC "balanceOf(address)(uint256)" $EVM_BRIDGE_ESCROW --rpc-url $EVM_RPC_URL)
 cast send $EVM_BRIDGE_ESCROW \
-  "emergencyWithdraw(address,address,uint256)" \
-  $EVM_USDC $BRIDGE_OWNER $BAL \
-  --private-key $DEPLOYER_PRIVATE_KEY --rpc-url $EVM_RPC_URL
+  "emergencyWithdraw(address,uint256)" \
+  $EVM_USDC $BAL \
+  --private-key $GUARDIAN_KEY --rpc-url $EVM_RPC_URL
 ```
 
 ### Risk model
-Single owner key controls this function. If compromised → attacker drains the escrow. Mitigations:
-- For v1 mainnet-EVM / testnet-OPNet test: acceptable with the current deployer key.
-- Before any real production volume: transfer `owner` to a Safe multisig + 48h `TimelockController`.
+- A compromised **owner** alone can pause but CANNOT drain — guardian role is required.
+- A compromised **guardian** alone CANNOT drain — owner-controlled pause is required first.
+- A compromised **owner + guardian** drain to `treasury` only — the Safe address is the recovery sink, not an attacker EOA.
+- For mainnet: `owner` should be a Safe + `TimelockController` (Phase 2.2 — 7-day delay). `guardian` should be on an independent device, paged via PagerDuty. `treasury` should be a separate Safe (or the same Safe with policy review).
 
 ---
 
