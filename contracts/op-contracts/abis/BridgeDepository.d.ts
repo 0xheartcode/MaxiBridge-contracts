@@ -13,6 +13,43 @@ export type SignerRotatedEvent = {
     readonly newEpoch: number;
     readonly newSignerHash: bigint;
 };
+export type TokenModeSetEvent = {
+    readonly token: Address;
+    readonly mode: number;
+    readonly evmCounterpart: bigint;
+};
+export type LockedForBridgeEvent = {
+    readonly canonicalToken: Address;
+    readonly user: Address;
+    readonly amount: bigint;
+    readonly evmRecipient: bigint;
+    readonly destChainId: number;
+    readonly lockNonce: bigint;
+    readonly mode: number;
+};
+export type ReleasedFromVoucherEvent = {
+    readonly recipient: Address;
+    readonly canonicalToken: Address;
+    readonly sourceChainId: bigint;
+    readonly sourceTxHash: bigint;
+    readonly sourceLogIndex: number;
+    readonly grossAmount: bigint;
+    readonly feeAmount: bigint;
+    readonly netAmount: bigint;
+    readonly voucherId: bigint;
+    readonly signerEpoch: number;
+};
+export type InventoryProvisionedOpNetEvent = {
+    readonly token: Address;
+    readonly by: Address;
+    readonly amount: bigint;
+};
+export type InventoryDrainedOpNetEvent = {
+    readonly token: Address;
+    readonly to: Address;
+    readonly by: Address;
+    readonly amount: bigint;
+};
 export type PausedEvent = {};
 export type UnpausedEvent = {};
 export type GovernorUpdatedEvent = {
@@ -115,6 +152,51 @@ export type WrapMinFee = CallResult<
     },
     OPNetEvent<never>[]
 >;
+
+/**
+ * @description Represents the result of the setTokenMode function call.
+ */
+export type SetTokenMode = CallResult<{}, OPNetEvent<TokenModeSetEvent>[]>;
+
+/**
+ * @description Represents the result of the tokenMode function call.
+ */
+export type TokenMode = CallResult<
+    {
+        mode: bigint;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the evmCounterpartOf function call.
+ */
+export type EvmCounterpartOf = CallResult<
+    {
+        counterpart: bigint;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the lockForBridge function call.
+ */
+export type LockForBridge = CallResult<{}, OPNetEvent<LockedForBridgeEvent>[]>;
+
+/**
+ * @description Represents the result of the claimReleaseWithVoucher function call.
+ */
+export type ClaimReleaseWithVoucher = CallResult<{}, OPNetEvent<ReleasedFromVoucherEvent>[]>;
+
+/**
+ * @description Represents the result of the provisionInventoryOpNet function call.
+ */
+export type ProvisionInventoryOpNet = CallResult<{}, OPNetEvent<InventoryProvisionedOpNetEvent>[]>;
+
+/**
+ * @description Represents the result of the drainInventoryOpNet function call.
+ */
+export type DrainInventoryOpNet = CallResult<{}, OPNetEvent<InventoryDrainedOpNetEvent>[]>;
 
 /**
  * @description Represents the result of the addSignerToSet function call.
@@ -282,6 +364,18 @@ export interface IBridgeDepository extends IOP_NETContract {
     setWrapMinFee(wrappedToken: Address, amount: bigint): Promise<SetWrapMinFee>;
     wrapFeeBps(): Promise<WrapFeeBps>;
     wrapMinFee(): Promise<WrapMinFee>;
+    setTokenMode(token: Address, mode: bigint, evmCounterpart: bigint): Promise<SetTokenMode>;
+    tokenMode(): Promise<TokenMode>;
+    evmCounterpartOf(): Promise<EvmCounterpartOf>;
+    lockForBridge(
+        canonicalToken: Address,
+        amount: bigint,
+        evmRecipient: Uint8Array,
+        destChainId: number,
+    ): Promise<LockForBridge>;
+    claimReleaseWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<ClaimReleaseWithVoucher>;
+    provisionInventoryOpNet(token: Address, amount: bigint): Promise<ProvisionInventoryOpNet>;
+    drainInventoryOpNet(token: Address, amount: bigint, recipient: Address): Promise<DrainInventoryOpNet>;
     addSignerToSet(pubKeyHash: bigint): Promise<AddSignerToSet>;
     removeSignerFromSet(pubKeyHash: bigint): Promise<RemoveSignerFromSet>;
     setRequiredSignatures(threshold: bigint): Promise<SetRequiredSignatures>;

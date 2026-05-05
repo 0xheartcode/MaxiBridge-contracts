@@ -11,6 +11,13 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
+/// @notice Minimal interface for the bridge-issued WrappedERC20 (modes
+///         INVERSE_WRAPPED + NATIVE_BURN_MINT). Defined here so the
+///         escrow doesn't need to import the concrete contract.
+interface IWrappedERC20 {
+    function mintFromBridge(address to, uint256 amount) external;
+}
+
 /// @title BridgeEscrow (v2 — no legacy)
 /// @notice UUPS upgradeable EVM side of the OPNet bridge.
 ///         Users `lock()` USDC/USDT to bridge to OPNet; the off-chain
@@ -53,6 +60,61 @@ contract BridgeEscrow is
         keccak256(
             "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)"
         );
+
+    /// @notice EIP-712 type for mode-2/3 mints. Differs from ReleaseIntent
+    ///         only by the `wrappedToken` field — binds the mint to a
+    ///         specific WrappedERC20 contract so a sig signed for one
+    ///         wrapped can't be replayed against a different wrapped.
+    struct MintIntent {
+        address wrappedToken;   // WrappedERC20 contract to mint into
+        address to;             // recipient on EVM
+        uint256 amount;         // net amount to mint
+        uint256 srcChainId;     // OPNet network id (1=mainnet, 2=testnet)
+        bytes32 opnetTxHash;
+        uint32 opnetEventIndex;
+        uint256 burnNonce;      // OPNet burn nonce (mode 3) or lock nonce (mode 2)
+        uint32 signerEpoch;
+        bytes32 opnetNonce;
+    }
+
+    /// @dev keccak256("MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)")
+    bytes32 public constant MINT_INTENT_TYPEHASH =
+        keccak256(
+            "MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)"
+        );
+
+    /// @notice Token bridging mode — set per token at registration time.
+    ///         Once set, can never be changed for that token (set-once).
+    ///
+    ///         WRAPPED              — canonical token lives on EVM (USDC/USDT
+    ///                                today). Lock on EVM, mint wrapped on
+    ///                                OPNet. Default for legacy tokens.
+    ///         INVERSE_WRAPPED      — canonical token lives on OPNet
+    ///                                (project-issued OP20). Mint wrapped on
+    ///                                EVM via this contract; lock canonical
+    ///                                on OPNet via BridgeDepository.
+    ///         NATIVE_BURN_MINT     — bridge is canonical issuer on BOTH
+    ///                                chains. Burn on source, mint on
+    ///                                destination. No reserves. Total
+    ///                                supply across chains is conserved.
+    ///         POOLED_LOCK_RELEASE  — neither side mints. Real assets exist on
+    ///                                both chains; team provides initial
+    ///                                inventory via `provisionInventory`,
+    ///                                user-side flows top up / draw down
+    ///                                that pool. Use case: project-issued
+    ///                                tokens (e.g. MOTO) where the bridge
+    ///                                does NOT have minter authority but
+    ///                                the project pre-funds bidirectional
+    ///                                inventory. Reuses the same `lock` +
+    ///                                `claim` paths as WRAPPED — only the
+    ///                                source of balance differs (user lock
+    ///                                vs governor provisioning).
+    enum TokenMode {
+        WRAPPED,
+        INVERSE_WRAPPED,
+        NATIVE_BURN_MINT,
+        POOLED_LOCK_RELEASE
+    }
 
     /// @notice Hard cap on `unwrapFeeBps`. 1000 = 10%. A hostile or
     ///         compromised governor cannot set the bridge fee higher than
@@ -123,9 +185,26 @@ contract BridgeEscrow is
     ///         minFee is taken. Default 0.
     mapping(address => uint256) public unwrapMinFee;
 
+    /// @notice Bridge mode for each registered token. Default 0 = WRAPPED.
+    ///         For mode-2/3 tokens (WrappedERC20 instances), the governor
+    ///         calls `setTokenMode(addr, INVERSE_WRAPPED|NATIVE_BURN_MINT)`
+    ///         once at registration. Set-once per token (`_tokenModeFinalized`).
+    mapping(address => TokenMode) public tokenMode;
+
+    /// @notice For mode-2/3 tokens: 32-byte OPNet identity of the token's
+    ///         OPNet-side counterpart. Indexer-only — used to bind events
+    ///         across chains. Zero for mode-1 tokens.
+    mapping(address => bytes32) public opnetCounterpartOf;
+
+    /// @notice Set-once flag for `tokenMode[addr]`. Once finalized, the
+    ///         mode for that token can never change.
+    mapping(address => bool) private _tokenModeFinalized;
+
     /// @dev Reserved for future appends. New slots go BEFORE the gap and the
     ///      gap shrinks by the same count to preserve layout.
-    uint256[48] private __gap;
+    ///      Slots past treasury: unwrapFeeBps + unwrapMinFee + tokenMode +
+    ///      opnetCounterpartOf + _tokenModeFinalized = 5. 50 - 5 = 45.
+    uint256[45] private __gap;
 
     // ---------------------------------------------------------------------
     // Events
@@ -176,6 +255,15 @@ contract BridgeEscrow is
     );
     event UnwrapFeeBpsSet(uint256 indexed oldBps, uint256 indexed newBps);
     event UnwrapMinFeeSet(address indexed token, uint256 indexed amount);
+    event TokenModeSet(address indexed token, TokenMode indexed mode, bytes32 indexed opnetCounterpart);
+    event WrappedMintedFromVoucher(
+        address indexed wrappedToken,
+        address indexed to,
+        uint256 amount,
+        bytes32 indexed opnetNonce
+    );
+    event InventoryProvisioned(address indexed token, address indexed by, uint256 amount);
+    event InventoryDrained(address indexed token, address indexed to, uint256 amount, address indexed by);
 
     // ---------------------------------------------------------------------
     // Errors
@@ -200,6 +288,11 @@ contract BridgeEscrow is
     error AlreadyASigner();
     error InvalidThreshold();
     error FeeBpsTooHigh();
+    error TokenModeFinalized();
+    error InvalidTokenMode();
+    error WrongMode();
+    error InsufficientInventory();
+    error NotProvisioner();
     error InvalidSigBlob();
     error InsufficientSignatures();
     error DuplicateSigner();
@@ -271,6 +364,14 @@ contract BridgeEscrow is
         returns (uint256 depositNonce_, uint256 amountReceived_)
     {
         if (!supportedToken[token]) revert TokenNotSupported();
+        // Mode dispatch — `lock` is valid for WRAPPED (canonical USDC/USDT
+        // accumulating) and POOLED_LOCK_RELEASE (project tokens like MOTO
+        // where users top up the inventory pool). Modes 2/3 (mint-on-EVM)
+        // use WrappedERC20.burnForRelease on the wrapped contract directly.
+        TokenMode lockMode = tokenMode[token];
+        if (lockMode != TokenMode.WRAPPED && lockMode != TokenMode.POOLED_LOCK_RELEASE) {
+            revert WrongMode();
+        }
         if (amount == 0) revert AmountZero();
         if (opnetRecipient == bytes32(0)) revert InvalidRecipient();
 
@@ -307,6 +408,15 @@ contract BridgeEscrow is
         nonReentrant
     {
         if (!supportedToken[intent.token]) revert TokenNotSupported();
+        // Mode dispatch — `claim` releases real tokens from the bridge's
+        // balance. Valid for WRAPPED (balance accumulates from user
+        // locks of canonical USDC/USDT) and POOLED_LOCK_RELEASE (balance
+        // is governor-provisioned project token like MOTO + user locks).
+        // Modes 2/3 (mint-on-EVM) use `claimMintWrapped` instead.
+        TokenMode claimMode = tokenMode[intent.token];
+        if (claimMode != TokenMode.WRAPPED && claimMode != TokenMode.POOLED_LOCK_RELEASE) {
+            revert WrongMode();
+        }
         if (intent.to == address(0)) revert InvalidRecipient();
         if (intent.amount == 0) revert AmountZero();
         if (intent.srcChainId != expectedOpnetChainId) revert InvalidSrcChainId();
@@ -524,6 +634,142 @@ contract BridgeEscrow is
         emit UnwrapMinFeeSet(token, amount);
     }
 
+    // ---------------------------------------------------------------------
+    // Modal extensions — modes 2 + 3 (INVERSE_WRAPPED + NATIVE_BURN_MINT)
+    // ---------------------------------------------------------------------
+
+    /// @notice Register a token's bridge mode + its OPNet-side counterpart
+    ///         identity. Set-once: any subsequent call for the same token
+    ///         reverts. Mode `LOCK_LOCK` is rejected — the enum slot is
+    ///         reserved for a future architecture, not implemented here.
+    /// @dev    Also flips `supportedToken[token] = true` so the token is
+    ///         immediately recognised by the rest of the contract. Mode-1
+    ///         tokens (USDC/USDT) should keep using the existing
+    ///         `setSupportedToken` path with mode left at default WRAPPED.
+    function setTokenMode(
+        address token,
+        TokenMode mode,
+        bytes32 opnetCounterpart
+    ) external onlyOwner {
+        if (token == address(0)) revert ZeroAddress();
+        if (_tokenModeFinalized[token]) revert TokenModeFinalized();
+        // Mode WRAPPED via this method requires no opnetCounterpart binding;
+        // modes 2/3/4 all do — they reference an OPNet-side counterpart asset
+        // (canonical OP20 for INVERSE_WRAPPED and POOLED_LOCK_RELEASE; wrapped
+        // OP20 twin for NATIVE_BURN_MINT).
+        if (mode != TokenMode.WRAPPED && opnetCounterpart == bytes32(0)) {
+            revert InvalidTokenMode();
+        }
+        tokenMode[token] = mode;
+        opnetCounterpartOf[token] = opnetCounterpart;
+        _tokenModeFinalized[token] = true;
+        supportedToken[token] = true;
+        emit TokenModeSet(token, mode, opnetCounterpart);
+        emit SupportedTokenUpdated(token, true);
+    }
+
+    /// @notice Claim a mode-2/3 mint authorised by the M-of-N signer set.
+    ///         Mints `intent.amount` WrappedERC20 tokens (the
+    ///         `intent.wrappedToken` contract) to `intent.to`.
+    /// @dev    EIP-712 typehash is `MINT_INTENT_TYPEHASH` (different from
+    ///         the mode-1 `RELEASE_INTENT_TYPEHASH`); a sig signed for one
+    ///         cannot be replayed against the other. Replay protection
+    ///         shares the existing `signaturesUsed` and `usedSourceEvent`
+    ///         maps with `claim()` — opnetNonce + (opnetTxHash,
+    ///         opnetEventIndex) are globally unique on OPNet so no
+    ///         collision risk between flows.
+    function claimMintWrapped(MintIntent calldata intent, bytes calldata sig)
+        external
+        whenNotPaused
+        nonReentrant
+    {
+        if (!supportedToken[intent.wrappedToken]) revert TokenNotSupported();
+        TokenMode m = tokenMode[intent.wrappedToken];
+        if (m != TokenMode.INVERSE_WRAPPED && m != TokenMode.NATIVE_BURN_MINT) {
+            revert WrongMode();
+        }
+        if (intent.to == address(0)) revert InvalidRecipient();
+        if (intent.amount == 0) revert AmountZero();
+        if (intent.srcChainId != expectedOpnetChainId) revert InvalidSrcChainId();
+        if (intent.signerEpoch != currentEpoch) revert InvalidSignerEpoch();
+        if (signaturesUsed[intent.opnetNonce]) revert AlreadyClaimed();
+        if (cancelledVouchers[intent.opnetNonce]) revert VoucherCancelled_();
+        if (usedSourceEvent[intent.opnetTxHash][intent.opnetEventIndex]) {
+            revert SourceEventAlreadyUsed();
+        }
+
+        bytes32 structHash = _hashMintIntent(intent);
+        bytes32 digest = _hashTypedDataV4(structHash);
+
+        _verifySignatures(digest, sig);
+
+        // Effects BEFORE interaction (CEI).
+        signaturesUsed[intent.opnetNonce] = true;
+        usedSourceEvent[intent.opnetTxHash][intent.opnetEventIndex] = true;
+
+        emit WrappedMintedFromVoucher(
+            intent.wrappedToken,
+            intent.to,
+            intent.amount,
+            intent.opnetNonce
+        );
+
+        IWrappedERC20(intent.wrappedToken).mintFromBridge(intent.to, intent.amount);
+    }
+
+    // ---------------------------------------------------------------------
+    // Mode-4 inventory provisioning (POOLED_LOCK_RELEASE)
+    // ---------------------------------------------------------------------
+
+    /// @notice Add `amount` of `token` to the bridge's inventory pool.
+    ///         Used for POOLED_LOCK_RELEASE tokens (e.g. MOTO) where the
+    ///         project pre-funds the EVM-side pool so users can claim
+    ///         against OPNet locks before any reverse flow has happened.
+    /// @dev    Caller transfers tokens INTO the bridge — they must
+    ///         `approve(bridge, amount)` first. Uses balance-delta to
+    ///         survive fee-on-transfer / non-canonical ERC20s.
+    ///         Works for any registered token regardless of mode (a
+    ///         WRAPPED token's pool is just the locked-deposit balance,
+    ///         provisioning is harmless additive). The flag is
+    ///         intentional: top-ups for capacity planning, not just
+    ///         mode-4-only.
+    function provisionInventory(address token, uint256 amount) external onlyOwner nonReentrant {
+        if (token == address(0)) revert ZeroAddress();
+        if (!supportedToken[token]) revert TokenNotSupported();
+        if (amount == 0) revert AmountZero();
+
+        IERC20 erc20 = IERC20(token);
+        uint256 balBefore = erc20.balanceOf(address(this));
+        erc20.safeTransferFrom(msg.sender, address(this), amount);
+        uint256 balAfter = erc20.balanceOf(address(this));
+        unchecked {
+            uint256 received = balAfter - balBefore;
+            if (received == 0) revert NothingReceived();
+            emit InventoryProvisioned(token, msg.sender, received);
+        }
+    }
+
+    /// @notice Drain inventory back to the set-once `treasury`. Same
+    ///         destination and pause-gate as `emergencyWithdraw`, but
+    ///         with separate semantics: `drainInventory` is for orderly
+    ///         wind-down of a token's pool (e.g. de-listing a token,
+    ///         migrating to a new bridge), not for incident response.
+    /// @dev    onlyGuardian + whenPaused — same trust model as
+    ///         emergencyWithdraw. Owner alone cannot drain; pause must
+    ///         be exercised first.
+    function drainInventory(address token, uint256 amount)
+        external
+        nonReentrant
+        whenPaused
+    {
+        if (msg.sender != guardian) revert NotGuardian();
+        if (token == address(0)) revert ZeroAddress();
+        if (treasury == address(0)) revert TreasuryNotSet();
+        if (amount == 0) revert AmountZero();
+        emit InventoryDrained(token, treasury, amount, msg.sender);
+        IERC20(token).safeTransfer(treasury, amount);
+    }
+
     function emergencyWithdraw(address token, uint256 amount)
         external
         nonReentrant
@@ -575,5 +821,28 @@ contract BridgeEscrow is
                     intent.opnetNonce
                 )
             );
+    }
+
+    function _hashMintIntent(MintIntent calldata intent) internal pure returns (bytes32) {
+        return
+            keccak256(
+                abi.encode(
+                    MINT_INTENT_TYPEHASH,
+                    intent.wrappedToken,
+                    intent.to,
+                    intent.amount,
+                    intent.srcChainId,
+                    intent.opnetTxHash,
+                    intent.opnetEventIndex,
+                    intent.burnNonce,
+                    intent.signerEpoch,
+                    intent.opnetNonce
+                )
+            );
+    }
+
+    /// @notice EIP-712 digest for a MintIntent — useful off-chain and for tests.
+    function hashMintIntent(MintIntent calldata intent) external view returns (bytes32) {
+        return _hashTypedDataV4(_hashMintIntent(intent));
     }
 }

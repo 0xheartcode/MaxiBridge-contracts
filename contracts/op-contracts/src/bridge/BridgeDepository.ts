@@ -27,6 +27,11 @@ import {
     Paused,
     Unpaused,
     MintedFromVoucher,
+    TokenModeSet,
+    LockedForBridge,
+    ReleasedFromVoucher,
+    InventoryProvisionedOpNet,
+    InventoryDrainedOpNet,
 } from './events';
 
 /**
@@ -185,6 +190,32 @@ export class BridgeDepository extends ReentrancyGuard {
     // Whichever is higher between bps-derived and minFee is taken.
     // Default 0.
     private _wrapMinFee: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+
+    // ─── Token bridging modes (4-mode dispatch) ────────────────────────
+    // Per-token mode encoded as u256 (matching the EVM-side enum value
+    // space):
+    //   0 WRAPPED              — canonical on EVM, wrapped on OPNet (USDC/USDT)
+    //   1 INVERSE_WRAPPED      — canonical on OPNet, wrapped on EVM
+    //   2 NATIVE_BURN_MINT     — bridge issues both sides, burn-and-mint
+    //   3 POOLED_LOCK_RELEASE  — lock+release on both, no minting; project
+    //                            funds inventory (e.g. MOTO)
+    // Set-once per token via `setTokenMode`. Default 0 (WRAPPED) so existing
+    // wUSDC/wUSDT keep working.
+    private _tokenMode: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _tokenModeFinalized: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    // For mode-2/3/4: 32-byte EVM counterpart identity, stored as u256.
+    // Mode 1 leaves this at zero. Indexer-only — used to bind events
+    // across chains.
+    private _evmCounterpart: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+
+    // ─── Mode-2/4 lock state (canonical OP20 escrow on OPNet) ──────────
+    // Monotonic lock nonce — gives each lockForBridge a unique id.
+    private _lockNonce: StoredU256 = new StoredU256(Blockchain.nextPointer, EMPTY_POINTER);
+    // Replay guard for claimReleaseWithVoucher. Same shape as
+    // _usedVoucherIds + _usedSourceEvents but separated so the two
+    // claim paths can't accidentally share state.
+    private _usedReleaseVoucherIds: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _usedEvmBurnEvents: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
     public constructor() {
         super();
@@ -525,6 +556,375 @@ export class BridgeDepository extends ReentrancyGuard {
         const r = new BytesWriter(32);
         r.writeU256(this._wrapMinFee.get(key));
         return r;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Phase 1.5 — token mode dispatch (4 modes)
+    //  WRAPPED (0) / INVERSE_WRAPPED (1) / NATIVE_BURN_MINT (2) /
+    //  POOLED_LOCK_RELEASE (3)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Register a token's bridging mode. Set-once per token. The
+     * `evmCounterpart` is the 32-byte EVM address (or for non-mode-1
+     * tokens, a 32-byte identifier) of the EVM-side asset this token
+     * pairs with — the indexer uses it to bind events across chains.
+     */
+    @method(
+        { name: 'token', type: ABIDataTypes.ADDRESS },
+        { name: 'mode', type: ABIDataTypes.UINT256 },
+        { name: 'evmCounterpart', type: ABIDataTypes.UINT256 },
+    )
+    @emit('TokenModeSet')
+    public setTokenMode(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const token: Address = calldata.readAddress();
+        if (token.isZero()) throw new Revert('BridgeDepository: zero token');
+        const mode: u256 = calldata.readU256();
+        if (u256.gt(mode, u256.fromU32(3))) {
+            throw new Revert('BridgeDepository: invalid token mode');
+        }
+        const evmCounterpart: u256 = calldata.readU256();
+        const key: u256 = _addrKey(token);
+        if (!this._tokenModeFinalized.get(key).isZero()) {
+            throw new Revert('BridgeDepository: token mode finalized');
+        }
+        // Modes 1/2/3 require evmCounterpart; mode 0 (WRAPPED) does not.
+        if (!mode.isZero() && evmCounterpart.isZero()) {
+            throw new Revert('BridgeDepository: evmCounterpart required for non-WRAPPED');
+        }
+        this._tokenMode.set(key, mode);
+        this._tokenModeFinalized.set(key, u256.One);
+        this._evmCounterpart.set(key, evmCounterpart);
+        this.emitEvent(new TokenModeSet(token, mode.toU32(), evmCounterpart));
+        return new BytesWriter(0);
+    }
+
+    @view
+    @returns({ name: 'mode', type: ABIDataTypes.UINT256 })
+    public tokenMode(calldata: Calldata): BytesWriter {
+        const token: Address = calldata.readAddress();
+        const r = new BytesWriter(32);
+        r.writeU256(this._tokenMode.get(_addrKey(token)));
+        return r;
+    }
+
+    @view
+    @returns({ name: 'counterpart', type: ABIDataTypes.UINT256 })
+    public evmCounterpartOf(calldata: Calldata): BytesWriter {
+        const token: Address = calldata.readAddress();
+        const r = new BytesWriter(32);
+        r.writeU256(this._evmCounterpart.get(_addrKey(token)));
+        return r;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Phase 1.5 — modes 2 + 4: lock canonical OP20 → bridge to EVM
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Lock canonical OP20 in the bridge's escrow so the user can claim
+     * the EVM-side counterpart (mint WrappedERC20 in mode 2, release
+     * pre-funded inventory in mode 4). Caller must have approved the
+     * BridgeDepository for at least `amount` on the canonical token.
+     *
+     * `evmRecipient` is 32 bytes — for EVM destinations, left-pad the
+     * 20-byte recipient address to 32 bytes (low 20 bytes = address).
+     */
+    @method(
+        { name: 'canonicalToken', type: ABIDataTypes.ADDRESS },
+        { name: 'amount', type: ABIDataTypes.UINT256 },
+        { name: 'evmRecipient', type: ABIDataTypes.BYTES32 },
+        { name: 'destChainId', type: ABIDataTypes.UINT32 },
+    )
+    @emit('LockedForBridge')
+    @nonReentrant
+    public lockForBridge(calldata: Calldata): BytesWriter {
+        this.requireNotPaused();
+        const canonical: Address = calldata.readAddress();
+        const amount: u256 = calldata.readU256();
+        const evmRecipient: Uint8Array = calldata.readBytes(32);
+        const destChainId: u32 = calldata.readU32();
+
+        if (amount.isZero()) throw new Revert('BridgeDepository: zero amount');
+        if (destChainId == 0) throw new Revert('BridgeDepository: zero destChainId');
+        if (evmRecipient.length != 32) {
+            throw new Revert('BridgeDepository: ethRecipient must be 32 bytes');
+        }
+        // Mode dispatch — only INVERSE_WRAPPED (1) or POOLED_LOCK_RELEASE (3)
+        // accept lockForBridge.
+        const mode: u256 = this._tokenMode.get(_addrKey(canonical));
+        const isInverse: bool = u256.eq(mode, u256.fromU32(1));
+        const isPooled: bool = u256.eq(mode, u256.fromU32(3));
+        if (!isInverse && !isPooled) {
+            throw new Revert('BridgeDepository: token not in lockable mode');
+        }
+
+        // EVM destination padding check — for chainId 1 / 11155111, upper
+        // 12 bytes must be zero.
+        if (destChainId == 1 || destChainId == 11155111) {
+            for (let i: i32 = 0; i < 12; i++) {
+                if (evmRecipient[i] != 0) {
+                    throw new Revert('BridgeDepository: EVM recipient upper 12 bytes must be zero');
+                }
+            }
+        }
+
+        // Pull `amount` of canonical OP20 from the user via OP20.transferFrom.
+        // The caller (user) must have approved the BridgeDepository first.
+        const transferFromSelector: u32 = encodeSelector('transferFrom(address,address,uint256)');
+        const tfWriter = new BytesWriter(4 + ADDRESS_BYTE_LENGTH * 2 + 32);
+        tfWriter.writeSelector(transferFromSelector);
+        tfWriter.writeAddress(Blockchain.tx.sender);
+        tfWriter.writeAddress(this.address);
+        tfWriter.writeU256(amount);
+        Blockchain.call(canonical, tfWriter);
+
+        const nextNonce: u256 = SafeMath.add(this._lockNonce.value, u256.One);
+        this._lockNonce.value = nextNonce;
+
+        // Pack evmRecipient (32B) into a u256 for event encoding.
+        const evmRecipU256: u256 = u256.fromUint8ArrayBE(evmRecipient);
+
+        this.emitEvent(new LockedForBridge(
+            canonical,
+            Blockchain.tx.sender,
+            amount,
+            evmRecipU256,
+            destChainId,
+            nextNonce,
+            mode.toU32(),
+        ));
+
+        const writer = new BytesWriter(32);
+        writer.writeU256(nextNonce);
+        return writer;
+    }
+
+    /**
+     * Release canonical OP20 to the recipient against an ML-DSA voucher
+     * signed by the M-of-N signer set. Used in modes 2 + 4 after the
+     * user has burned their wrapped ERC20 on the EVM side.
+     *
+     * Reuses the 460-byte voucher preimage shape — `wrappedToken` field
+     * here is overloaded to mean "the canonical OP20 being released."
+     * The selector field binds the voucher to this specific entry point
+     * so a release voucher can't be claimed via `claimMintWithVoucher`
+     * or vice-versa.
+     */
+    @method(
+        { name: 'voucher', type: ABIDataTypes.BYTES },
+        { name: 'mldsaSig', type: ABIDataTypes.BYTES },
+    )
+    @emit('ReleasedFromVoucher')
+    @nonReentrant
+    public claimReleaseWithVoucher(calldata: Calldata): BytesWriter {
+        this.requireNotPaused();
+
+        const voucher: Uint8Array = calldata.readBytesWithLength();
+        const sig: Uint8Array = calldata.readBytesWithLength();
+
+        if (voucher.length != VOUCHER_PREIMAGE_LEN) {
+            throw new Revert('BridgeDepository: bad voucher length');
+        }
+        const parsed = parseVoucher(voucher);
+
+        if (!u256.eq(parsed.networkId, this._networkId.value)) {
+            throw new Revert('BridgeDepository: wrong networkId');
+        }
+        if (!parsed.contractSelf.equals(this.address)) {
+            throw new Revert('BridgeDepository: wrong contractSelf');
+        }
+        // Bind to a DIFFERENT selector than claimMintWithVoucher so a
+        // mint voucher cannot be replayed against this method.
+        const releaseSelector: u32 = encodeSelector('claimReleaseWithVoucher(bytes,bytes)');
+        if (parsed.selector != releaseSelector) {
+            throw new Revert('BridgeDepository: wrong selector');
+        }
+
+        // Mode dispatch — release path only valid for INVERSE_WRAPPED (1)
+        // or POOLED_LOCK_RELEASE (3). The `wrappedToken` field is the
+        // canonical OP20 to release.
+        const releaseMode: u256 = this._tokenMode.get(_addrKey(parsed.wrappedToken));
+        const isInverse2: bool = u256.eq(releaseMode, u256.fromU32(1));
+        const isPooled2: bool = u256.eq(releaseMode, u256.fromU32(3));
+        if (!isInverse2 && !isPooled2) {
+            throw new Revert('BridgeDepository: token not in releasable mode');
+        }
+
+        const currentEpoch: u256 = this._signerEpoch.value;
+        if (parsed.signerEpoch != currentEpoch.toU32()) {
+            throw new Revert('BridgeDepository: wrong signerEpoch');
+        }
+
+        const sender: Address = Blockchain.tx.sender;
+        if (!parsed.recipient.equals(sender)) {
+            throw new Revert('BridgeDepository: wrong recipient');
+        }
+
+        const sum: u256 = SafeMath.add(parsed.feeAmount, parsed.netAmount);
+        if (!u256.eq(sum, parsed.grossAmount)) {
+            throw new Revert('BridgeDepository: gross != fee + net');
+        }
+        if (parsed.netAmount.isZero()) {
+            throw new Revert('BridgeDepository: zero netAmount');
+        }
+
+        // M-of-N ML-DSA verification. Same blob format as
+        // claimMintWithVoucher.
+        if (<u32>sig.length < 4) throw new Revert('BridgeDepository: bad sig blob length');
+        const numSigs: u32 = readU32BE(sig, 0);
+        if (numSigs == 0 || numSigs > 16) throw new Revert('BridgeDepository: bad numSigs');
+        const required: u32 = this._requiredSignatures.value.toU32();
+        if (required == 0) throw new Revert('BridgeDepository: signer set not initialized');
+        const voucherHash: Uint8Array = sha256(voucher);
+        const seenR: Array<u256> = new Array<u256>(0);
+        let validCountR: u32 = 0;
+        let offR: u32 = 4;
+        for (let i: u32 = 0; i < numSigs; i++) {
+            if (offR + 4 > <u32>sig.length) throw new Revert('BridgeDepository: truncated pubLen');
+            const pubLen: u32 = readU32BE(sig, offR); offR += 4;
+            if (pubLen != MLDSA_LEVEL2_PUBKEY_LEN) throw new Revert('BridgeDepository: bad pubLen');
+            if (offR + pubLen > <u32>sig.length) throw new Revert('BridgeDepository: truncated pubKey');
+            const pubKey: Uint8Array = slice(sig, offR, offR + pubLen);
+            offR += pubLen;
+            if (offR + 4 > <u32>sig.length) throw new Revert('BridgeDepository: truncated sigLen');
+            const sigLen: u32 = readU32BE(sig, offR); offR += 4;
+            if (sigLen != MLDSA_LEVEL2_SIG_LEN) throw new Revert('BridgeDepository: bad sigLen');
+            if (offR + sigLen > <u32>sig.length) throw new Revert('BridgeDepository: truncated rawSig');
+            const rawSig: Uint8Array = slice(sig, offR, offR + sigLen);
+            offR += sigLen;
+            const pubHash: u256 = u256.fromUint8ArrayBE(sha256(pubKey));
+            for (let j: i32 = 0; j < seenR.length; j++) {
+                if (u256.eq(seenR[j], pubHash)) {
+                    throw new Revert('BridgeDepository: duplicate signer');
+                }
+            }
+            seenR.push(pubHash);
+            if (this._signerKeyHashSet.get(pubHash).isZero()) continue;
+            if (Blockchain.verifyMLDSASignature(MLDSASecurityLevel.Level2, pubKey, rawSig, voucherHash)) {
+                validCountR++;
+            }
+        }
+        if (offR != <u32>sig.length) throw new Revert('BridgeDepository: trailing sig bytes');
+        if (validCountR < required) {
+            throw new Revert('BridgeDepository: insufficient valid signatures');
+        }
+
+        // Cancellation + replay guards
+        if (!this._cancelledVouchers.get(parsed.voucherId).isZero()) {
+            throw new Revert('BridgeDepository: voucher cancelled');
+        }
+        if (!this._usedReleaseVoucherIds.get(parsed.voucherId).isZero()) {
+            throw new Revert('BridgeDepository: voucher already used');
+        }
+        const sourceKey: u256 = buildSourceEventKey(
+            parsed.sourceChainId,
+            parsed.sourceBridgeAddr,
+            parsed.sourceTokenAddr,
+            parsed.sourceTxHash,
+            parsed.sourceLogIndex,
+        );
+        if (!this._usedEvmBurnEvents.get(sourceKey).isZero()) {
+            throw new Revert('BridgeDepository: source event already used');
+        }
+
+        // CEI — mark used BEFORE the external transfer.
+        this._usedReleaseVoucherIds.set(parsed.voucherId, u256.One);
+        this._usedEvmBurnEvents.set(sourceKey, u256.One);
+
+        // Cross-contract call: OP20.transfer(recipient, netAmount)
+        // — bridge holds the canonical OP20 and sends to recipient.
+        const transferSelector: u32 = encodeSelector('transfer(address,uint256)');
+        const tWriter = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+        tWriter.writeSelector(transferSelector);
+        tWriter.writeAddress(parsed.recipient);
+        tWriter.writeU256(parsed.netAmount);
+        Blockchain.call(parsed.wrappedToken, tWriter);
+
+        this.emitEvent(new ReleasedFromVoucher(
+            parsed.recipient,
+            parsed.wrappedToken,
+            parsed.sourceChainId,
+            parsed.sourceTxHash,
+            parsed.sourceLogIndex,
+            parsed.grossAmount,
+            parsed.feeAmount,
+            parsed.netAmount,
+            parsed.voucherId,
+            parsed.signerEpoch,
+        ));
+
+        return new BytesWriter(0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Phase 1.5 — mode-4 inventory provisioning (POOLED_LOCK_RELEASE)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Add `amount` of `canonicalToken` to the bridge's inventory pool.
+     * Used for POOLED_LOCK_RELEASE tokens (e.g. MOTO) where the project
+     * pre-funds the OPNet-side pool. Caller must have approved the
+     * BridgeDepository for at least `amount`.
+     */
+    @method(
+        { name: 'token', type: ABIDataTypes.ADDRESS },
+        { name: 'amount', type: ABIDataTypes.UINT256 },
+    )
+    @emit('InventoryProvisionedOpNet')
+    @nonReentrant
+    public provisionInventoryOpNet(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const token: Address = calldata.readAddress();
+        const amount: u256 = calldata.readU256();
+        if (token.isZero()) throw new Revert('BridgeDepository: zero token');
+        if (amount.isZero()) throw new Revert('BridgeDepository: zero amount');
+
+        const transferFromSelector: u32 = encodeSelector('transferFrom(address,address,uint256)');
+        const w = new BytesWriter(4 + ADDRESS_BYTE_LENGTH * 2 + 32);
+        w.writeSelector(transferFromSelector);
+        w.writeAddress(Blockchain.tx.sender);
+        w.writeAddress(this.address);
+        w.writeU256(amount);
+        Blockchain.call(token, w);
+
+        this.emitEvent(new InventoryProvisionedOpNet(token, Blockchain.tx.sender, amount));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Drain canonical OP20 inventory back to the governor. Governor-only,
+     * requires the bridge to be paused (matches EVM emergencyWithdraw
+     * semantics). Used for orderly wind-down of a token's pool.
+     */
+    @method(
+        { name: 'token', type: ABIDataTypes.ADDRESS },
+        { name: 'amount', type: ABIDataTypes.UINT256 },
+        { name: 'recipient', type: ABIDataTypes.ADDRESS },
+    )
+    @emit('InventoryDrainedOpNet')
+    @nonReentrant
+    public drainInventoryOpNet(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        if (!this._paused.value) {
+            throw new Revert('BridgeDepository: must pause before drain');
+        }
+        const token: Address = calldata.readAddress();
+        const amount: u256 = calldata.readU256();
+        const recipient: Address = calldata.readAddress();
+        if (token.isZero() || recipient.isZero()) throw new Revert('BridgeDepository: zero addr');
+        if (amount.isZero()) throw new Revert('BridgeDepository: zero amount');
+
+        const transferSelector: u32 = encodeSelector('transfer(address,uint256)');
+        const w = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+        w.writeSelector(transferSelector);
+        w.writeAddress(recipient);
+        w.writeU256(amount);
+        Blockchain.call(token, w);
+
+        this.emitEvent(new InventoryDrainedOpNet(token, recipient, Blockchain.tx.sender, amount));
+        return new BytesWriter(0);
     }
 
     /**
@@ -1124,7 +1524,16 @@ function buildSourceEventKey(
  * `_wrapMinFee[wrappedToken]`.
  */
 function _wrapMinFeeKey(wrappedToken: Address): u256 {
+    return _addrKey(wrappedToken);
+}
+
+/**
+ * Generic sha256 of a 32-byte address — keys for `_tokenMode`,
+ * `_tokenModeFinalized`, `_evmCounterpart` (and `_wrapMinFee` via the
+ * compat shim above).
+ */
+function _addrKey(addr: Address): u256 {
     const buf = new BytesWriter(32);
-    buf.writeAddress(wrappedToken);
+    buf.writeAddress(addr);
     return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
 }

@@ -6,6 +6,7 @@ import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.s
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {BridgeEscrow} from "../src/BridgeEscrow.sol";
+import {WrappedERC20} from "../src/WrappedERC20.sol";
 import {BridgeEscrowV2} from "./mocks/BridgeEscrowV2.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
@@ -1144,5 +1145,245 @@ contract BridgeEscrowTest is Test {
         vm.prank(alice);
         vm.expectRevert();
         escrow.setUnwrapMinFee(address(usdc), 100);
+    }
+
+    // =====================================================================
+    // Token modes — INVERSE_WRAPPED + NATIVE_BURN_MINT + POOLED_LOCK_RELEASE
+    // =====================================================================
+
+    function test_TokenMode_DefaultsToWrapped() public view {
+        // USDC and USDT were registered via the legacy `setSupportedToken`
+        // path in setUp(); they must be in WRAPPED mode by default.
+        assertEq(uint256(escrow.tokenMode(address(usdc))), uint256(BridgeEscrow.TokenMode.WRAPPED));
+        assertEq(uint256(escrow.tokenMode(address(usdt))), uint256(BridgeEscrow.TokenMode.WRAPPED));
+    }
+
+    function test_SetTokenMode_InverseWrapped_Succeeds() public {
+        MockERC20 wrapped = new MockERC20("Wrapped MOTO", "wMOTO", 6);
+        bytes32 opnetCanonical = bytes32(uint256(0xCAFE));
+        vm.prank(owner);
+        escrow.setTokenMode(address(wrapped), BridgeEscrow.TokenMode.INVERSE_WRAPPED, opnetCanonical);
+        assertEq(uint256(escrow.tokenMode(address(wrapped))), uint256(BridgeEscrow.TokenMode.INVERSE_WRAPPED));
+        assertEq(escrow.opnetCounterpartOf(address(wrapped)), opnetCanonical);
+        assertTrue(escrow.supportedToken(address(wrapped)));
+    }
+
+    function test_SetTokenMode_SetOnce_Reverts() public {
+        MockERC20 wrapped = new MockERC20("X", "X", 6);
+        bytes32 cp = bytes32(uint256(1));
+        vm.prank(owner);
+        escrow.setTokenMode(address(wrapped), BridgeEscrow.TokenMode.NATIVE_BURN_MINT, cp);
+        vm.prank(owner);
+        vm.expectRevert(BridgeEscrow.TokenModeFinalized.selector);
+        escrow.setTokenMode(address(wrapped), BridgeEscrow.TokenMode.WRAPPED, bytes32(0));
+    }
+
+    function test_SetTokenMode_NonWrappedRequiresOpnetCounterpart() public {
+        MockERC20 wrapped = new MockERC20("X", "X", 6);
+        vm.prank(owner);
+        vm.expectRevert(BridgeEscrow.InvalidTokenMode.selector);
+        escrow.setTokenMode(address(wrapped), BridgeEscrow.TokenMode.INVERSE_WRAPPED, bytes32(0));
+    }
+
+    function test_SetTokenMode_PooledLockRelease_Succeeds() public {
+        MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
+        bytes32 opnetMoto = bytes32(uint256(0xDEAD));
+        vm.prank(owner);
+        escrow.setTokenMode(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, opnetMoto);
+        assertEq(uint256(escrow.tokenMode(address(moto))), uint256(BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE));
+        // Mode-4 tokens also pass through `lock` (just like mode-1).
+        moto.mint(alice, 100e6);
+        vm.startPrank(alice);
+        moto.approve(address(escrow), type(uint256).max);
+        (uint256 nonce, uint256 received) = escrow.lock(address(moto), 50e6, keccak256("rcp"));
+        vm.stopPrank();
+        assertEq(nonce, 1);
+        assertEq(received, 50e6);
+    }
+
+    function test_Lock_RevertsForInverseWrappedToken() public {
+        MockERC20 w = new MockERC20("W", "W", 6);
+        vm.prank(owner);
+        escrow.setTokenMode(address(w), BridgeEscrow.TokenMode.INVERSE_WRAPPED, bytes32(uint256(1)));
+        w.mint(alice, 100e6);
+        vm.startPrank(alice);
+        w.approve(address(escrow), type(uint256).max);
+        vm.expectRevert(BridgeEscrow.WrongMode.selector);
+        escrow.lock(address(w), 1e6, keccak256("x"));
+        vm.stopPrank();
+    }
+
+    function test_Claim_RevertsForInverseWrappedToken() public {
+        MockERC20 w = new MockERC20("W", "W", 6);
+        vm.prank(owner);
+        escrow.setTokenMode(address(w), BridgeEscrow.TokenMode.INVERSE_WRAPPED, bytes32(uint256(1)));
+
+        BridgeEscrow.ReleaseIntent memory intent = _defaultIntent(address(w), bob, 100e6);
+        bytes memory sig = _sign(signerPk, intent);
+        vm.expectRevert(BridgeEscrow.WrongMode.selector);
+        escrow.claim(intent, sig);
+    }
+
+    function test_ProvisionInventory_AddsToBalance() public {
+        MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
+        vm.prank(owner);
+        escrow.setTokenMode(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
+
+        moto.mint(owner, 1_000e6);
+        uint256 escrowBefore = moto.balanceOf(address(escrow));
+
+        vm.startPrank(owner);
+        moto.approve(address(escrow), 1_000e6);
+        escrow.provisionInventory(address(moto), 600e6);
+        vm.stopPrank();
+
+        assertEq(moto.balanceOf(address(escrow)), escrowBefore + 600e6);
+    }
+
+    function test_ProvisionInventory_OnlyOwner() public {
+        MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
+        vm.prank(owner);
+        escrow.setTokenMode(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
+        moto.mint(alice, 100e6);
+        vm.startPrank(alice);
+        moto.approve(address(escrow), 100e6);
+        vm.expectRevert();
+        escrow.provisionInventory(address(moto), 50e6);
+        vm.stopPrank();
+    }
+
+    function test_DrainInventory_GuardianOnlyWhenPaused() public {
+        // Set up: register MOTO + provision + set treasury/guardian + pause.
+        MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
+        vm.prank(owner);
+        escrow.setTokenMode(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
+        moto.mint(owner, 1_000e6);
+        vm.startPrank(owner);
+        moto.approve(address(escrow), 1_000e6);
+        escrow.provisionInventory(address(moto), 1_000e6);
+        escrow.setGuardian(guardian);
+        escrow.setTreasury(treasuryAddr);
+        escrow.pause();
+        vm.stopPrank();
+
+        // Owner can NOT drain (must be guardian).
+        vm.prank(owner);
+        vm.expectRevert(BridgeEscrow.NotGuardian.selector);
+        escrow.drainInventory(address(moto), 100e6);
+
+        // Guardian can drain to treasury.
+        vm.prank(guardian);
+        escrow.drainInventory(address(moto), 100e6);
+        assertEq(moto.balanceOf(treasuryAddr), 100e6);
+    }
+
+    function test_ClaimMintWrapped_HappyPath_Mode2() public {
+        // Deploy a WrappedERC20 owned by us, with bridge = escrow proxy.
+        WrappedERC20 wmoto = new WrappedERC20(
+            "Wrapped MOTO",
+            "wMOTO",
+            owner,
+            address(escrow),
+            EXPECTED_OPNET_CHAIN_ID,
+            bytes32(uint256(0xC0DE))
+        );
+        vm.prank(owner);
+        escrow.setTokenMode(address(wmoto), BridgeEscrow.TokenMode.INVERSE_WRAPPED, bytes32(uint256(0xC0DE)));
+
+        BridgeEscrow.MintIntent memory mi = BridgeEscrow.MintIntent({
+            wrappedToken: address(wmoto),
+            to: bob,
+            amount: 100e6,
+            srcChainId: EXPECTED_OPNET_CHAIN_ID,
+            opnetTxHash: keccak256("opnet-tx-mint-1"),
+            opnetEventIndex: 0,
+            burnNonce: 1,
+            signerEpoch: escrow.currentEpoch(),
+            opnetNonce: keccak256("opnet-nonce-mint-1")
+        });
+        bytes memory sig = _signMintIntent(signerPk, mi);
+
+        escrow.claimMintWrapped(mi, sig);
+        assertEq(wmoto.balanceOf(bob), 100e6);
+        assertTrue(escrow.signaturesUsed(mi.opnetNonce));
+    }
+
+    function test_ClaimMintWrapped_RevertsForWrappedToken() public {
+        // USDC is mode WRAPPED; claimMintWrapped against it should revert.
+        BridgeEscrow.MintIntent memory mi = BridgeEscrow.MintIntent({
+            wrappedToken: address(usdc),
+            to: bob,
+            amount: 100e6,
+            srcChainId: EXPECTED_OPNET_CHAIN_ID,
+            opnetTxHash: keccak256("x"),
+            opnetEventIndex: 0,
+            burnNonce: 1,
+            signerEpoch: escrow.currentEpoch(),
+            opnetNonce: keccak256("y")
+        });
+        bytes memory sig = _signMintIntent(signerPk, mi);
+        vm.expectRevert(BridgeEscrow.WrongMode.selector);
+        escrow.claimMintWrapped(mi, sig);
+    }
+
+    // =====================================================================
+    // WrappedERC20 sanity
+    // =====================================================================
+
+    function test_WrappedERC20_Mint_OnlyBridge() public {
+        WrappedERC20 wmoto = new WrappedERC20(
+            "wMOTO", "wMOTO", owner, address(escrow), EXPECTED_OPNET_CHAIN_ID, bytes32(uint256(1))
+        );
+        vm.expectRevert(WrappedERC20.NotBridge.selector);
+        wmoto.mintFromBridge(alice, 100);
+    }
+
+    function test_WrappedERC20_BurnForRelease_EmitsAndDecrements() public {
+        WrappedERC20 wmoto = new WrappedERC20(
+            "wMOTO", "wMOTO", owner, address(escrow), EXPECTED_OPNET_CHAIN_ID, bytes32(uint256(1))
+        );
+        vm.prank(address(escrow));
+        wmoto.mintFromBridge(alice, 1_000e6);
+        assertEq(wmoto.balanceOf(alice), 1_000e6);
+
+        bytes32 opnetRcp = bytes32(uint256(0xBEEF));
+        vm.prank(alice);
+        wmoto.burnForRelease(opnetRcp, 250e6);
+        assertEq(wmoto.balanceOf(alice), 750e6);
+        assertEq(wmoto.burnNonce(), 1);
+    }
+
+    // =====================================================================
+    // EIP-712 helper for MintIntent
+    // =====================================================================
+
+    bytes32 internal constant MINT_INTENT_TYPEHASH =
+        keccak256(
+            "MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)"
+        );
+
+    function _signMintIntent(uint256 pk, BridgeEscrow.MintIntent memory mi)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                MINT_INTENT_TYPEHASH,
+                mi.wrappedToken,
+                mi.to,
+                mi.amount,
+                mi.srcChainId,
+                mi.opnetTxHash,
+                mi.opnetEventIndex,
+                mi.burnNonce,
+                mi.signerEpoch,
+                mi.opnetNonce
+            )
+        );
+        bytes32 d = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(address(escrow)), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, d);
+        bytes memory raw = abi.encodePacked(r, s, v);
+        return abi.encodePacked(uint8(1), raw);
     }
 }

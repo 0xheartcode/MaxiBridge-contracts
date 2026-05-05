@@ -161,6 +161,133 @@
             ]
         },
         {
+            "name": "setTokenMode",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "token",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "mode",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "evmCounterpart",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "tokenMode",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "mode",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "evmCounterpartOf",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "counterpart",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "lockForBridge",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "canonicalToken",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "evmRecipient",
+                    "type": "BYTES32"
+                },
+                {
+                    "name": "destChainId",
+                    "type": "UINT32"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "claimReleaseWithVoucher",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "voucher",
+                    "type": "BYTES"
+                },
+                {
+                    "name": "mldsaSig",
+                    "type": "BYTES"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "provisionInventoryOpNet",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "token",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "drainInventoryOpNet",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "token",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "recipient",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
             "name": "addSignerToSet",
             "type": "Function",
             "payable": false,
@@ -427,6 +554,144 @@
                 },
                 {
                     "name": "newSignerHash",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "TokenModeSet",
+            "values": [
+                {
+                    "name": "token",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "mode",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "evmCounterpart",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "LockedForBridge",
+            "values": [
+                {
+                    "name": "canonicalToken",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "user",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "evmRecipient",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "destChainId",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "lockNonce",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "mode",
+                    "type": "UINT32"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "ReleasedFromVoucher",
+            "values": [
+                {
+                    "name": "recipient",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "canonicalToken",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "sourceChainId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "sourceTxHash",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "sourceLogIndex",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "grossAmount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "feeAmount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "netAmount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "voucherId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "signerEpoch",
+                    "type": "UINT32"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "InventoryProvisionedOpNet",
+            "values": [
+                {
+                    "name": "token",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "by",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "InventoryDrainedOpNet",
+            "values": [
+                {
+                    "name": "token",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "to",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "by",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
                     "type": "UINT256"
                 }
             ],

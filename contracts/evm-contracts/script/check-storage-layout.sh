@@ -33,9 +33,21 @@ forge inspect BridgeEscrow storageLayout --json > "$TMP_FRESH"
 # Drop astId from every storage entry — only the slot/offset/label/type
 # matter for upgrade compatibility. Keep deterministic key ordering with
 # `--sort-keys` so the diff stays meaningful.
+#
+# Also strip the trailing astId numbers that Solidity bakes into type names
+# (e.g. `t_enum(TokenMode)47694`, `t_struct(Foo)1234_storage`,
+# `t_contract(Bar)5678`, `t_userDefinedValueType(Baz)999`). These numbers
+# shift between compiles based on AST node ordering and would otherwise
+# break the gate even when no slot moved.
 NORMALIZE='walk(if type == "object" and has("astId") then del(.astId) else . end)'
-jq --sort-keys "$NORMALIZE" "$SNAPSHOT" > "$TMP_SNAP_NORM"
-jq --sort-keys "$NORMALIZE" "$TMP_FRESH" > "$TMP_FRESH_NORM"
+STRIP_TYPE_ASTIDS='
+  s/(t_enum\([A-Za-z0-9_]+\))[0-9]+/\1/g
+  s/(t_struct\([A-Za-z0-9_.]+\))[0-9]+(_storage)/\1\2/g
+  s/(t_contract\([A-Za-z0-9_]+\))[0-9]+/\1/g
+  s/(t_userDefinedValueType\([A-Za-z0-9_]+\))[0-9]+/\1/g
+'
+jq --sort-keys "$NORMALIZE" "$SNAPSHOT" | sed -E "$STRIP_TYPE_ASTIDS" > "$TMP_SNAP_NORM"
+jq --sort-keys "$NORMALIZE" "$TMP_FRESH"   | sed -E "$STRIP_TYPE_ASTIDS" > "$TMP_FRESH_NORM"
 
 if ! diff -q "$TMP_SNAP_NORM" "$TMP_FRESH_NORM" >/dev/null; then
   echo "error: BridgeEscrow storage layout changed." >&2

@@ -19,6 +19,63 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'TokenModeSet',
+        values: [
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'mode', type: ABIDataTypes.UINT32 },
+            { name: 'evmCounterpart', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'LockedForBridge',
+        values: [
+            { name: 'canonicalToken', type: ABIDataTypes.ADDRESS },
+            { name: 'user', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+            { name: 'evmRecipient', type: ABIDataTypes.UINT256 },
+            { name: 'destChainId', type: ABIDataTypes.UINT32 },
+            { name: 'lockNonce', type: ABIDataTypes.UINT256 },
+            { name: 'mode', type: ABIDataTypes.UINT32 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'ReleasedFromVoucher',
+        values: [
+            { name: 'recipient', type: ABIDataTypes.ADDRESS },
+            { name: 'canonicalToken', type: ABIDataTypes.ADDRESS },
+            { name: 'sourceChainId', type: ABIDataTypes.UINT256 },
+            { name: 'sourceTxHash', type: ABIDataTypes.UINT256 },
+            { name: 'sourceLogIndex', type: ABIDataTypes.UINT32 },
+            { name: 'grossAmount', type: ABIDataTypes.UINT256 },
+            { name: 'feeAmount', type: ABIDataTypes.UINT256 },
+            { name: 'netAmount', type: ABIDataTypes.UINT256 },
+            { name: 'voucherId', type: ABIDataTypes.UINT256 },
+            { name: 'signerEpoch', type: ABIDataTypes.UINT32 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'InventoryProvisionedOpNet',
+        values: [
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'by', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'InventoryDrainedOpNet',
+        values: [
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'to', type: ABIDataTypes.ADDRESS },
+            { name: 'by', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'Paused',
         values: [],
         type: BitcoinAbiTypes.Event,
@@ -132,6 +189,69 @@ export const BridgeDepositoryAbi = [
         constant: true,
         inputs: [],
         outputs: [{ name: 'amount', type: ABIDataTypes.UINT256 }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setTokenMode',
+        inputs: [
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'mode', type: ABIDataTypes.UINT256 },
+            { name: 'evmCounterpart', type: ABIDataTypes.UINT256 },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'tokenMode',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'mode', type: ABIDataTypes.UINT256 }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'evmCounterpartOf',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'counterpart', type: ABIDataTypes.UINT256 }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'lockForBridge',
+        inputs: [
+            { name: 'canonicalToken', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+            { name: 'evmRecipient', type: ABIDataTypes.BYTES32 },
+            { name: 'destChainId', type: ABIDataTypes.UINT32 },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'claimReleaseWithVoucher',
+        inputs: [
+            { name: 'voucher', type: ABIDataTypes.BYTES },
+            { name: 'mldsaSig', type: ABIDataTypes.BYTES },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'provisionInventoryOpNet',
+        inputs: [
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'drainInventoryOpNet',
+        inputs: [
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+            { name: 'recipient', type: ABIDataTypes.ADDRESS },
+        ],
+        outputs: [],
         type: BitcoinAbiTypes.Function,
     },
     {

@@ -88,3 +88,99 @@ export class MintedFromVoucher extends NetEvent {
         super('MintedFromVoucher', data);
     }
 }
+
+// ─── Mode dispatch (Phase 1.5 — 4 modes) ───────────────────────────────
+
+export class TokenModeSet extends NetEvent {
+    constructor(token: Address, mode: u32, evmCounterpart: u256) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH + 4 + 32);
+        data.writeAddress(token);
+        data.writeU32(mode);
+        data.writeU256(evmCounterpart);
+        super('TokenModeSet', data);
+    }
+}
+
+// ─── Mode-2/4 lock + release ─────────────────────────────────────────
+
+/**
+ * Emitted on lockForBridge — user locks canonical OP20 (modes 2/4) on
+ * OPNet to bridge to EVM. Indexer picks this up and signs an EIP-712
+ * MintIntent (mode 2) or ReleaseIntent (mode 4) for the EVM side.
+ */
+export class LockedForBridge extends NetEvent {
+    constructor(
+        canonicalToken: Address,
+        user: Address,
+        amount: u256,
+        evmRecipient: u256, // bytes32 left-padded EVM addr
+        destChainId: u32,
+        lockNonce: u256,
+        mode: u32,
+    ) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32 + 32 + 4 + 32 + 4);
+        data.writeAddress(canonicalToken);
+        data.writeAddress(user);
+        data.writeU256(amount);
+        data.writeU256(evmRecipient);
+        data.writeU32(destChainId);
+        data.writeU256(lockNonce);
+        data.writeU32(mode);
+        super('LockedForBridge', data);
+    }
+}
+
+/**
+ * Emitted on claimReleaseWithVoucher — bridge releases canonical OP20
+ * (modes 2/4) to user against an ML-DSA voucher signed by the M-of-N
+ * signer set, in response to an EVM-side burn.
+ */
+export class ReleasedFromVoucher extends NetEvent {
+    constructor(
+        recipient: Address,
+        canonicalToken: Address,
+        sourceChainId: u256,
+        sourceTxHash: u256,
+        sourceLogIndex: u32,
+        grossAmount: u256,
+        feeAmount: u256,
+        netAmount: u256,
+        voucherId: u256,
+        signerEpoch: u32,
+    ) {
+        // Same shape as MintedFromVoucher — 264 bytes total.
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32 * 6 + 4 * 2);
+        data.writeAddress(recipient);
+        data.writeAddress(canonicalToken);
+        data.writeU256(sourceChainId);
+        data.writeU256(sourceTxHash);
+        data.writeU32(sourceLogIndex);
+        data.writeU256(grossAmount);
+        data.writeU256(feeAmount);
+        data.writeU256(netAmount);
+        data.writeU256(voucherId);
+        data.writeU32(signerEpoch);
+        super('ReleasedFromVoucher', data);
+    }
+}
+
+export class InventoryProvisionedOpNet extends NetEvent {
+    constructor(token: Address, by: Address, amount: u256) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32);
+        data.writeAddress(token);
+        data.writeAddress(by);
+        data.writeU256(amount);
+        super('InventoryProvisionedOpNet', data);
+    }
+}
+
+export class InventoryDrainedOpNet extends NetEvent {
+    constructor(token: Address, to: Address, by: Address, amount: u256) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 3 + 32);
+        data.writeAddress(token);
+        data.writeAddress(to);
+        data.writeAddress(by);
+        data.writeU256(amount);
+        super('InventoryDrainedOpNet', data);
+    }
+}
