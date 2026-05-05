@@ -142,12 +142,15 @@ export class BridgeDepository extends ReentrancyGuard {
         // AddressMemoryMap MUST be initialized in the constructor body.
         this._wrappedTokens = new AddressMemoryMap(this._wrappedTokensPointer);
 
-        // Updatable-via-plugin: 144 blocks (~24h) timelock between
-        // submitUpdate and applyUpdate. Pointers allocated at the END of the
+        // Phase 2.2 — 7-day upgrade timelock.
+        // Updatable-via-plugin: 1008 blocks (~7 days at 10min/block) timelock
+        // between submitUpdate and applyUpdate. Gives users a full week to
+        // exit before any upgrade lands, matching the EVM-side
+        // TimelockController(604800s). Pointers allocated at the END of the
         // constructor body so they append after every previously declared
         // storage slot, preserving append-only discipline for future
         // upgrades.
-        this.registerPlugin(new UpdatablePlugin(144));
+        this.registerPlugin(new UpdatablePlugin(1008));
     }
 
     public override onDeployment(calldata: Calldata): void {

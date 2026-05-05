@@ -71,12 +71,13 @@ export class WrappedOP20 extends OP20S {
     public constructor() {
         super();
 
-        // Updatable-via-plugin: 144 blocks (~24h) timelock between
-        // submitUpdate and applyUpdate. Registered last in the constructor
-        // body so its 2 storage pointers append after every previously
-        // declared slot, preserving append-only discipline for future
-        // upgrades.
-        this.registerPlugin(new UpdatablePlugin(144));
+        // Phase 2.2 — 7-day upgrade timelock (1008 blocks ≈ 7 days at
+        // 10 min/block). Matches BridgeDepository.ts; gives users a full
+        // week to exit before any upgrade lands.
+        // Registered last in the constructor body so its 2 storage pointers
+        // append after every previously declared slot, preserving
+        // append-only discipline for future upgrades.
+        this.registerPlugin(new UpdatablePlugin(1008));
     }
 
     public override onDeployment(calldata: Calldata): void {
