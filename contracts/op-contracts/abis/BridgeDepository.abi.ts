@@ -106,6 +106,35 @@ export const BridgeDepositoryAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
+        name: 'setWrapFeeBps',
+        inputs: [{ name: 'bps', type: ABIDataTypes.UINT256 }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setWrapMinFee',
+        inputs: [
+            { name: 'wrappedToken', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'wrapFeeBps',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'bps', type: ABIDataTypes.UINT256 }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'wrapMinFee',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'amount', type: ABIDataTypes.UINT256 }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
         name: 'addSignerToSet',
         inputs: [{ name: 'pubKeyHash', type: ABIDataTypes.UINT256 }],
         outputs: [],

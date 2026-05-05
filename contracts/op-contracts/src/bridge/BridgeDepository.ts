@@ -51,6 +51,14 @@ const MLDSA_LEVEL2_SIG_LEN: u32 = 2420;
 const MLDSA_SIG_BLOB_LEN: u32 = 4 + MLDSA_LEVEL2_PUBKEY_LEN + MLDSA_LEVEL2_SIG_LEN; // 3736
 
 /**
+ * Hard cap on the governor-settable wrap fee, in basis points
+ * (1 bp = 0.01%). 1000 bps = 10%. Prevents a hostile or compromised
+ * governor from making the bridge effectively un-usable via fee
+ * inflation.
+ */
+const MAX_WRAP_FEE_BPS: u32 = 1000;
+
+/**
  * Voucher preimage length in bytes.
  *
  * Layout (byte-for-byte, MUST match server/src/voucher.ts):
@@ -159,6 +167,24 @@ export class BridgeDepository extends ReentrancyGuard {
     // top of the existing governor path. Set by the governor via
     // `setAuthorityAddress`. Zero by default.
     private _authorityAddress: StoredAddress = new StoredAddress(Blockchain.nextPointer);
+
+    // ─── Modular wrap fee (governor-settable, capped at 10%) ──────────
+    // Wrap fee, bps (1 bp = 0.01%). Charged on the EVM→OPNet wrap path
+    // ("wrapping" canonical USDC/USDT into wUSDC/wUSDT). Default 0.
+    // Hard-capped at MAX_WRAP_FEE_BPS = 1000 (10%) so a hostile or
+    // compromised governor cannot trap user funds via fee inflation.
+    //
+    // The actual fee math runs server-side at sign time
+    // (computeFee(gross, bps, minFee)) and is recorded as feeAmount /
+    // netAmount in the 460-byte voucher preimage; the contract is the
+    // source of truth for the bps value and the server reads it before
+    // signing.
+    private _wrapFeeBps: StoredU256 = new StoredU256(Blockchain.nextPointer, EMPTY_POINTER);
+    // Per-wrapped-token minimum wrap fee. Keyed by sha256(wrappedToken
+    // address) → u256 (token base units, 6 dec for wUSDC/wUSDT).
+    // Whichever is higher between bps-derived and minFee is taken.
+    // Default 0.
+    private _wrapMinFee: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
     public constructor() {
         super();
@@ -442,6 +468,63 @@ export class BridgeDepository extends ReentrancyGuard {
         this.onlyGovernor();
         this._authorityAddress.value = calldata.readAddress();
         return new BytesWriter(0);
+    }
+
+    /**
+     * Modular wrap fee — governor-settable, capped at MAX_WRAP_FEE_BPS
+     * (1000 bps = 10%). Default 0. The contract stores the bps; the
+     * server reads it before signing each voucher and reflects the
+     * resulting feeAmount in the 460-byte preimage.
+     */
+    @method({ name: 'bps', type: ABIDataTypes.UINT256 })
+    public setWrapFeeBps(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const bps: u256 = calldata.readU256();
+        if (u256.gt(bps, u256.fromU32(MAX_WRAP_FEE_BPS))) {
+            throw new Revert('BridgeDepository: wrap fee bps too high');
+        }
+        this._wrapFeeBps.value = bps;
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Per-wrapped-token minimum wrap fee. Whichever is higher between
+     * bps-derived and minFee is the actual fee taken. No cap on minFee
+     * (governor's responsibility to keep it well below typical user
+     * amounts). Default 0.
+     */
+    @method(
+        { name: 'wrappedToken', type: ABIDataTypes.ADDRESS },
+        { name: 'amount', type: ABIDataTypes.UINT256 },
+    )
+    public setWrapMinFee(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const wrappedToken: Address = calldata.readAddress();
+        if (wrappedToken.isZero()) {
+            throw new Revert('BridgeDepository: zero wrappedToken');
+        }
+        const amount: u256 = calldata.readU256();
+        const key: u256 = _wrapMinFeeKey(wrappedToken);
+        this._wrapMinFee.set(key, amount);
+        return new BytesWriter(0);
+    }
+
+    @view
+    @returns({ name: 'bps', type: ABIDataTypes.UINT256 })
+    public wrapFeeBps(_calldata: Calldata): BytesWriter {
+        const r = new BytesWriter(32);
+        r.writeU256(this._wrapFeeBps.value);
+        return r;
+    }
+
+    @view
+    @returns({ name: 'amount', type: ABIDataTypes.UINT256 })
+    public wrapMinFee(calldata: Calldata): BytesWriter {
+        const wrappedToken: Address = calldata.readAddress();
+        const key: u256 = _wrapMinFeeKey(wrappedToken);
+        const r = new BytesWriter(32);
+        r.writeU256(this._wrapMinFee.get(key));
+        return r;
     }
 
     /**
@@ -1033,5 +1116,15 @@ function buildSourceEventKey(
     buf.writeAddress(sourceTokenAddr);
     buf.writeU256(sourceTxHash);
     buf.writeU32(sourceLogIndex);
+    return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
+}
+
+/**
+ * sha256 hash of a 32-byte address — used as the StoredMapU256 key for
+ * `_wrapMinFee[wrappedToken]`.
+ */
+function _wrapMinFeeKey(wrappedToken: Address): u256 {
+    const buf = new BytesWriter(32);
+    buf.writeAddress(wrappedToken);
     return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
 }

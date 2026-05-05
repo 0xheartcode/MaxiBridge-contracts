@@ -87,6 +87,36 @@ export type IsVoucherCancelled = CallResult<
 export type SetAuthorityAddress = CallResult<{}, OPNetEvent<never>[]>;
 
 /**
+ * @description Represents the result of the setWrapFeeBps function call.
+ */
+export type SetWrapFeeBps = CallResult<{}, OPNetEvent<never>[]>;
+
+/**
+ * @description Represents the result of the setWrapMinFee function call.
+ */
+export type SetWrapMinFee = CallResult<{}, OPNetEvent<never>[]>;
+
+/**
+ * @description Represents the result of the wrapFeeBps function call.
+ */
+export type WrapFeeBps = CallResult<
+    {
+        bps: bigint;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the wrapMinFee function call.
+ */
+export type WrapMinFee = CallResult<
+    {
+        amount: bigint;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
  * @description Represents the result of the addSignerToSet function call.
  */
 export type AddSignerToSet = CallResult<{}, OPNetEvent<never>[]>;
@@ -248,6 +278,10 @@ export interface IBridgeDepository extends IOP_NETContract {
     cancelVoucher(voucherId: bigint): Promise<CancelVoucher>;
     isVoucherCancelled(): Promise<IsVoucherCancelled>;
     setAuthorityAddress(authority: Address): Promise<SetAuthorityAddress>;
+    setWrapFeeBps(bps: bigint): Promise<SetWrapFeeBps>;
+    setWrapMinFee(wrappedToken: Address, amount: bigint): Promise<SetWrapMinFee>;
+    wrapFeeBps(): Promise<WrapFeeBps>;
+    wrapMinFee(): Promise<WrapMinFee>;
     addSignerToSet(pubKeyHash: bigint): Promise<AddSignerToSet>;
     removeSignerFromSet(pubKeyHash: bigint): Promise<RemoveSignerFromSet>;
     setRequiredSignatures(threshold: bigint): Promise<SetRequiredSignatures>;

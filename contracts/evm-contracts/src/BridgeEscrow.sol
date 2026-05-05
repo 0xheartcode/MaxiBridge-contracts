@@ -54,6 +54,11 @@ contract BridgeEscrow is
             "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)"
         );
 
+    /// @notice Hard cap on `unwrapFeeBps`. 1000 = 10%. A hostile or
+    ///         compromised governor cannot set the bridge fee higher than
+    ///         this — protects users from being effectively trapped.
+    uint256 public constant MAX_FEE_BPS = 1000;
+
     // ---------------------------------------------------------------------
     // Storage layout (clean — append-only from here on)
     // ---------------------------------------------------------------------
@@ -99,9 +104,28 @@ contract BridgeEscrow is
     ///         cannot be changed — prevents redirection by a compromised owner.
     address public treasury;
 
+    /// @notice Unwrap fee, bps (1 bp = 0.01%). Charged on the OPNet→EVM
+    ///         release leg ("unwrapping" wrapped tokens back to the
+    ///         canonical asset). Default 0 — set by the governor via
+    ///         `setUnwrapFeeBps`. Hard-capped at `MAX_FEE_BPS = 1000` (10%)
+    ///         so a hostile or compromised governor cannot make the
+    ///         bridge effectively un-redeemable.
+    ///
+    ///         The actual fee math runs server-side at sign time
+    ///         (`computeFee(gross, bps, minFee)`) and is recorded as
+    ///         `feeAmount` / `netAmount` in the EIP-712 release intent;
+    ///         the contract is the source of truth for the bps value
+    ///         and the server reads it before signing.
+    uint256 public unwrapFeeBps;
+
+    /// @notice Per-token minimum unwrap fee (token base units, 6 dec for
+    ///         USDC/USDT). Whichever is higher between bps-derived and
+    ///         minFee is taken. Default 0.
+    mapping(address => uint256) public unwrapMinFee;
+
     /// @dev Reserved for future appends. New slots go BEFORE the gap and the
     ///      gap shrinks by the same count to preserve layout.
-    uint256[50] private __gap;
+    uint256[48] private __gap;
 
     // ---------------------------------------------------------------------
     // Events
@@ -150,6 +174,8 @@ contract BridgeEscrow is
         uint256 newCount,
         uint256 newThreshold
     );
+    event UnwrapFeeBpsSet(uint256 indexed oldBps, uint256 indexed newBps);
+    event UnwrapMinFeeSet(address indexed token, uint256 indexed amount);
 
     // ---------------------------------------------------------------------
     // Errors
@@ -173,6 +199,7 @@ contract BridgeEscrow is
     error NotASigner();
     error AlreadyASigner();
     error InvalidThreshold();
+    error FeeBpsTooHigh();
     error InvalidSigBlob();
     error InsufficientSignatures();
     error DuplicateSigner();
@@ -475,6 +502,26 @@ contract BridgeEscrow is
         if (newGuardian == address(0)) revert ZeroAddress();
         guardian = newGuardian;
         emit GuardianSet(newGuardian);
+    }
+
+    /// @notice Update the unwrap fee bps. Capped at `MAX_FEE_BPS = 1000`
+    ///         (10%) so a compromised governor cannot trap user funds
+    ///         via fee inflation.
+    /// @param bps Fee in basis points (1 bp = 0.01%). Pass 0 to disable.
+    function setUnwrapFeeBps(uint256 bps) external onlyOwner {
+        if (bps > MAX_FEE_BPS) revert FeeBpsTooHigh();
+        uint256 old = unwrapFeeBps;
+        unwrapFeeBps = bps;
+        emit UnwrapFeeBpsSet(old, bps);
+    }
+
+    /// @notice Set the per-token minimum unwrap fee. Whichever is higher
+    ///         between bps-derived and minFee is the actual fee charged.
+    ///         No cap on minFee — keep it well below typical user amounts.
+    function setUnwrapMinFee(address token, uint256 amount) external onlyOwner {
+        if (token == address(0)) revert ZeroAddress();
+        unwrapMinFee[token] = amount;
+        emit UnwrapMinFeeSet(token, amount);
     }
 
     function emergencyWithdraw(address token, uint256 amount)
