@@ -8,6 +8,10 @@
         "depository": {
             "outFile": "build/BridgeDepository.wasm",
             "textFile": "build/BridgeDepository.wat"
+        },
+        "authority": {
+            "outFile": "build/BridgeAuthority.wasm",
+            "textFile": "build/BridgeAuthority.wat"
         }
     },
     "options": {

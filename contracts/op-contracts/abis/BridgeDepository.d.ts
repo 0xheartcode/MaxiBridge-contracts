@@ -82,6 +82,66 @@ export type IsVoucherCancelled = CallResult<
 >;
 
 /**
+ * @description Represents the result of the setAuthorityAddress function call.
+ */
+export type SetAuthorityAddress = CallResult<{}, OPNetEvent<never>[]>;
+
+/**
+ * @description Represents the result of the addSignerToSet function call.
+ */
+export type AddSignerToSet = CallResult<{}, OPNetEvent<never>[]>;
+
+/**
+ * @description Represents the result of the removeSignerFromSet function call.
+ */
+export type RemoveSignerFromSet = CallResult<{}, OPNetEvent<SignerRotatedEvent>[]>;
+
+/**
+ * @description Represents the result of the setRequiredSignatures function call.
+ */
+export type SetRequiredSignatures = CallResult<{}, OPNetEvent<SignerRotatedEvent>[]>;
+
+/**
+ * @description Represents the result of the authorityAddress function call.
+ */
+export type AuthorityAddress = CallResult<
+    {
+        authority: Address;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the signerCount function call.
+ */
+export type SignerCount = CallResult<
+    {
+        count: bigint;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the requiredSignatures function call.
+ */
+export type RequiredSignatures = CallResult<
+    {
+        threshold: bigint;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the isSignerAuthorized function call.
+ */
+export type IsSignerAuthorized = CallResult<
+    {
+        authorized: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
  * @description Represents the result of the setPaused function call.
  */
 export type SetPaused = CallResult<{}, OPNetEvent<PausedEvent | UnpausedEvent>[]>;
@@ -187,6 +247,14 @@ export interface IBridgeDepository extends IOP_NETContract {
     setInitialSigner(signerPubKey: Uint8Array): Promise<SetInitialSigner>;
     cancelVoucher(voucherId: bigint): Promise<CancelVoucher>;
     isVoucherCancelled(): Promise<IsVoucherCancelled>;
+    setAuthorityAddress(authority: Address): Promise<SetAuthorityAddress>;
+    addSignerToSet(pubKeyHash: bigint): Promise<AddSignerToSet>;
+    removeSignerFromSet(pubKeyHash: bigint): Promise<RemoveSignerFromSet>;
+    setRequiredSignatures(threshold: bigint): Promise<SetRequiredSignatures>;
+    authorityAddress(): Promise<AuthorityAddress>;
+    signerCount(): Promise<SignerCount>;
+    requiredSignatures(): Promise<RequiredSignatures>;
+    isSignerAuthorized(): Promise<IsSignerAuthorized>;
     setPaused(paused: boolean): Promise<SetPaused>;
     setGovernor(newGovernor: Address): Promise<SetGovernor>;
     claimMintWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<ClaimMintWithVoucher>;

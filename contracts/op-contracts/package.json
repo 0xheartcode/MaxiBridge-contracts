@@ -4,13 +4,15 @@
     "description": "Bridge OPNet contracts: WrappedOP20 + BridgeDepository",
     "type": "module",
     "scripts": {
-        "build": "npm run build:wrapped && npm run build:depository",
+        "build": "npm run build:wrapped && npm run build:depository && npm run build:authority",
         "build:wrapped": "asc src/wrapped/index.ts --config asconfig.json --target wrapped --use abort=src/wrapped/index/abort",
         "build:depository": "asc src/bridge/index.ts --config asconfig.json --target depository --use abort=src/bridge/index/abort",
-        "test": "npm run test:wrapped && npm run test:bridge",
+        "test": "npm run test:wrapped && npm run test:bridge && npm run test:authority",
         "test:wrapped": "npx tsx __test__/unit/tests/wrapped.ts",
         "test:bridge": "npx tsx __test__/unit/tests/bridge.ts",
-        "clean": "rm -rf build/*"
+        "clean": "rm -rf build/*",
+        "build:authority": "asc src/authority/index.ts --config asconfig.json --target authority --use abort=src/authority/index/abort",
+        "test:authority": "npx tsx __test__/unit/tests/authority.ts"
     },
     "dependencies": {
         "@btc-vision/as-bignum": "^1.0.0",

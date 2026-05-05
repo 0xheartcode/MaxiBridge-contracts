@@ -137,6 +137,29 @@ export class BridgeDepository extends ReentrancyGuard {
     // assigned at end of declared storage to preserve upgrade discipline.
     private _cancelledVouchers: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
+    // ─── Phase 1.3 — M-of-N signer set ─────────────────────────────────
+    // Set of authorized ML-DSA signer pubkey hashes for the CURRENT signer
+    // epoch. Used as a `Set<u256>` via the StoredMapU256 contract:
+    //   _signerKeyHashSet.get(hash) == u256.One  → authorized
+    //   _signerKeyHashSet.get(hash).isZero()     → not authorized
+    // The legacy `_bridgeSignerHashes[epoch]` slot is preserved in place
+    // for the backward-compat single-sig blob path; new vouchers use this
+    // set instead.
+    private _signerKeyHashSet: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    // Required number of valid signatures (M in M-of-N). u256, but in
+    // practice always small (1-5).
+    private _requiredSignatures: StoredU256 = new StoredU256(
+        Blockchain.nextPointer,
+        EMPTY_POINTER,
+    );
+    // Cached count of authorized signers. Maintained in lockstep with the
+    // set so we can sanity-check threshold ≤ count without iteration.
+    private _signerCount: StoredU256 = new StoredU256(Blockchain.nextPointer, EMPTY_POINTER);
+    // BridgeAuthority address authorized to call M-of-N admin methods on
+    // top of the existing governor path. Set by the governor via
+    // `setAuthorityAddress`. Zero by default.
+    private _authorityAddress: StoredAddress = new StoredAddress(Blockchain.nextPointer);
+
     public constructor() {
         super();
         // AddressMemoryMap MUST be initialized in the constructor body.
@@ -191,6 +214,18 @@ export class BridgeDepository extends ReentrancyGuard {
         // re-runs only once thanks to the version gate.
         const version = this._storageVersion.value;
         if (u256.lt(version, u256.fromU32(2))) {
+            // Phase 1.3 migration — seed the M-of-N signer set from the
+            // legacy single-signer state so the new claim path works
+            // immediately after the upgrade.
+            const epoch: u256 = this._signerEpoch.value;
+            const legacyHash: u256 = this._bridgeSignerHashes.get(epoch);
+            if (!legacyHash.isZero()) {
+                this._signerKeyHashSet.set(legacyHash, u256.One);
+                this._signerCount.value = u256.One;
+            }
+            this._requiredSignatures.value = u256.One;
+            // _authorityAddress left zero — governor sets it via a
+            // separate `setAuthorityAddress` call after upgrade.
             this._storageVersion.value = u256.fromU32(2);
         }
     }
@@ -213,6 +248,22 @@ export class BridgeDepository extends ReentrancyGuard {
         if (this._paused.value) {
             throw new Revert('BridgeDepository: paused');
         }
+    }
+
+    /**
+     * Phase 1.3 — `onlyGovernor()` extended to also accept the registered
+     * BridgeAuthority address. Lets governor handoff happen via the
+     * authority's PUSH path (`addBridgeSigner`, `removeBridgeSigner`,
+     * `setBridgeThreshold`) without giving up the direct-governor path
+     * for emergency operations.
+     */
+    private onlyGovernorOrAuthority(): void {
+        const sender = Blockchain.tx.sender;
+        const gov = this._governor.value;
+        if (!gov.isZero() && sender.equals(gov)) return;
+        const auth = this._authorityAddress.value;
+        if (!auth.isZero() && sender.equals(auth)) return;
+        throw new Revert('BridgeDepository: not governor or authority');
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -349,6 +400,137 @@ export class BridgeDepository extends ReentrancyGuard {
         const voucherId: u256 = calldata.readU256();
         const response = new BytesWriter(1);
         response.writeBoolean(!this._cancelledVouchers.get(voucherId).isZero());
+        return response;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Phase 1.3 — M-of-N signer set (governor or BridgeAuthority)
+    //  These selectors are PUSH targets for BridgeAuthority. They are also
+    //  callable directly by the governor for emergency operations.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Register the BridgeAuthority address that's allowed to push M-of-N
+     * admin updates. Governor-only. Set ONCE — re-pointing requires
+     * un-setting first (governor-only escape hatch).
+     */
+    @method({ name: 'authority', type: ABIDataTypes.ADDRESS })
+    public setAuthorityAddress(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        this._authorityAddress.value = calldata.readAddress();
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Add a signer pubkey hash to the authorized set. Does NOT bump the
+     * epoch — vouchers signed by the prior set remain valid (any sig from
+     * the prior set is still in the new superset). Liveness-friendly.
+     */
+    @method({ name: 'pubKeyHash', type: ABIDataTypes.UINT256 })
+    public addSignerToSet(calldata: Calldata): BytesWriter {
+        this.onlyGovernorOrAuthority();
+        const hash: u256 = calldata.readU256();
+        if (hash.isZero()) throw new Revert('BridgeDepository: zero signer hash');
+        if (!this._signerKeyHashSet.get(hash).isZero()) {
+            throw new Revert('BridgeDepository: signer already in set');
+        }
+        this._signerKeyHashSet.set(hash, u256.One);
+        this._signerCount.value = SafeMath.add(this._signerCount.value, u256.One);
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Remove a signer from the set. Bumps the signer epoch — vouchers
+     * signed exclusively by the removed signer (or the old set as a whole
+     * via legacy single-sig path) immediately stop verifying. Reverts if
+     * the removal would push count below threshold.
+     */
+    @method({ name: 'pubKeyHash', type: ABIDataTypes.UINT256 })
+    @emit('SignerRotated')
+    public removeSignerFromSet(calldata: Calldata): BytesWriter {
+        this.onlyGovernorOrAuthority();
+        const hash: u256 = calldata.readU256();
+        if (this._signerKeyHashSet.get(hash).isZero()) {
+            throw new Revert('BridgeDepository: not a signer');
+        }
+        const newCount: u256 = SafeMath.sub(this._signerCount.value, u256.One);
+        if (u256.lt(newCount, this._requiredSignatures.value)) {
+            throw new Revert('BridgeDepository: removal violates threshold');
+        }
+        this._signerKeyHashSet.set(hash, u256.Zero);
+        this._signerCount.value = newCount;
+
+        const oldEpoch: u256 = this._signerEpoch.value;
+        const u32Max: u256 = u256.fromU64(<u64>u32.MAX_VALUE);
+        if (u256.ge(oldEpoch, u32Max)) {
+            throw new Revert('BridgeDepository: signer epoch exhausted');
+        }
+        const newEpoch: u256 = SafeMath.add(oldEpoch, u256.One);
+        this._signerEpoch.value = newEpoch;
+        this.emitEvent(new SignerRotated(oldEpoch.toU32(), newEpoch.toU32(), hash));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Update the M-of-N threshold. Bumps the signer epoch. Threshold must
+     * be `1 ≤ m ≤ signerCount`.
+     */
+    @method({ name: 'threshold', type: ABIDataTypes.UINT256 })
+    @emit('SignerRotated')
+    public setRequiredSignatures(calldata: Calldata): BytesWriter {
+        this.onlyGovernorOrAuthority();
+        const m: u256 = calldata.readU256();
+        if (m.isZero()) throw new Revert('BridgeDepository: zero threshold');
+        if (u256.gt(m, this._signerCount.value)) {
+            throw new Revert('BridgeDepository: threshold > signerCount');
+        }
+        this._requiredSignatures.value = m;
+
+        const oldEpoch: u256 = this._signerEpoch.value;
+        const u32Max: u256 = u256.fromU64(<u64>u32.MAX_VALUE);
+        if (u256.ge(oldEpoch, u32Max)) {
+            throw new Revert('BridgeDepository: signer epoch exhausted');
+        }
+        const newEpoch: u256 = SafeMath.add(oldEpoch, u256.One);
+        this._signerEpoch.value = newEpoch;
+        this.emitEvent(new SignerRotated(oldEpoch.toU32(), newEpoch.toU32(), m));
+        return new BytesWriter(0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Phase 1.3 — M-of-N views
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @view
+    @returns({ name: 'authority', type: ABIDataTypes.ADDRESS })
+    public authorityAddress(_calldata: Calldata): BytesWriter {
+        const response = new BytesWriter(ADDRESS_BYTE_LENGTH);
+        response.writeAddress(this._authorityAddress.value);
+        return response;
+    }
+
+    @view
+    @returns({ name: 'count', type: ABIDataTypes.UINT256 })
+    public signerCount(_calldata: Calldata): BytesWriter {
+        const response = new BytesWriter(32);
+        response.writeU256(this._signerCount.value);
+        return response;
+    }
+
+    @view
+    @returns({ name: 'threshold', type: ABIDataTypes.UINT256 })
+    public requiredSignatures(_calldata: Calldata): BytesWriter {
+        const response = new BytesWriter(32);
+        response.writeU256(this._requiredSignatures.value);
+        return response;
+    }
+
+    @view
+    @returns({ name: 'authorized', type: ABIDataTypes.BOOL })
+    public isSignerAuthorized(calldata: Calldata): BytesWriter {
+        const hash: u256 = calldata.readU256();
+        const response = new BytesWriter(1);
+        response.writeBoolean(!this._signerKeyHashSet.get(hash).isZero());
         return response;
     }
 

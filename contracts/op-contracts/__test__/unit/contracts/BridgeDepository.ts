@@ -50,6 +50,26 @@ export class BridgeDepository extends ContractRuntime {
     private readonly isVoucherCancelledSelector: number = encodeNumericSelector(
         'isVoucherCancelled()',
     );
+    private readonly setAuthorityAddressSelector: number = encodeSelectorWithParams(
+        'setAuthorityAddress',
+        ABIDataTypes.ADDRESS,
+    );
+    private readonly addSignerToSetSelector: number = encodeSelectorWithParams(
+        'addSignerToSet',
+        ABIDataTypes.UINT256,
+    );
+    private readonly removeSignerFromSetSelector: number = encodeSelectorWithParams(
+        'removeSignerFromSet',
+        ABIDataTypes.UINT256,
+    );
+    private readonly setRequiredSignaturesSelector: number = encodeSelectorWithParams(
+        'setRequiredSignatures',
+        ABIDataTypes.UINT256,
+    );
+    private readonly authorityAddressSelector: number = encodeNumericSelector('authorityAddress()');
+    private readonly signerCountSelector: number = encodeNumericSelector('signerCount()');
+    private readonly requiredSignaturesSelector: number = encodeNumericSelector('requiredSignatures()');
+    private readonly isSignerAuthorizedSelector: number = encodeNumericSelector('isSignerAuthorized()');
     private readonly storageVersionSelector: number = encodeNumericSelector('storageVersion()');
     private readonly networkIdSelector: number = encodeNumericSelector('networkId()');
 
@@ -172,6 +192,63 @@ export class BridgeDepository extends ContractRuntime {
         w.writeAddress(sourceTokenAddr);
         w.writeU256(sourceTxHash);
         w.writeU32(sourceLogIndex);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readBoolean();
+    }
+
+    public async setAuthorityAddress(addr: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setAuthorityAddressSelector);
+        w.writeAddress(addr);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async addSignerToSet(hash: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.addSignerToSetSelector);
+        w.writeU256(hash);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async removeSignerFromSet(hash: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.removeSignerFromSetSelector);
+        w.writeU256(hash);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async setRequiredSignatures(threshold: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setRequiredSignaturesSelector);
+        w.writeU256(threshold);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async authorityAddress(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.authorityAddressSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
+    }
+
+    public async signerCount(): Promise<bigint> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.signerCountSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readU256();
+    }
+
+    public async requiredSignatures(): Promise<bigint> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.requiredSignaturesSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readU256();
+    }
+
+    public async isSignerAuthorized(hash: bigint): Promise<boolean> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.isSignerAuthorizedSelector);
+        w.writeU256(hash);
         const r = await this.getResponse(w.getBuffer());
         return r.readBoolean();
     }

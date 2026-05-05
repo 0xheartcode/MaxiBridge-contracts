@@ -1076,3 +1076,143 @@ await opnet('BridgeDepository — Phase 1.6 voucher cancellation', async (vm: OP
         Assert.expect(wusdcAddress.toString().length > 0).toEqual(true);
     });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// 18. Phase 1.3 — M-of-N signer set admin (direct governor calls)
+//
+// Exercises addSignerToSet / removeSignerFromSet / setRequiredSignatures
+// + setAuthorityAddress + the new view selectors. The forwarding chain
+// (BridgeAuthority → BridgeDepository) is tested in authority.ts.
+// ════════════════════════════════════════════════════════════════════════════
+
+await opnet('BridgeDepository — Phase 1.3 M-of-N admin (direct)', async (vm: OPNetUnit) => {
+    let setup: BridgeSetup;
+
+    vm.beforeEach(async () => {
+        Blockchain.dispose();
+        Blockchain.clearContracts();
+        await Blockchain.init();
+        setSender(deployer);
+        setup = await setupContracts();
+    });
+
+    vm.afterEach(() => disposeSetup(setup));
+
+    await vm.it('post-deploy: M-of-N storage starts empty', async () => {
+        const { depository } = setup;
+        // Fresh deploy bypasses onUpdate, so the M-of-N set + threshold
+        // both start at zero until the governor seeds them (or until an
+        // upgrade triggers the v1→v2 migration in onUpdate).
+        Assert.expect(await depository.signerCount()).toEqual(0n);
+        Assert.expect(await depository.requiredSignatures()).toEqual(0n);
+    });
+
+    await vm.it('addSignerToSet: governor adds a hash, count + view reflect it', async () => {
+        const { depository } = setup;
+        const hash = 0xdeadbeefn;
+        Assert.expect(await depository.isSignerAuthorized(hash)).toEqual(false);
+
+        setSender(deployer);
+        await depository.addSignerToSet(hash);
+        Assert.expect(await depository.isSignerAuthorized(hash)).toEqual(true);
+        Assert.expect(await depository.signerCount()).toEqual(1n);
+    });
+
+    await vm.it('addSignerToSet: non-governor reverts', async () => {
+        const { depository } = setup;
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.addSignerToSet(0xfeedn);
+        }).toThrow();
+    });
+
+    await vm.it('addSignerToSet: zero hash reverts', async () => {
+        const { depository } = setup;
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await depository.addSignerToSet(0n);
+        }).toThrow();
+    });
+
+    await vm.it('addSignerToSet: duplicate add reverts', async () => {
+        const { depository } = setup;
+        setSender(deployer);
+        await depository.addSignerToSet(0x1n);
+        await Assert.expect(async () => {
+            await depository.addSignerToSet(0x1n);
+        }).toThrow();
+    });
+
+    await vm.it('setRequiredSignatures: bumps epoch + threshold view', async () => {
+        const { depository } = setup;
+        setSender(deployer);
+        await depository.addSignerToSet(0x1n);
+        await depository.addSignerToSet(0x2n);
+        const epochBefore = await depository.signerEpoch();
+        await depository.setRequiredSignatures(2n);
+        Assert.expect(await depository.requiredSignatures()).toEqual(2n);
+        Assert.expect(await depository.signerEpoch()).toEqual(epochBefore + 1n);
+    });
+
+    await vm.it('setRequiredSignatures: threshold > count reverts', async () => {
+        const { depository } = setup;
+        setSender(deployer);
+        await depository.addSignerToSet(0x1n);
+        await Assert.expect(async () => {
+            await depository.setRequiredSignatures(2n); // count is 1
+        }).toThrow();
+    });
+
+    await vm.it('setRequiredSignatures: zero threshold reverts', async () => {
+        const { depository } = setup;
+        setSender(deployer);
+        await depository.addSignerToSet(0x1n);
+        await Assert.expect(async () => {
+            await depository.setRequiredSignatures(0n);
+        }).toThrow();
+    });
+
+    await vm.it('removeSignerFromSet: bumps epoch + count', async () => {
+        const { depository } = setup;
+        setSender(deployer);
+        await depository.addSignerToSet(0x1n);
+        await depository.addSignerToSet(0x2n);
+        await depository.setRequiredSignatures(1n);
+        const epochBefore = await depository.signerEpoch();
+        await depository.removeSignerFromSet(0x2n);
+        Assert.expect(await depository.signerCount()).toEqual(1n);
+        Assert.expect(await depository.isSignerAuthorized(0x2n)).toEqual(false);
+        Assert.expect(await depository.signerEpoch()).toEqual(epochBefore + 1n);
+    });
+
+    await vm.it('removeSignerFromSet: would violate threshold reverts', async () => {
+        const { depository } = setup;
+        setSender(deployer);
+        await depository.addSignerToSet(0x1n);
+        await depository.addSignerToSet(0x2n);
+        await depository.setRequiredSignatures(2n);
+        // Removing either signer would push count below threshold (2 → 1).
+        await Assert.expect(async () => {
+            await depository.removeSignerFromSet(0x1n);
+        }).toThrow();
+    });
+
+    await vm.it('setAuthorityAddress: governor wires the slot', async () => {
+        const { depository } = setup;
+        const someAuth = Blockchain.generateRandomAddress();
+        setSender(deployer);
+        await depository.setAuthorityAddress(someAuth);
+        Assert.expect((await depository.authorityAddress()).equals(someAuth)).toEqual(true);
+    });
+
+    await vm.it('after setAuthorityAddress, the registered authority can also call admin', async () => {
+        const { depository } = setup;
+        // Pretend `alice` is the BridgeAuthority address.
+        setSender(deployer);
+        await depository.setAuthorityAddress(alice);
+
+        setSender(alice);
+        await depository.addSignerToSet(0xabcn);
+        Assert.expect(await depository.isSignerAuthorized(0xabcn)).toEqual(true);
+    });
+});

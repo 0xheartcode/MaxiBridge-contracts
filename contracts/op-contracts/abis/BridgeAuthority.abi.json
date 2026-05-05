@@ -1,0 +1,289 @@
+{
+    "functions": [
+        {
+            "name": "setManagedContracts",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "depository",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "wusdc",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "wusdt",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "pushGovernor",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newGovernor",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "pushGuardian",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newGuardian",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "pauseAll",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": []
+        },
+        {
+            "name": "unpauseAll",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": []
+        },
+        {
+            "name": "addBridgeSigner",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "pubKeyHash",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "removeBridgeSigner",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "pubKeyHash",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setBridgeThreshold",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "threshold",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "migrateBridgeSignerSet",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "addHash",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "newThreshold",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "governor",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "governor",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
+            "name": "guardian",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "guardian",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
+            "name": "depository",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "depository",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
+            "name": "wusdc",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "wusdc",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
+            "name": "wusdt",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "wusdt",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
+            "name": "storageVersion",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "storageVersion",
+                    "type": "UINT256"
+                }
+            ]
+        }
+    ],
+    "events": [
+        {
+            "name": "AuthorityContractsSet",
+            "values": [
+                {
+                    "name": "depository",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "wusdc",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "wusdt",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "AuthorityGovernorUpdated",
+            "values": [
+                {
+                    "name": "oldGov",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "newGov",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "AuthorityGuardianUpdated",
+            "values": [
+                {
+                    "name": "oldGuardian",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "newGuardian",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "AuthorityPausedAll",
+            "values": [],
+            "type": "Event"
+        },
+        {
+            "name": "AuthorityUnpausedAll",
+            "values": [],
+            "type": "Event"
+        },
+        {
+            "name": "AuthoritySignerAdded",
+            "values": [
+                {
+                    "name": "pubKeyHash",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "AuthoritySignerRemoved",
+            "values": [
+                {
+                    "name": "pubKeyHash",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "AuthorityThresholdSet",
+            "values": [
+                {
+                    "name": "threshold",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        }
+    ]
+}
