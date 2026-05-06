@@ -1142,6 +1142,16 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: unknown wrappedToken');
         }
 
+        // ── Step 5b: token must be in a mintable mode ──
+        // Valid for WRAPPED (0) and NATIVE_BURN_MINT (2) only.
+        // INVERSE_WRAPPED (1) and POOLED_LOCK_RELEASE (3) use claimReleaseWithVoucher.
+        const mintMode: u256 = this._tokenMode.get(_addrKey(parsed.wrappedToken));
+        const isMintableWrapped: bool = mintMode.isZero();
+        const isMintableNative: bool = u256.eq(mintMode, u256.fromU32(2));
+        if (!isMintableWrapped && !isMintableNative) {
+            throw new Revert('BridgeDepository: token not in mintable mode');
+        }
+
         // ── Step 6: fee math invariant ──
         // gross must equal fee + net exactly. Prevents a rogue signer from
         // splitting a voucher into fields that don't add up.
