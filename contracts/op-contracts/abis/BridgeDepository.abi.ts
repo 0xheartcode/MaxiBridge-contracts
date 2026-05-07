@@ -152,6 +152,16 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'BurnConfirmed',
+        values: [
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
+            { name: 'depositId', type: ABIDataTypes.UINT256 },
+            { name: 'releasedAmount', type: ABIDataTypes.UINT256 },
+            { name: 'attester', type: ABIDataTypes.ADDRESS },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'Paused',
         values: [],
         type: BitcoinAbiTypes.Event,
@@ -465,6 +475,38 @@ export const BridgeDepositoryAbi = [
         name: 'setRequiredSignatures',
         inputs: [{ name: 'threshold', type: ABIDataTypes.UINT256 }],
         outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'migrateSignerSet',
+        inputs: [{ name: 'payload', type: ABIDataTypes.BYTES }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'governorProvisionFlowInventory',
+        inputs: [
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'confirmBurn',
+        inputs: [
+            { name: 'depositId', type: ABIDataTypes.UINT256 },
+            { name: 'attestation', type: ABIDataTypes.BYTES },
+            { name: 'mldsaSig', type: ABIDataTypes.BYTES },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'isBurnConfirmed',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'confirmed', type: ABIDataTypes.BOOL }],
         type: BitcoinAbiTypes.Function,
     },
     {

@@ -414,6 +414,27 @@ Server MUST pack in exactly this order. Frontend passes the blob through unchang
 | Method | Signature | Selector |
 |--------|-----------|----------|
 | `cancelVoucher` | `cancelVoucher(uint256)` | `0xdf78268e` |
+| `confirmBurn` (PR γ.2b) | `confirmBurn(uint256,bytes,bytes)` | `0x9cffeea6` |
+| `migrateSignerSet` (PR γ.2b) | `migrateSignerSet(bytes)` | `0x22f63062` |
+| `governorProvisionFlowInventory` (PR γ.2b) | `governorProvisionFlowInventory(uint256,uint256)` | `0x83734911` |
+| `isBurnConfirmed` (view, PR γ.2b) | `isBurnConfirmed(uint256)` | `0xc4282d4c` |
+
+**BurnAttestation preimage (PR γ.2b — 252 bytes):**
+```
+0    32   networkId
+32   32   contractSelf
+64    4   selector  (sha256('confirmBurn(uint256,bytes,bytes)') = 0x9cffeea6)
+68   32   flowId
+100  32   depositId
+132  32   evmTxHash
+164   4   evmLogIndex
+168  32   releasedAmount
+200  32   evmBlockHash
+232   4   signerEpoch
+236  16   relayerTip (parsed; not paid in v1 — accounted for future tip treasury)
+                   = 252
+```
+Inventory effects: mode 1 → flow.inventory++ (provisions OPNet pool from EVM-side burn so future mode-1 release vouchers can pay out). mode 3/4 → flow.inventory-- (release-side ack — closes a prior lock against pre-funded pool). Tip is recorded but NOT paid; mirrors EVM relayer model and lands once an on-chain tip-treasury exists.
 
 `BridgeDepository` registers `UpdatablePlugin(1008)` (Phase 2.2; was 144 pre-redesign) which adds standard upgrade selectors: `submitUpdate(address)`, `applyUpdate(address,bytes)`, `cancelUpdate()`, `pendingUpdate()`, `updateDelay()`. Governor-only. `WrappedOP20` is **NON-UPGRADEABLE** and exposes none of those selectors — wUSDC/wUSDT are canonical immutable tokens (see §5).
 

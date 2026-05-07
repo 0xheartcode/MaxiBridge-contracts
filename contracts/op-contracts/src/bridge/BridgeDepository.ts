@@ -40,6 +40,7 @@ import {
     FlowFeeChanged,
     FlowTipCapUpdated,
     RelayerTipPaid,
+    BurnConfirmed,
 } from './events';
 
 /**
@@ -128,6 +129,20 @@ const FLOW_WINDOW_DURATION: u64 = 86400;
  *   total                       508
  */
 const VOUCHER_PREIMAGE_LEN: i32 = 508;
+
+/**
+ * PR γ.2b — BurnAttestation preimage length. 252 bytes total.
+ * Layout in `BridgeDepository.confirmBurn` doc comment.
+ */
+const BURN_ATTESTATION_LEN: i32 = 252;
+
+/**
+ * SHA-256 selector of `confirmBurn(uint256,bytes,bytes)` first 4 bytes —
+ * bound into the BurnAttestation preimage so an attestation can only be
+ * consumed by this method. Verified by build-log: selector emitted by the
+ * OPNet transform is 0x9cffeea6 (see CLAUDE.md §8 for the hash table).
+ */
+const CONFIRM_BURN_SELECTOR: u32 = 0x9cffeea6;
 
 /**
  * BridgeDepository — mint authority for WrappedOP20.
@@ -299,6 +314,11 @@ export class BridgeDepository extends ReentrancyGuard {
         Blockchain.nextPointer,
         EMPTY_POINTER,
     );
+
+    // ─── PR γ.2b — confirmBurn replay guard ────────────────────────────
+    // depositId (u256) → u256.One when its EVM-side burn has been attested
+    // to by the M-of-N signer set. Append-only — slot at the end.
+    private _confirmedBurns: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
     public constructor() {
         super();
@@ -1263,46 +1283,8 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: zero netAmount');
         }
 
-        // M-of-N ML-DSA verification. Same blob format as
-        // claimMintWithVoucher.
-        if (<u32>sig.length < 4) throw new Revert('BridgeDepository: bad sig blob length');
-        const numSigs: u32 = readU32BE(sig, 0);
-        if (numSigs == 0 || numSigs > 16) throw new Revert('BridgeDepository: bad numSigs');
-        const required: u32 = this._requiredSignatures.value.toU32();
-        if (required == 0) throw new Revert('BridgeDepository: signer set not initialized');
-        const voucherHash: Uint8Array = sha256(voucher);
-        const seenR: Array<u256> = new Array<u256>(0);
-        let validCountR: u32 = 0;
-        let offR: u32 = 4;
-        for (let i: u32 = 0; i < numSigs; i++) {
-            if (offR + 4 > <u32>sig.length) throw new Revert('BridgeDepository: truncated pubLen');
-            const pubLen: u32 = readU32BE(sig, offR); offR += 4;
-            if (pubLen != MLDSA_LEVEL2_PUBKEY_LEN) throw new Revert('BridgeDepository: bad pubLen');
-            if (offR + pubLen > <u32>sig.length) throw new Revert('BridgeDepository: truncated pubKey');
-            const pubKey: Uint8Array = slice(sig, offR, offR + pubLen);
-            offR += pubLen;
-            if (offR + 4 > <u32>sig.length) throw new Revert('BridgeDepository: truncated sigLen');
-            const sigLen: u32 = readU32BE(sig, offR); offR += 4;
-            if (sigLen != MLDSA_LEVEL2_SIG_LEN) throw new Revert('BridgeDepository: bad sigLen');
-            if (offR + sigLen > <u32>sig.length) throw new Revert('BridgeDepository: truncated rawSig');
-            const rawSig: Uint8Array = slice(sig, offR, offR + sigLen);
-            offR += sigLen;
-            const pubHash: u256 = u256.fromUint8ArrayBE(sha256(pubKey));
-            for (let j: i32 = 0; j < seenR.length; j++) {
-                if (u256.eq(seenR[j], pubHash)) {
-                    throw new Revert('BridgeDepository: duplicate signer');
-                }
-            }
-            seenR.push(pubHash);
-            if (this._signerKeyHashSet.get(pubHash).isZero()) continue;
-            if (Blockchain.verifyMLDSASignature(MLDSASecurityLevel.Level2, pubKey, rawSig, voucherHash)) {
-                validCountR++;
-            }
-        }
-        if (offR != <u32>sig.length) throw new Revert('BridgeDepository: trailing sig bytes');
-        if (validCountR < required) {
-            throw new Revert('BridgeDepository: insufficient valid signatures');
-        }
+        // PR γ.2b — M-of-N ML-DSA verification via shared helper.
+        this._verifyMofN(sig, voucher);
 
         // Cancellation + replay guards
         if (!this._cancelledVouchers.get(parsed.voucherId).isZero()) {
@@ -1572,6 +1554,321 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    //  PR γ.2b — atomic signer-set migration
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Atomic add/remove/setThreshold/epoch-bump for the M-of-N signer set.
+     * Mirrors the EVM `BridgeEscrow.migrateSignerSet(toAdd[], toRemove[],
+     * newThreshold)` so the rotation ceremony cannot land in a window where
+     * `numSigs > newThreshold` is briefly inconsistent.
+     *
+     * Calldata layout (variable):
+     *   addCount     u32 BE
+     *   addHashes    u256[addCount]    — pubKey-hashes to authorize
+     *   removeCount  u32 BE
+     *   removeHashes u256[removeCount] — pubKey-hashes to deauthorize
+     *   newThreshold u256              — new M (must satisfy 1 ≤ M ≤ count)
+     *
+     * Always bumps `_signerEpoch` exactly once at the end so vouchers signed
+     * under the previous set immediately stop verifying — matching the
+     * existing rotation pattern.
+     */
+    @method({ name: 'payload', type: ABIDataTypes.BYTES })
+    @emit('SignerRotated')
+    public migrateSignerSet(calldata: Calldata): BytesWriter {
+        this.onlyGovernorOrAuthority();
+        const payload: Uint8Array = calldata.readBytesWithLength();
+        let off: u32 = 0;
+        if (off + 4 > <u32>payload.length) {
+            throw new Revert('BridgeDepository: bad migrate payload');
+        }
+        const addCount: u32 = readU32BE(payload, off); off += 4;
+        if (addCount > 16) throw new Revert('BridgeDepository: too many adds');
+        for (let i: u32 = 0; i < addCount; i++) {
+            if (off + 32 > <u32>payload.length) {
+                throw new Revert('BridgeDepository: truncated add');
+            }
+            const hash: u256 = readU256BE(payload, off); off += 32;
+            if (hash.isZero()) throw new Revert('BridgeDepository: zero signer hash');
+            if (this._signerKeyHashSet.get(hash).isZero()) {
+                this._signerKeyHashSet.set(hash, u256.One);
+                this._signerCount.value = SafeMath.add(this._signerCount.value, u256.One);
+            }
+        }
+        if (off + 4 > <u32>payload.length) {
+            throw new Revert('BridgeDepository: missing remove count');
+        }
+        const removeCount: u32 = readU32BE(payload, off); off += 4;
+        if (removeCount > 16) throw new Revert('BridgeDepository: too many removes');
+        for (let i: u32 = 0; i < removeCount; i++) {
+            if (off + 32 > <u32>payload.length) {
+                throw new Revert('BridgeDepository: truncated remove');
+            }
+            const hash: u256 = readU256BE(payload, off); off += 32;
+            if (!this._signerKeyHashSet.get(hash).isZero()) {
+                this._signerKeyHashSet.set(hash, u256.Zero);
+                this._signerCount.value = SafeMath.sub(this._signerCount.value, u256.One);
+            }
+        }
+        if (off + 32 > <u32>payload.length) {
+            throw new Revert('BridgeDepository: missing newThreshold');
+        }
+        const newThreshold: u256 = readU256BE(payload, off); off += 32;
+        if (off != <u32>payload.length) {
+            throw new Revert('BridgeDepository: trailing migrate bytes');
+        }
+        if (newThreshold.isZero()) {
+            throw new Revert('BridgeDepository: zero threshold');
+        }
+        if (u256.gt(newThreshold, this._signerCount.value)) {
+            throw new Revert('BridgeDepository: threshold > signerCount');
+        }
+        this._requiredSignatures.value = newThreshold;
+
+        // Atomic epoch bump — old vouchers immediately invalidate.
+        const oldEpoch: u256 = this._signerEpoch.value;
+        const u32Max: u256 = u256.fromU64(<u64>u32.MAX_VALUE);
+        if (u256.ge(oldEpoch, u32Max)) {
+            throw new Revert('BridgeDepository: signer epoch exhausted');
+        }
+        const newEpoch: u256 = SafeMath.add(oldEpoch, u256.One);
+        this._signerEpoch.value = newEpoch;
+        this.emitEvent(new SignerRotated(oldEpoch.toU32(), newEpoch.toU32(), newThreshold));
+        return new BytesWriter(0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  PR γ.2b — governor inventory provisioning hatch (TEMPORARY)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Manual flow-inventory bump. Governor-only emergency hatch for cases
+     * where a pooled flow has drained and needs to be topped up before
+     * `confirmBurn` can carry the load. TEMPORARY — will be restricted /
+     * removed once `confirmBurn` is the universal inventory producer.
+     */
+    @method(
+        { name: 'flowId', type: ABIDataTypes.UINT256 },
+        { name: 'amount', type: ABIDataTypes.UINT256 },
+    )
+    public governorProvisionFlowInventory(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const flowId: u256 = calldata.readU256();
+        const amount: u256 = calldata.readU256();
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        if (amount.isZero()) throw new Revert('BridgeDepository: zero amount');
+        const cap: u256 = this._flowCap.get(flowId);
+        const before: u256 = this._flowInventory.get(flowId);
+        const after: u256 = SafeMath.add(before, amount);
+        if (u256.gt(after, cap)) {
+            throw new Revert('BridgeDepository: flow cap exceeded');
+        }
+        this._flowInventory.set(flowId, after);
+        return new BytesWriter(0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  PR γ.2b — confirmBurn (mode-1 / mode-4 OPNet→EVM proof)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Confirm an EVM-side burn against an M-of-N attestation. Two roles:
+     *   - mode 4 (POOLED_LOCK_RELEASE OPNet→EVM): the OPNet inventory was
+     *     held against an EVM lock that has now been burned ⇒ inventory --.
+     *   - mode 1 (INVERSE_WRAPPED OPNet→EVM via wUSDC burn): provisions
+     *     OPNet-side inventory so future mode-1 release vouchers can pay
+     *     out ⇒ inventory ++.
+     *
+     * BurnAttestation preimage layout (252 bytes total — see CLAUDE.md §8):
+     *   networkId         u256     32   (0)
+     *   contractSelf      Address  32   (32)
+     *   selector          u32       4   (64)  — sha256('confirmBurn(bytes32,bytes,bytes)')
+     *   flowId            u256     32   (68)
+     *   depositId         u256     32   (100)
+     *   evmTxHash         u256     32   (132)
+     *   evmLogIndex       u32       4   (164)
+     *   releasedAmount    u256     32   (168)
+     *   evmBlockHash      u256     32   (200)
+     *   signerEpoch       u32       4   (232)  — must equal current _signerSetEpoch
+     *   relayerTip        u128     16   (236)
+     *                                  = 252
+     *
+     * (252 ≠ the 220 hinted in the original spec — the field set agreed
+     * upon during PR γ.2b yields exactly 252 bytes; documented here.)
+     *
+     * Tip is parsed and recorded but NOT paid. v1 confirmBurn is a pure
+     * attestation: there is no on-chain tip-treasury yet, and minting OP20
+     * out of thin air for relayers would break invariants. Once a tip
+     * treasury exists this can route to it.
+     */
+    @method(
+        { name: 'depositId', type: ABIDataTypes.UINT256 },
+        { name: 'attestation', type: ABIDataTypes.BYTES },
+        { name: 'mldsaSig', type: ABIDataTypes.BYTES },
+    )
+    @emit('BurnConfirmed')
+    @nonReentrant
+    public confirmBurn(calldata: Calldata): BytesWriter {
+        this.requireNotPaused();
+
+        const depositId: u256 = calldata.readU256();
+        const attestation: Uint8Array = calldata.readBytesWithLength();
+        const sig: Uint8Array = calldata.readBytesWithLength();
+
+        if (attestation.length != BURN_ATTESTATION_LEN) {
+            throw new Revert('BridgeDepository: bad attestation length');
+        }
+
+        // Parse the fixed-layout preimage.
+        const networkId: u256 = readU256BE(attestation, 0);
+        if (!u256.eq(networkId, this._networkId.value)) {
+            throw new Revert('BridgeDepository: wrong networkId');
+        }
+        const contractSelf: Address = readAddress(attestation, 32);
+        if (!contractSelf.equals(this.address)) {
+            throw new Revert('BridgeDepository: wrong contractSelf');
+        }
+        const selector: u32 = readU32BE(attestation, 64);
+        if (selector != CONFIRM_BURN_SELECTOR) {
+            throw new Revert('BridgeDepository: wrong selector');
+        }
+        const flowId: u256 = readU256BE(attestation, 68);
+        const parsedDepositId: u256 = readU256BE(attestation, 100);
+        if (!u256.eq(parsedDepositId, depositId)) {
+            throw new Revert('BridgeDepository: depositId mismatch');
+        }
+        // evmTxHash @ 132, evmLogIndex @ 164 — opaque audit fields.
+        const releasedAmount: u256 = readU256BE(attestation, 168);
+        if (releasedAmount.isZero()) {
+            throw new Revert('BridgeDepository: zero releasedAmount');
+        }
+        // evmBlockHash @ 200 — opaque.
+        const sigEpoch: u32 = readU32BE(attestation, 232);
+        if (sigEpoch != this._signerEpoch.value.toU32()) {
+            throw new Revert('BridgeDepository: wrong signerEpoch');
+        }
+        // relayerTip @ 236 — parsed but not paid in v1.
+
+        // Replay guard.
+        if (!this._confirmedBurns.get(depositId).isZero()) {
+            throw new Revert('BridgeDepository: burn already confirmed');
+        }
+
+        // M-of-N verify.
+        this._verifyMofN(sig, attestation);
+
+        // Flow lookup + status check (active OR draining — burns may exit
+        // during drain).
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not registered');
+        }
+        const status: u32 = this._flowStatus.get(flowId).toU32();
+        if (status != FLOW_STATUS_ACTIVE && status != FLOW_STATUS_DRAINING) {
+            throw new Revert('BridgeDepository: flow not active');
+        }
+
+        // Inventory effect: mode 4 = decrement (release-side ack);
+        //                  mode 1 = increment (provisions OPNet inventory).
+        const mode: u32 = this._flowMode.get(flowId).toU32();
+        const inv: u256 = this._flowInventory.get(flowId);
+        if (mode == 4 || mode == 3) {
+            if (u256.lt(inv, releasedAmount)) {
+                throw new Revert('BridgeDepository: insufficient flow inventory');
+            }
+            this._flowInventory.set(flowId, SafeMath.sub(inv, releasedAmount));
+        } else if (mode == 1) {
+            const cap: u256 = this._flowCap.get(flowId);
+            const after: u256 = SafeMath.add(inv, releasedAmount);
+            if (u256.gt(after, cap)) {
+                throw new Revert('BridgeDepository: flow cap exceeded');
+            }
+            this._flowInventory.set(flowId, after);
+        } else {
+            throw new Revert('BridgeDepository: confirmBurn unsupported mode');
+        }
+
+        // CEI — mark replay before any further work (no external call here).
+        this._confirmedBurns.set(depositId, u256.One);
+
+        this.emitEvent(new BurnConfirmed(flowId, depositId, releasedAmount, Blockchain.tx.sender));
+        return new BytesWriter(0);
+    }
+
+    @view
+    @returns({ name: 'confirmed', type: ABIDataTypes.BOOL })
+    public isBurnConfirmed(calldata: Calldata): BytesWriter {
+        const depositId: u256 = calldata.readU256();
+        const r = new BytesWriter(1);
+        r.writeBoolean(!this._confirmedBurns.get(depositId).isZero());
+        return r;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  PR γ.2b — _verifyMofN helper (deduped from claimMint/Release)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Verify the M-of-N ML-DSA envelope against `voucherOrAttestation` (a
+     * preimage that this method sha256s before passing into the ML-DSA
+     * verifier). Reverts on any structural / threshold / authorization
+     * failure. Pure — no state mutation.
+     *
+     * Sig blob layout (must match what claimMint/Release/confirmBurn
+     * produce server-side):
+     *   [u32 BE numSigs]
+     *   for each i:
+     *     [u32 BE pubLen][pubKey][u32 BE sigLen][rawSig]
+     */
+    private _verifyMofN(sig: Uint8Array, voucherOrAttestation: Uint8Array): void {
+        if (<u32>sig.length < 4) {
+            throw new Revert('BridgeDepository: bad sig blob length');
+        }
+        const numSigs: u32 = readU32BE(sig, 0);
+        if (numSigs == 0) throw new Revert('BridgeDepository: zero numSigs');
+        if (numSigs > 16) throw new Revert('BridgeDepository: too many sigs');
+        const required: u32 = this._requiredSignatures.value.toU32();
+        if (required == 0) {
+            throw new Revert('BridgeDepository: signer set not initialized');
+        }
+        const preimageHash: Uint8Array = sha256(voucherOrAttestation);
+        const seen: Array<u256> = new Array<u256>(0);
+        let validCount: u32 = 0;
+        let off: u32 = 4;
+        for (let i: u32 = 0; i < numSigs; i++) {
+            if (off + 4 > <u32>sig.length) throw new Revert('BridgeDepository: truncated pubLen');
+            const pubLen: u32 = readU32BE(sig, off); off += 4;
+            if (pubLen != MLDSA_LEVEL2_PUBKEY_LEN) throw new Revert('BridgeDepository: bad pubLen');
+            if (off + pubLen > <u32>sig.length) throw new Revert('BridgeDepository: truncated pubKey');
+            const pubKey: Uint8Array = slice(sig, off, off + pubLen); off += pubLen;
+            if (off + 4 > <u32>sig.length) throw new Revert('BridgeDepository: truncated sigLen');
+            const sigLen: u32 = readU32BE(sig, off); off += 4;
+            if (sigLen != MLDSA_LEVEL2_SIG_LEN) throw new Revert('BridgeDepository: bad sigLen');
+            if (off + sigLen > <u32>sig.length) throw new Revert('BridgeDepository: truncated rawSig');
+            const rawSig: Uint8Array = slice(sig, off, off + sigLen); off += sigLen;
+            const pubHash: u256 = u256.fromUint8ArrayBE(sha256(pubKey));
+            for (let j: i32 = 0; j < seen.length; j++) {
+                if (u256.eq(seen[j], pubHash)) {
+                    throw new Revert('BridgeDepository: duplicate signer');
+                }
+            }
+            seen.push(pubHash);
+            if (this._signerKeyHashSet.get(pubHash).isZero()) continue;
+            if (Blockchain.verifyMLDSASignature(MLDSASecurityLevel.Level2, pubKey, rawSig, preimageHash)) {
+                validCount++;
+            }
+        }
+        if (off != <u32>sig.length) {
+            throw new Revert('BridgeDepository: trailing sig bytes');
+        }
+        if (validCount < required) {
+            throw new Revert('BridgeDepository: insufficient valid signatures');
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     //  Phase 1.3 — M-of-N views
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -1763,89 +2060,8 @@ export class BridgeDepository extends ReentrancyGuard {
         // Each signer must be in the authorized set, must not appear twice
         // in the same blob, and the count of valid recovers must be at
         // least `_requiredSignatures.value`.
-        if (<u32>sig.length < 4) {
-            throw new Revert('BridgeDepository: bad sig blob length');
-        }
-        const numSigs: u32 = readU32BE(sig, 0);
-        if (numSigs == 0) {
-            throw new Revert('BridgeDepository: zero numSigs');
-        }
-        if (numSigs > 16) {
-            throw new Revert('BridgeDepository: too many sigs');
-        }
-
-        const voucherHash: Uint8Array = sha256(voucher);
-        const required: u32 = this._requiredSignatures.value.toU32();
-        if (required == 0) {
-            throw new Revert('BridgeDepository: signer set not initialized');
-        }
-
-        const seen: Array<u256> = new Array<u256>(0);
-        let validCount: u32 = 0;
-        let off: u32 = 4;
-
-        for (let i: u32 = 0; i < numSigs; i++) {
-            if (off + 4 > <u32>sig.length) {
-                throw new Revert('BridgeDepository: truncated pubLen');
-            }
-            const pubLen: u32 = readU32BE(sig, off);
-            off += 4;
-            if (pubLen != MLDSA_LEVEL2_PUBKEY_LEN) {
-                throw new Revert('BridgeDepository: bad pubLen');
-            }
-            if (off + pubLen > <u32>sig.length) {
-                throw new Revert('BridgeDepository: truncated pubKey');
-            }
-            const pubKey: Uint8Array = slice(sig, off, off + pubLen);
-            off += pubLen;
-
-            if (off + 4 > <u32>sig.length) {
-                throw new Revert('BridgeDepository: truncated sigLen');
-            }
-            const sigLen: u32 = readU32BE(sig, off);
-            off += 4;
-            if (sigLen != MLDSA_LEVEL2_SIG_LEN) {
-                throw new Revert('BridgeDepository: bad sigLen');
-            }
-            if (off + sigLen > <u32>sig.length) {
-                throw new Revert('BridgeDepository: truncated rawSig');
-            }
-            const rawSig: Uint8Array = slice(sig, off, off + sigLen);
-            off += sigLen;
-
-            // Bounded duplicate-signer check (numSigs ≤ 16 → ≤ 256 cmps).
-            const pubHash: u256 = u256.fromUint8ArrayBE(sha256(pubKey));
-            for (let j: i32 = 0; j < seen.length; j++) {
-                if (u256.eq(seen[j], pubHash)) {
-                    throw new Revert('BridgeDepository: duplicate signer');
-                }
-            }
-            seen.push(pubHash);
-
-            // Authorization check — silently skip non-members so callers
-            // can include "candidate" sigs without aborting the whole
-            // verification. (Threshold check below gates the final yes/no.)
-            if (this._signerKeyHashSet.get(pubHash).isZero()) {
-                continue;
-            }
-
-            const valid: boolean = Blockchain.verifyMLDSASignature(
-                MLDSASecurityLevel.Level2,
-                pubKey,
-                rawSig,
-                voucherHash,
-            );
-            if (valid) {
-                validCount++;
-            }
-        }
-
-        if (off != <u32>sig.length) {
-            throw new Revert('BridgeDepository: trailing sig bytes');
-        }
-        if (validCount < required) {
-            throw new Revert('BridgeDepository: insufficient valid signatures');
-        }
+        // PR γ.2b — M-of-N ML-DSA verification via shared helper.
+        this._verifyMofN(sig, voucher);
 
         // ── Step 7b: voucher cancellation (Phase 1.6 — Tier-3 refund) ──
         // Cancellation is checked BEFORE the replay guard so a cancelled
