@@ -174,13 +174,19 @@ export class BridgeAuthority extends ReentrancyGuard {
         this._governor.value = newGovernor;
         this._governorSetOnce.value = true;
 
-        // Push the new governor to all three managed contracts so their
-        // local `_governor` slot stays in sync. Skipped silently for any
-        // dependent that hasn't been wired yet — the deployer can wire
-        // them later via setManagedContracts + a follow-up pushGovernor.
+        // Push the new governor to the depository so its local `_governor`
+        // slot stays in sync. The depository accepts the cascade via
+        // onlyGovernorOrAuthority, so re-pushing on every human-governor
+        // rotation works.
+        //
+        // We do NOT cascade to wusdc / wusdt: those are non-upgradeable and
+        // their setGovernor is strict onlyGovernor (immutable code). Once we
+        // cascade alice in, a follow-up push of bob would revert because the
+        // wrapped's _governor is now alice and tx.sender is the authority.
+        // Wrapped admin operations are gated on `onlyGovernorOrAuthority`
+        // already (via the registered _authorityAddress), so the wrapped's
+        // local _governor slot does not need to track human ownership.
         this._pushSetGovernor(this._depository.value, newGovernor);
-        this._pushSetGovernor(this._wusdc.value, newGovernor);
-        this._pushSetGovernor(this._wusdt.value, newGovernor);
 
         this.emitEvent(new AuthorityGovernorUpdated(old, newGovernor));
         return new BytesWriter(0);

@@ -186,10 +186,16 @@ await opnet('BridgeAuthority — pushGovernor bootstrap-skip + cascade', async (
         await setup.authority.pushGovernor(alice);
 
         Assert.expect((await setup.authority.governor()).equals(alice)).toEqual(true);
-        // Cascaded: dependents now see alice as their governor.
+        // Cascaded: depository now sees alice as its governor.
         Assert.expect((await setup.depository.governor()).equals(alice)).toEqual(true);
-        Assert.expect((await setup.wusdc.governor()).equals(alice)).toEqual(true);
-        Assert.expect((await setup.wusdt.governor()).equals(alice)).toEqual(true);
+        // wUSDC / wUSDT are non-upgradeable and their setGovernor is strict
+        // onlyGovernor, so the authority does NOT cascade governor handoff
+        // into them. Wrapped admin ops are gated on `onlyGovernorOrAuthority`
+        // via the registered _authorityAddress slot, so the wrapped's local
+        // _governor slot stays at the authority address forever (set during
+        // deploy wiring). See BridgeAuthority.pushGovernor for the rationale.
+        Assert.expect((await setup.wusdc.governor()).equals(setup.authorityAddress)).toEqual(true);
+        Assert.expect((await setup.wusdt.governor()).equals(setup.authorityAddress)).toEqual(true);
     });
 
     await vm.it('second call enforces onlyGovernor', async () => {

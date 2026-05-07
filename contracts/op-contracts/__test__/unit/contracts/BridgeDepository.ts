@@ -564,6 +564,102 @@ export class BridgeDepository extends ContractRuntime {
         return out;
     }
 
+    // ─── PR γ.2b — confirmBurn / migrateSignerSet / governorProvisionFlowInventory ─
+
+    private readonly confirmBurnSelector: number = encodeSelectorWithParams(
+        'confirmBurn',
+        ABIDataTypes.UINT256,
+        ABIDataTypes.BYTES,
+        ABIDataTypes.BYTES,
+    );
+    private readonly isBurnConfirmedSelector: number = encodeNumericSelector(
+        'isBurnConfirmed()',
+    );
+    private readonly migrateSignerSetSelector: number = encodeSelectorWithParams(
+        'migrateSignerSet',
+        ABIDataTypes.BYTES,
+    );
+    private readonly governorProvisionFlowInventorySelector: number =
+        encodeSelectorWithParams(
+            'governorProvisionFlowInventory',
+            ABIDataTypes.UINT256,
+            ABIDataTypes.UINT256,
+        );
+    private readonly setTokenModeSelector: number = encodeSelectorWithParams(
+        'setTokenMode',
+        ABIDataTypes.ADDRESS,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+    );
+    private readonly claimReleaseWithVoucherSelector: number = encodeSelectorWithParams(
+        'claimReleaseWithVoucher',
+        ABIDataTypes.BYTES,
+        ABIDataTypes.BYTES,
+    );
+
+    public async confirmBurn(
+        depositId: bigint,
+        attestation: Uint8Array,
+        mldsaSig: Uint8Array,
+    ): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.confirmBurnSelector);
+        w.writeU256(depositId);
+        w.writeBytesWithLength(attestation);
+        w.writeBytesWithLength(mldsaSig);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async isBurnConfirmed(depositId: bigint): Promise<boolean> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.isBurnConfirmedSelector);
+        w.writeU256(depositId);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readBoolean();
+    }
+
+    public async migrateSignerSet(payload: Uint8Array): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.migrateSignerSetSelector);
+        w.writeBytesWithLength(payload);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async governorProvisionFlowInventory(
+        flowId: bigint,
+        amount: bigint,
+    ): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.governorProvisionFlowInventorySelector);
+        w.writeU256(flowId);
+        w.writeU256(amount);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async setTokenMode(
+        token: Address,
+        mode: bigint,
+        evmCounterpart: bigint,
+    ): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setTokenModeSelector);
+        w.writeAddress(token);
+        w.writeU256(mode);
+        w.writeU256(evmCounterpart);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async claimReleaseWithVoucher(
+        voucher: Uint8Array,
+        mldsaSig: Uint8Array,
+    ): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.claimReleaseWithVoucherSelector);
+        w.writeBytesWithLength(voucher);
+        w.writeBytesWithLength(mldsaSig);
+        await this.getResponse(w.getBuffer());
+    }
+
     public override async init(): Promise<void> {
         this.defineRequiredBytecodes();
         this._bytecode = BytecodeManager.getBytecode(this.address) as Buffer;
