@@ -18,6 +18,40 @@ export type TokenModeSetEvent = {
     readonly mode: number;
     readonly evmCounterpart: bigint;
 };
+export type FlowAddedEvent = {
+    readonly flowId: bigint;
+    readonly mode: number;
+    readonly evmChainId: bigint;
+    readonly evmToken: bigint;
+    readonly opnetToken: bigint;
+};
+export type FlowStatusChangedEvent = {
+    readonly flowId: bigint;
+    readonly oldStatus: number;
+    readonly newStatus: number;
+};
+export type FlowCapChangedEvent = {
+    readonly flowId: bigint;
+    readonly oldCap: bigint;
+    readonly newCap: bigint;
+};
+export type FlowDailyLimitChangedEvent = {
+    readonly flowId: bigint;
+    readonly oldLimit: bigint;
+    readonly newLimit: bigint;
+};
+export type FlowMinAmountChangedEvent = {
+    readonly flowId: bigint;
+    readonly oldMin: bigint;
+    readonly newMin: bigint;
+};
+export type FlowFeeChangedEvent = {
+    readonly flowId: bigint;
+    readonly oldBps: number;
+    readonly newBps: number;
+    readonly oldMinFee: bigint;
+    readonly newMinFee: bigint;
+};
 export type LockedForBridgeEvent = {
     readonly canonicalToken: Address;
     readonly user: Address;
@@ -174,6 +208,91 @@ export type TokenMode = CallResult<
 export type EvmCounterpartOf = CallResult<
     {
         counterpart: bigint;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the computeFlowId function call.
+ */
+export type ComputeFlowId = CallResult<
+    {
+        flowId: bigint;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the addFlow function call.
+ */
+export type AddFlow = CallResult<
+    {
+        flowId: bigint;
+    },
+    OPNetEvent<FlowAddedEvent>[]
+>;
+
+/**
+ * @description Represents the result of the pauseFlow function call.
+ */
+export type PauseFlow = CallResult<{}, OPNetEvent<FlowStatusChangedEvent>[]>;
+
+/**
+ * @description Represents the result of the resumeFlow function call.
+ */
+export type ResumeFlow = CallResult<{}, OPNetEvent<FlowStatusChangedEvent>[]>;
+
+/**
+ * @description Represents the result of the drainFlow function call.
+ */
+export type DrainFlow = CallResult<{}, OPNetEvent<FlowStatusChangedEvent>[]>;
+
+/**
+ * @description Represents the result of the setFlowCap function call.
+ */
+export type SetFlowCap = CallResult<{}, OPNetEvent<FlowCapChangedEvent>[]>;
+
+/**
+ * @description Represents the result of the setFlowDailyLimit function call.
+ */
+export type SetFlowDailyLimit = CallResult<{}, OPNetEvent<FlowDailyLimitChangedEvent>[]>;
+
+/**
+ * @description Represents the result of the setFlowMinAmount function call.
+ */
+export type SetFlowMinAmount = CallResult<{}, OPNetEvent<FlowMinAmountChangedEvent>[]>;
+
+/**
+ * @description Represents the result of the setFlowFee function call.
+ */
+export type SetFlowFee = CallResult<{}, OPNetEvent<FlowFeeChangedEvent>[]>;
+
+/**
+ * @description Represents the result of the flowExists function call.
+ */
+export type FlowExists = CallResult<
+    {
+        exists: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the flowCount function call.
+ */
+export type FlowCount = CallResult<
+    {
+        count: bigint;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the getFlow function call.
+ */
+export type GetFlow = CallResult<
+    {
+        flow: Uint8Array;
     },
     OPNetEvent<never>[]
 >;
@@ -367,6 +486,39 @@ export interface IBridgeDepository extends IOP_NETContract {
     setTokenMode(token: Address, mode: bigint, evmCounterpart: bigint): Promise<SetTokenMode>;
     tokenMode(): Promise<TokenMode>;
     evmCounterpartOf(): Promise<EvmCounterpartOf>;
+    computeFlowId(
+        mode: bigint,
+        evmChainId: bigint,
+        evmBridge: bigint,
+        evmToken: bigint,
+        opnetBridge: bigint,
+        opnetToken: bigint,
+    ): Promise<ComputeFlowId>;
+    addFlow(
+        mode: bigint,
+        evmChainId: bigint,
+        evmBridge: bigint,
+        evmToken: bigint,
+        evmDecimals: bigint,
+        opnetBridge: bigint,
+        opnetToken: bigint,
+        opnetDecimals: bigint,
+        feeBps: bigint,
+        minFee: bigint,
+        minAmount: bigint,
+        cap: bigint,
+        dailyLimit: bigint,
+    ): Promise<AddFlow>;
+    pauseFlow(flowId: bigint): Promise<PauseFlow>;
+    resumeFlow(flowId: bigint): Promise<ResumeFlow>;
+    drainFlow(flowId: bigint): Promise<DrainFlow>;
+    setFlowCap(flowId: bigint, newCap: bigint): Promise<SetFlowCap>;
+    setFlowDailyLimit(flowId: bigint, newLimit: bigint): Promise<SetFlowDailyLimit>;
+    setFlowMinAmount(flowId: bigint, newMin: bigint): Promise<SetFlowMinAmount>;
+    setFlowFee(flowId: bigint, newBps: bigint, newMinFee: bigint): Promise<SetFlowFee>;
+    flowExists(): Promise<FlowExists>;
+    flowCount(): Promise<FlowCount>;
+    getFlow(): Promise<GetFlow>;
     lockForBridge(
         canonicalToken: Address,
         amount: bigint,

@@ -16,7 +16,6 @@ import { Revert } from '@btc-vision/btc-runtime/runtime/types/Revert';
 import { EMPTY_POINTER } from '@btc-vision/btc-runtime/runtime/math/bytes';
 import { ADDRESS_BYTE_LENGTH } from '@btc-vision/btc-runtime/runtime/utils';
 import { sha256 } from '@btc-vision/btc-runtime/runtime/env/global';
-import { UpdatablePlugin } from '@btc-vision/btc-runtime/runtime/plugins/UpdatablePlugin';
 import {
     AuthorityAddressSet,
     BridgeDepositoryUpdated,
@@ -47,10 +46,15 @@ import {
  * performs a real OP20 burn and emits `BurnedForRelease` so the EVM indexer
  * can issue a release voucher against the EVM escrow.
  *
- * STORAGE IS APPEND-ONLY. `_storageVersion` is declared FIRST so its slot id
- * is pinned; every field below it may never be reordered, deleted, or retyped.
- * Only append new fields to the end of this class. See workspace CLAUDE.md
- * "Five Upgrade Commandments".
+ * NON-UPGRADEABLE. `UpdatablePlugin` is intentionally NOT registered. Wrapped
+ * tokens are the canonical user-facing representation of every deposit — the
+ * largest blast-radius surface in the bridge — so they ship as immutable code
+ * rather than carrying an upgrade hook. Operational repointing flows through
+ * `setBridgeDepository` and the explicit minter set; if a real flaw is ever
+ * found, the response is a fresh wrapper deploy + governance pivot of the
+ * depository's minter set, not an in-place upgrade. (`_storageVersion` and
+ * the historical append-only discipline below remain so the storage layout
+ * stays auditable, even though no upgrade can rewrite it.)
  */
 @final
 export class WrappedOP20 extends OP20S {
@@ -89,13 +93,19 @@ export class WrappedOP20 extends OP20S {
     public constructor() {
         super();
 
-        // Phase 2.2 — 7-day upgrade timelock (1008 blocks ≈ 7 days at
-        // 10 min/block). Matches BridgeDepository.ts; gives users a full
-        // week to exit before any upgrade lands.
-        // Registered last in the constructor body so its 2 storage pointers
-        // append after every previously declared slot, preserving
-        // append-only discipline for future upgrades.
-        this.registerPlugin(new UpdatablePlugin(1008));
+        // wUSDC/wUSDT are intentionally NON-UPGRADEABLE. Wrapped tokens are
+        // the largest blast-radius surface in the bridge — the canonical
+        // representation of every user's deposit — so we trade upgrade
+        // flexibility for verifiable immutability. Operational repointing
+        // (e.g. swapping the BridgeDepository the wrapper trusts as minter)
+        // is handled via `setBridgeDepository(address)` and the minter set,
+        // both governance-gated. Industry precedent: Circle CCTP, tBTC
+        // vending machines, and the canonical Optimism bridge wrapped
+        // tokens are all non-upgradeable for the same reason.
+        //
+        // Do NOT register `UpdatablePlugin` here. If a flaw is ever found in
+        // wUSDC/wUSDT, the response is a fresh wrapper deploy + governance
+        // pivot of the depository's minter set, not an in-place upgrade.
     }
 
     public override onDeployment(calldata: Calldata): void {

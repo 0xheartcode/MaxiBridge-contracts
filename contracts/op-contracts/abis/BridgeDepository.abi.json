@@ -208,6 +208,260 @@
             ]
         },
         {
+            "name": "computeFlowId",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "mode",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "evmChainId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "evmBridge",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "evmToken",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "opnetBridge",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "opnetToken",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "addFlow",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "mode",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "evmChainId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "evmBridge",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "evmToken",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "evmDecimals",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "opnetBridge",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "opnetToken",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "opnetDecimals",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "feeBps",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "minFee",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "minAmount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "cap",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "dailyLimit",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "pauseFlow",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "resumeFlow",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "drainFlow",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setFlowCap",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "newCap",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setFlowDailyLimit",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "newLimit",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setFlowMinAmount",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "newMin",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setFlowFee",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "newBps",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "newMinFee",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "flowExists",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "exists",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
+            "name": "flowCount",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "count",
+                    "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "getFlow",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "flow",
+                    "type": "BYTES"
+                }
+            ]
+        },
+        {
             "name": "lockForBridge",
             "type": "Function",
             "payable": false,
@@ -572,6 +826,130 @@
                 },
                 {
                     "name": "evmCounterpart",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "FlowAdded",
+            "values": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "mode",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "evmChainId",
+                    "type": "UINT64"
+                },
+                {
+                    "name": "evmToken",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "opnetToken",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "FlowStatusChanged",
+            "values": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "oldStatus",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "newStatus",
+                    "type": "UINT32"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "FlowCapChanged",
+            "values": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "oldCap",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "newCap",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "FlowDailyLimitChanged",
+            "values": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "oldLimit",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "newLimit",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "FlowMinAmountChanged",
+            "values": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "oldMin",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "newMin",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "FlowFeeChanged",
+            "values": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "oldBps",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "newBps",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "oldMinFee",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "newMinFee",
                     "type": "UINT256"
                 }
             ],
