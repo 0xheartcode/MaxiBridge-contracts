@@ -58,14 +58,18 @@ contract BridgeEscrow is
         uint256 grossSrcAmount;
         // PR β.2.format — permissionless relayer tip in destination units.
         // uint128 caps the tip below 2^128 — way more than any token supply.
-        // Parsed but not paid out in this PR; payout lands in the next sub-PR.
+        // PR β.2.payout-evm: paid to msg.sender when > 0, capped per-flow.
         uint128 relayerTip;
+        // PR β.2.payout-evm — flow binding. The voucher commits to a
+        // specific flowId; claim looks it up to enforce status + per-flow
+        // tipCapBps and emit a flow-tagged tip event.
+        bytes32 flowId;
     }
 
-    /// @dev keccak256("ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip)")
+    /// @dev keccak256("ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip,bytes32 flowId)")
     bytes32 public constant RELEASE_INTENT_TYPEHASH =
         keccak256(
-            "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip)"
+            "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip,bytes32 flowId)"
         );
 
     /// @notice EIP-712 type for mode-2/3 mints. Differs from ReleaseIntent
@@ -386,6 +390,11 @@ contract BridgeEscrow is
     event InventoryProvisioned(address indexed token, address indexed by, uint256 amount);
     event InventoryDrained(address indexed token, address indexed to, uint256 amount, address indexed by);
 
+    /// @notice Emitted on a successful claim that paid a relayer tip
+    ///         (PR β.2.payout-evm). `relayer` is `msg.sender` — anyone may
+    ///         submit a tipped voucher and collect.
+    event RelayerTipPaid(bytes32 indexed flowId, address indexed relayer, uint256 tip);
+
     // ---------------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------------
@@ -428,6 +437,10 @@ contract BridgeEscrow is
     error FlowInvalidStatusTransition();
     error FlowCapBelowInventory();
     error FlowZeroChainId();
+
+    // ─── Relayer-tip payout errors (PR β.2.payout-evm) ─────────────────
+    error TipExceedsFlowCap();
+    error TipPaidOnInactiveFlow();
 
     // ---------------------------------------------------------------------
     // Init
@@ -563,13 +576,50 @@ contract BridgeEscrow is
 
         _verifySignatures(digest, sig);
 
+        // ─── PR β.2.payout-evm: flow binding + relayer-tip payout ──────
+        // The voucher commits to a flowId. Look it up after sig-verify
+        // (so unauthenticated callers can't spam flow lookups) and
+        // before any token movement. Existence flag matches the rest of
+        // the registry: chainId == 0 means "not registered".
+        FlowRecord storage flow = flows[intent.flowId];
+        if (flow.evmChainId == 0) revert FlowNotFound();
+
+        uint256 recipientAmount = intent.amount;
+        uint128 tip = intent.relayerTip;
+        if (tip > 0) {
+            // Tipping is a permissionless service — only meaningful when
+            // the flow is actively bridging. Pause/drain/disabled flows
+            // reject tipped vouchers; an honest relayer can resubmit a
+            // zero-tip variant if the server re-issues.
+            if (flow.status != FLOW_STATUS_ACTIVE) revert TipPaidOnInactiveFlow();
+            // bps cap is computed against `amount` (the recipient amount
+            // = netDst in voucher terms — the same amount the contract
+            // would otherwise transfer to `to`). Integer math; rounds
+            // down which is fine — strict `<= cap` upper bound.
+            uint256 bps = (uint256(tip) * 10_000) / intent.amount;
+            if (bps > uint256(flow.tipCapBps)) revert TipExceedsFlowCap();
+
+            unchecked {
+                // tip <= amount enforced indirectly: bps <= MAX_TIP_BPS = 200
+                // (governor-capped at addFlow / setFlowTipCap). 200 bps = 2%
+                // of amount, so tip < amount always. Safe to subtract.
+                recipientAmount = intent.amount - tip;
+            }
+        }
+
         // Effects BEFORE interaction (CEI).
         signaturesUsed[intent.opnetNonce] = true;
         usedSourceEvent[intent.opnetTxHash][intent.opnetEventIndex] = true;
 
-        emit Claimed(intent.token, intent.to, intent.amount, intent.opnetNonce);
+        emit Claimed(intent.token, intent.to, recipientAmount, intent.opnetNonce);
+        if (tip > 0) {
+            // msg.sender — NOT tx.origin — so smart-contract relayers can
+            // sweep into their own balance in the same transaction.
+            emit RelayerTipPaid(intent.flowId, msg.sender, tip);
+            IERC20(intent.token).safeTransfer(msg.sender, tip);
+        }
 
-        IERC20(intent.token).safeTransfer(intent.to, intent.amount);
+        IERC20(intent.token).safeTransfer(intent.to, recipientAmount);
     }
 
     /// @dev Reverts on any verification failure. Sig format:
@@ -1159,7 +1209,8 @@ contract BridgeEscrow is
                     intent.signerEpoch,
                     intent.opnetNonce,
                     intent.grossSrcAmount,
-                    intent.relayerTip
+                    intent.relayerTip,
+                    intent.flowId
                 )
             );
     }

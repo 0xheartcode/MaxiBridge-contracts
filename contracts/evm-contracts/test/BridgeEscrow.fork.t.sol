@@ -9,7 +9,7 @@ import {BridgeEscrow} from "../src/BridgeEscrow.sol";
 
 bytes32 constant RELEASE_INTENT_TYPEHASH =
     keccak256(
-        "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)"
+        "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip,bytes32 flowId)"
     );
 
 /// @notice Fork test: exercises BridgeEscrow against Sepolia's canonical
@@ -81,7 +81,10 @@ contract BridgeEscrowForkTest is Test {
                     intent.opnetEventIndex,
                     intent.burnNonce,
                     intent.signerEpoch,
-                    intent.opnetNonce
+                    intent.opnetNonce,
+                    intent.grossSrcAmount,
+                    intent.relayerTip,
+                    intent.flowId
                 )
             );
     }
@@ -143,6 +146,27 @@ contract BridgeEscrowForkTest is Test {
         escrow.lock(forkUsdc, 1_000e6, keccak256("rc"));
         vm.stopPrank();
 
+        // PR β.2.payout-evm: claim binds to a flowId. Register a
+        // tipping-off flow for the fork token so the new lookup
+        // resolves cleanly. Sepolia chainId = 11155111.
+        vm.prank(owner);
+        bytes32 flowId = escrow.addFlow(BridgeEscrow.FlowAddParams({
+            mode: 0,
+            evmChainId: 11155111,
+            evmBridge: address(0xE5C0),
+            evmToken: forkUsdc,
+            evmDecimals: 6,
+            opnetBridge: bytes32(uint256(0xDEAD)),
+            opnetToken: bytes32(uint256(0xC0FFEE)),
+            opnetDecimals: 6,
+            feeBps: 0,
+            minFee: 0,
+            minAmount: 0,
+            cap: type(uint128).max,
+            dailyLimit: type(uint128).max,
+            tipCapBps: 0
+        }));
+
         BridgeEscrow.ReleaseIntent memory intent = BridgeEscrow.ReleaseIntent({
             token: forkUsdc,
             to: bob,
@@ -154,7 +178,8 @@ contract BridgeEscrowForkTest is Test {
             signerEpoch: escrow.currentEpoch(),
             opnetNonce: keccak256("fork-n"),
             grossSrcAmount: 500e6,
-            relayerTip: 0
+            relayerTip: 0,
+            flowId: flowId
         });
         bytes memory sig = _sign(signerPk, intent);
         escrow.claim(intent, sig);
