@@ -174,6 +174,41 @@ export type IsVoucherCancelled = CallResult<
 export type SetAuthorityAddress = CallResult<{}, OPNetEvent<never>[]>;
 
 /**
+ * @description Represents the result of the setUpgradeAuthority function call.
+ */
+export type SetUpgradeAuthority = CallResult<{}, OPNetEvent<never>[]>;
+
+/**
+ * @description Represents the result of the proposeUpgrade function call.
+ */
+export type ProposeUpgrade = CallResult<{}, OPNetEvent<never>[]>;
+
+/**
+ * @description Represents the result of the cancelProposedUpgrade function call.
+ */
+export type CancelProposedUpgrade = CallResult<{}, OPNetEvent<never>[]>;
+
+/**
+ * @description Represents the result of the upgradeAuthority function call.
+ */
+export type UpgradeAuthority = CallResult<
+    {
+        upgradeAuthority: Address;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the pendingUpgradeAuthorized function call.
+ */
+export type PendingUpgradeAuthorized = CallResult<
+    {
+        pendingUpgradeAuthorized: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
  * @description Represents the result of the setWrapFeeBps function call.
  */
 export type SetWrapFeeBps = CallResult<{}, OPNetEvent<never>[]>;
@@ -525,6 +560,11 @@ export interface IBridgeDepository extends IOP_NETContract {
     cancelVoucher(voucherId: bigint): Promise<CancelVoucher>;
     isVoucherCancelled(): Promise<IsVoucherCancelled>;
     setAuthorityAddress(authority: Address): Promise<SetAuthorityAddress>;
+    setUpgradeAuthority(newUpgradeAuthority: Address): Promise<SetUpgradeAuthority>;
+    proposeUpgrade(): Promise<ProposeUpgrade>;
+    cancelProposedUpgrade(): Promise<CancelProposedUpgrade>;
+    upgradeAuthority(): Promise<UpgradeAuthority>;
+    pendingUpgradeAuthorized(): Promise<PendingUpgradeAuthorized>;
     setWrapFeeBps(bps: bigint): Promise<SetWrapFeeBps>;
     setWrapMinFee(wrappedToken: Address, amount: bigint): Promise<SetWrapMinFee>;
     wrapFeeBps(): Promise<WrapFeeBps>;

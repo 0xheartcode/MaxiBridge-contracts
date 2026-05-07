@@ -73,6 +73,22 @@ export class BridgeDepository extends ContractRuntime {
     private readonly storageVersionSelector: number = encodeNumericSelector('storageVersion()');
     private readonly networkIdSelector: number = encodeNumericSelector('networkId()');
 
+    // Bug #16b — governance-gated upgrade authority selectors
+    private readonly setUpgradeAuthoritySelector: number = encodeSelectorWithParams(
+        'setUpgradeAuthority',
+        ABIDataTypes.ADDRESS,
+    );
+    private readonly proposeUpgradeSelector: number = encodeNumericSelector('proposeUpgrade()');
+    private readonly cancelProposedUpgradeSelector: number = encodeNumericSelector(
+        'cancelProposedUpgrade()',
+    );
+    private readonly upgradeAuthoritySelector: number = encodeNumericSelector(
+        'upgradeAuthority()',
+    );
+    private readonly pendingUpgradeAuthorizedSelector: number = encodeNumericSelector(
+        'pendingUpgradeAuthorized()',
+    );
+
     constructor(details: ContractDetails) {
         super(details);
     }
@@ -201,6 +217,41 @@ export class BridgeDepository extends ContractRuntime {
         w.writeSelector(this.setAuthorityAddressSelector);
         w.writeAddress(addr);
         await this.getResponse(w.getBuffer());
+    }
+
+    // ─── Bug #16b — governance-gated upgrade authority ────────────────────
+
+    public async setUpgradeAuthority(addr: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setUpgradeAuthoritySelector);
+        w.writeAddress(addr);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async proposeUpgrade(): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.proposeUpgradeSelector);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async cancelProposedUpgrade(): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.cancelProposedUpgradeSelector);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async upgradeAuthority(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.upgradeAuthoritySelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
+    }
+
+    public async pendingUpgradeAuthorized(): Promise<boolean> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.pendingUpgradeAuthorizedSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readBoolean();
     }
 
     public async addSignerToSet(hash: bigint): Promise<void> {
