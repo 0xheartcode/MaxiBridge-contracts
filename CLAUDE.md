@@ -280,7 +280,8 @@ struct ReleaseIntent {
     uint32  signerEpoch;
     bytes32 opnetNonce;
     uint256 grossSrcAmount;   // PR β.2.format
-    uint128 relayerTip;       // PR β.2.format (payout in next sub-PR)
+    uint128 relayerTip;       // PR β.2.format / payout enforced in PR β.2.payout-evm
+    bytes32 flowId;           // PR β.2.payout-evm — flow binding + tipCap lookup
 }
 ```
 
@@ -288,7 +289,7 @@ Domain: `{ name: "BridgeEscrow", version: "1", chainId: <EVM_CHAIN_ID>, verifyin
 
 Typehash string (MUST match `BridgeEscrow.sol` byte-for-byte):
 ```
-ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip)
+ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip,bytes32 flowId)
 ```
 
 ---
@@ -398,7 +399,7 @@ Server MUST pack in exactly this order. Frontend passes the blob through unchang
 
 | Method | Signature | Selector |
 |--------|-----------|----------|
-| `claim` (PR β.2.format) | `claim((address,address,uint256,uint256,bytes32,uint32,uint256,uint32,bytes32,uint256,uint128),bytes)` | `0x9dc05e05` |
+| `claim` (PR β.2.payout-evm) | `claim((address,address,uint256,uint256,bytes32,uint32,uint256,uint32,bytes32,uint256,uint128,bytes32),bytes)` | `0x11261c6a` |
 | `cancelVoucher` | `cancelVoucher(bytes32)` | `0x5df2af98` |
 | `setTreasury` | `setTreasury(address)` | `0xf0f44260` |
 | `setGuardian` | `setGuardian(address)` | `0x8a0dac4a` |

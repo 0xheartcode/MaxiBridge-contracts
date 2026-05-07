@@ -19,8 +19,19 @@ interface IOwnable {
 contract BridgeEscrowTest is Test {
     bytes32 internal constant RELEASE_INTENT_TYPEHASH =
         keccak256(
-            "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip)"
+            "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip,bytes32 flowId)"
         );
+
+    /// @dev Default flowId every existing test signs against. Registered
+    ///      in setUp() with tipCapBps = 0 (tipping disabled), so existing
+    ///      claim tests are exercised on a real-but-tipping-off route.
+    bytes32 internal usdcFlowId;
+    bytes32 internal usdtFlowId;
+    uint64 internal constant TEST_EVM_CHAIN_ID = 1;
+    address internal constant TEST_EVM_BRIDGE = address(0xE5C0);
+    bytes32 internal constant TEST_OPNET_BRIDGE = bytes32(uint256(0xDEAD));
+    bytes32 internal constant TEST_OPNET_USDC = bytes32(uint256(0xC0FFEE));
+    bytes32 internal constant TEST_OPNET_USDT = bytes32(uint256(0xBEEF));
 
     BridgeEscrow internal impl;
     BridgeEscrow internal escrow;
@@ -63,6 +74,45 @@ contract BridgeEscrowTest is Test {
         usdc.approve(address(escrow), type(uint256).max);
         usdt.approve(address(escrow), type(uint256).max);
         vm.stopPrank();
+
+        // PR β.2.payout-evm: claim() now resolves a flowId from the
+        // voucher and reverts FlowNotFound if missing. Register flat
+        // tipping-off flows for USDC + USDT so every legacy claim test
+        // keeps working without per-test changes.
+        vm.startPrank(owner);
+        usdcFlowId = escrow.addFlow(BridgeEscrow.FlowAddParams({
+            mode: 0,
+            evmChainId: TEST_EVM_CHAIN_ID,
+            evmBridge: TEST_EVM_BRIDGE,
+            evmToken: address(usdc),
+            evmDecimals: 6,
+            opnetBridge: TEST_OPNET_BRIDGE,
+            opnetToken: TEST_OPNET_USDC,
+            opnetDecimals: 6,
+            feeBps: 0,
+            minFee: 0,
+            minAmount: 0,
+            cap: type(uint128).max,
+            dailyLimit: type(uint128).max,
+            tipCapBps: 0
+        }));
+        usdtFlowId = escrow.addFlow(BridgeEscrow.FlowAddParams({
+            mode: 0,
+            evmChainId: TEST_EVM_CHAIN_ID,
+            evmBridge: TEST_EVM_BRIDGE,
+            evmToken: address(usdt),
+            evmDecimals: 6,
+            opnetBridge: TEST_OPNET_BRIDGE,
+            opnetToken: TEST_OPNET_USDT,
+            opnetDecimals: 6,
+            feeBps: 0,
+            minFee: 0,
+            minAmount: 0,
+            cap: type(uint128).max,
+            dailyLimit: type(uint128).max,
+            tipCapBps: 0
+        }));
+        vm.stopPrank();
     }
 
     // ---------------------------------------------------------------------
@@ -88,7 +138,8 @@ contract BridgeEscrowTest is Test {
                     intent.signerEpoch,
                     intent.opnetNonce,
                     intent.grossSrcAmount,
-                    intent.relayerTip
+                    intent.relayerTip,
+                    intent.flowId
                 )
             );
     }
@@ -169,6 +220,15 @@ contract BridgeEscrowTest is Test {
         view
         returns (BridgeEscrow.ReleaseIntent memory intent)
     {
+        // Resolve flowId from token. setUp registers usdc + usdt; tests
+        // exercising other tokens (e.g. unsupported / wrong-mode tokens)
+        // still get a non-zero flowId here — they revert earlier on
+        // mode/support checks before the registry lookup.
+        bytes32 flowId = token == address(usdc)
+            ? usdcFlowId
+            : token == address(usdt)
+                ? usdtFlowId
+                : bytes32(uint256(uint160(token))); // synthetic for negative tests
         intent = BridgeEscrow.ReleaseIntent({
             token: token,
             to: to,
@@ -182,7 +242,8 @@ contract BridgeEscrowTest is Test {
             // PR β.2.format — until decimal-aware AmountPolicy lands,
             // grossSrcAmount = amount and relayerTip = 0.
             grossSrcAmount: amount,
-            relayerTip: 0
+            relayerTip: 0,
+            flowId: flowId
         });
     }
 
