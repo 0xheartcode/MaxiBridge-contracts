@@ -213,9 +213,10 @@ npm run integration:drills             # security drills (replay, rotation, reor
 
 1. **Chains v1:** Ethereum mainnet + OPNet testnet. Hybrid: real USDC/USDT locked on-chain, wrapped tokens on OPNet testnet for safety during initial testing.
 2. **Wrapped tokens:** unified — one `wUSDC`, one `wUSDT` on OPNet, 1:1 backed, 6 decimals (matches USDC/USDT). Future multi-chain expansion means same wUSDC is backed by all chains' USDC combined (fungibility risk to re-audit when adding BSC/Arb/Base).
-3. **Both sides upgradeable:**
-   - **EVM:** OZ UUPS proxy with full hardening (`_disableInitializers` in impl ctor, `initializer` gated init, `_authorizeUpgrade` onlyOwner, no `selfdestruct`, no arbitrary `delegatecall`, `uint256[43] __gap` post-Phase-1 — was 49 pre-redesign; storage-layout CI diff gate is `astId`-insensitive).
-   - **OPNet:** `UpdatablePlugin(1008 blocks)` (~7 days at 10min/block) registered in every contract ctor — Phase 2.2 raised this from 144 (~24h) to give users a full week to exit before any upgrade lands. `onUpdate()` runs migrations gated by `_storageVersion: StoredU256`; storage APPEND-ONLY per workspace "Five Upgrade Commandments".
+3. **Upgradeability split:**
+   - **EVM `BridgeEscrow`:** OZ UUPS proxy with full hardening (`_disableInitializers` in impl ctor, `initializer` gated init, `_authorizeUpgrade` onlyOwner, no `selfdestruct`, no arbitrary `delegatecall`, `uint256[43] __gap` post-Phase-1 — was 49 pre-redesign; storage-layout CI diff gate is `astId`-insensitive).
+   - **OPNet `BridgeDepository`:** `UpdatablePlugin(1008 blocks)` (~7 days at 10min/block) registered in the ctor — Phase 2.2 raised this from 144 (~24h) to give users a full week to exit before any upgrade lands. `onUpdate()` runs migrations gated by `_storageVersion: StoredU256`; storage APPEND-ONLY per workspace "Five Upgrade Commandments".
+   - **OPNet `WrappedOP20` (wUSDC, wUSDT): NON-UPGRADEABLE.** No `UpdatablePlugin` registered. Wrapped tokens are the canonical user-facing representation of every deposit — largest blast-radius surface in the bridge — so they ship as immutable code. Operational repointing flows through `setBridgeDepository` and the minter set (both governance-gated). If a flaw is ever found, the response is a fresh wrapper deploy + governance pivot of the depository's minter set, not an in-place upgrade. Industry precedent: Circle CCTP, tBTC vending machine, canonical Optimism bridge wrapped tokens are all non-upgradeable for the same reason.
 4. **Single root `.env`** at `Bridge-Monorepo/.env` shared by server / scripts / contracts. Frontend + admin-panel read it via Vite `envDir: '../'`.
 5. **No protocol limits.** No floor, no daily caps, no per-wallet velocity. Security comes from:
    - AWS KMS signer (Phase 3; hot wallet for v1 dev)
@@ -406,7 +407,7 @@ Server MUST pack in exactly this order. Frontend passes the blob through unchang
 |--------|-----------|----------|
 | `cancelVoucher` | `cancelVoucher(uint256)` | `0xdf78268e` |
 
-Both `BridgeDepository` and `WrappedOP20` register `UpdatablePlugin(1008)` (Phase 2.2; was 144 pre-redesign) which adds standard upgrade selectors: `submitUpdate(address)`, `applyUpdate(address,bytes)`, `cancelUpdate()`, `pendingUpdate()`, `updateDelay()`. Governor-only.
+`BridgeDepository` registers `UpdatablePlugin(1008)` (Phase 2.2; was 144 pre-redesign) which adds standard upgrade selectors: `submitUpdate(address)`, `applyUpdate(address,bytes)`, `cancelUpdate()`, `pendingUpdate()`, `updateDelay()`. Governor-only. `WrappedOP20` is **NON-UPGRADEABLE** and exposes none of those selectors — wUSDC/wUSDT are canonical immutable tokens (see §5).
 
 **`BridgeDepository.onDeployment` calldata:** pass exactly 32 bytes representing a u256 big-endian `networkId` (`1`=mainnet, `2`=testnet). Stored in `_networkId`; enforced on every voucher. `WrappedOP20.onDeployment` calldata: unchanged from OP20 template `(name, symbol, decimals, maxSupply)`.
 
