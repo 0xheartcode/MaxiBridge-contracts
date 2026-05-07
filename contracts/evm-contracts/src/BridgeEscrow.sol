@@ -122,6 +122,65 @@ contract BridgeEscrow is
     uint256 public constant MAX_FEE_BPS = 1000;
 
     // ---------------------------------------------------------------------
+    // Flow Registry (PR α — storage + governance only; consumed by PR γ)
+    // ---------------------------------------------------------------------
+
+    /// @notice Per-flow status. A flow is the smallest atom of bridge
+    ///         routing — defined by (mode, evmChainId, evmBridge, evmToken,
+    ///         opnetBridge, opnetToken). Vouchers are validated against
+    ///         the flow's status before any inventory mutation in PR γ.
+    ///
+    ///         disabled  — flow does not exist OR has been retired
+    ///         active    — vouchers and locks accepted normally
+    ///         paused    — guardian-set protective freeze; can resume
+    ///         draining  — governor-set; only release/burn (no new
+    ///                     locks/mints) — used to wind a route down
+    uint8 public constant FLOW_STATUS_DISABLED = 0;
+    uint8 public constant FLOW_STATUS_ACTIVE = 1;
+    uint8 public constant FLOW_STATUS_PAUSED = 2;
+    uint8 public constant FLOW_STATUS_DRAINING = 3;
+
+    /// @notice Rolling-window length for per-flow `dailyLimit`. 24 hours.
+    ///         Hard-coded so a hostile governor cannot disable rate
+    ///         limiting by setting it absurdly long.
+    uint64 public constant FLOW_WINDOW_DURATION = 86400;
+
+    /// @notice First-class object representing a single bridging route.
+    ///         All fields except status / cap / dailyLimit / minAmount /
+    ///         feeBps / minFee / mintedToday / lastWindowStart / inventory
+    ///         are immutable once `addFlow` lands — set-once on add.
+    ///
+    ///         flowId = sha256(abi.encodePacked(
+    ///             mode, evmChainId, evmBridge, evmToken,
+    ///             opnetBridge, opnetToken
+    ///         ))
+    ///         The same flowId is computed identically on the OPNet side
+    ///         (same sha256 over the same canonical byte order). EVM→OPNet
+    ///         and OPNet→EVM legs of the same route share the same flowId.
+    struct FlowRecord {
+        // Set-once at addFlow:
+        uint8   mode;             // 0=WRAPPED, 1=INVERSE_WRAPPED, 2=NATIVE_BURN_MINT, 3=POOLED_LOCK_RELEASE
+        uint8   status;           // see FLOW_STATUS_* above
+        uint64  evmChainId;
+        address evmBridge;        // BridgeEscrow proxy on the EVM source chain
+        address evmToken;
+        uint8   evmDecimals;
+        uint8   opnetDecimals;
+        bytes32 opnetBridge;      // 32-byte canonical OPNet address
+        bytes32 opnetToken;
+        // Mutable via timelocked governance:
+        uint16  feeBps;           // 0..MAX_FEE_BPS
+        uint128 minFee;           // dst-side base units
+        uint128 minAmount;        // src-side base units
+        uint128 cap;              // total inventory ceiling (mode 0/3) or mint ceiling (mode 2)
+        uint128 dailyLimit;       // per-flow rolling window
+        // Hot fields written by claim/release in PR γ:
+        uint128 mintedToday;
+        uint64  lastWindowStart;
+        uint128 inventory;        // mode 0/3: locked tokens; mode 2: synthetic supply
+    }
+
+    // ---------------------------------------------------------------------
     // Storage layout (clean — append-only from here on)
     // ---------------------------------------------------------------------
 
@@ -200,11 +259,41 @@ contract BridgeEscrow is
     ///         mode for that token can never change.
     mapping(address => bool) private _tokenModeFinalized;
 
+    // ─── Flow Registry storage (PR α — additive) ───────────────────────
+
+    /// @notice Source of truth for all bridging routes. Keyed by `flowId`.
+    /// @dev    Internal — public access goes through `getFlow(flowId)`.
+    ///         Skipping the auto-generated public getter keeps the
+    ///         compiler under its stack-depth limit (the struct has too
+    ///         many fields to return as a flat tuple).
+    mapping(bytes32 => FlowRecord) internal flows;
+
+    /// @notice Enumeration: every registered flowId, append-only. Removing
+    ///         a flow sets its status to disabled but does NOT delete from
+    ///         this list (deletes confuse front-ends and audit trails).
+    bytes32[] public allFlowIds;
+
+    /// @notice Enumeration: flows by EVM-side token. Useful for the dApp
+    ///         to discover which routes exist for a given token.
+    mapping(address => bytes32[]) public flowsByEvmToken;
+
+    /// @notice Enumeration: flows by mode. Operational view.
+    mapping(uint8 => bytes32[]) public flowsByMode;
+
+    /// @notice Enumeration: flows by source EVM chainId. When this
+    ///         contract is deployed via CREATE2 to multiple EVM chains
+    ///         under the same proxy address, each instance still tracks
+    ///         only its own flows; this index is just a per-flow chain
+    ///         tag for cross-chain admin tooling.
+    mapping(uint64 => bytes32[]) public flowsByEvmChain;
+
     /// @dev Reserved for future appends. New slots go BEFORE the gap and the
     ///      gap shrinks by the same count to preserve layout.
     ///      Slots past treasury: unwrapFeeBps + unwrapMinFee + tokenMode +
-    ///      opnetCounterpartOf + _tokenModeFinalized = 5. 50 - 5 = 45.
-    uint256[45] private __gap;
+    ///      opnetCounterpartOf + _tokenModeFinalized + flows + allFlowIds
+    ///      + flowsByEvmToken + flowsByMode + flowsByEvmChain = 10.
+    ///      50 - 10 = 40.
+    uint256[40] private __gap;
 
     // ---------------------------------------------------------------------
     // Events
@@ -247,6 +336,20 @@ contract BridgeEscrow is
     event SignerRemoved(address indexed signer, uint256 newCount);
     event ThresholdSet(uint256 indexed oldThreshold, uint256 indexed newThreshold);
     event VoucherCancelled(bytes32 indexed opnetNonce, address indexed by);
+
+    // ─── Flow Registry events ──────────────────────────────────────────
+    event FlowAdded(
+        bytes32 indexed flowId,
+        uint8 mode,
+        uint64 evmChainId,
+        address indexed evmToken,
+        bytes32 indexed opnetToken
+    );
+    event FlowStatusChanged(bytes32 indexed flowId, uint8 oldStatus, uint8 newStatus);
+    event FlowCapChanged(bytes32 indexed flowId, uint128 oldCap, uint128 newCap);
+    event FlowDailyLimitChanged(bytes32 indexed flowId, uint128 oldLimit, uint128 newLimit);
+    event FlowMinAmountChanged(bytes32 indexed flowId, uint128 oldMin, uint128 newMin);
+    event FlowFeeChanged(bytes32 indexed flowId, uint16 oldBps, uint16 newBps, uint128 oldMinFee, uint128 newMinFee);
     event SignerSetMigrated(
         uint32 indexed oldEpoch,
         uint32 indexed newEpoch,
@@ -297,6 +400,15 @@ contract BridgeEscrow is
     error InsufficientSignatures();
     error DuplicateSigner();
     error VoucherCancelled_();
+
+    // ─── Flow Registry errors ──────────────────────────────────────────
+    error FlowAlreadyExists();
+    error FlowNotFound();
+    error FlowInvalidMode();
+    error FlowInvalidDecimals();
+    error FlowInvalidStatusTransition();
+    error FlowCapBelowInventory();
+    error FlowZeroChainId();
 
     // ---------------------------------------------------------------------
     // Init
@@ -781,6 +893,199 @@ contract BridgeEscrow is
         if (amount == 0) revert AmountZero();
         emit EmergencyWithdraw(token, treasury, amount, msg.sender);
         IERC20(token).safeTransfer(treasury, amount);
+    }
+
+    // ---------------------------------------------------------------------
+    // Flow Registry — governance (PR α)
+    // ---------------------------------------------------------------------
+
+    /// @notice Compute the canonical flowId for a route. Anyone can call;
+    ///         used by tooling + tests. The exact same hash is computed on
+    ///         the OPNet side over the same byte order so a single 32-byte
+    ///         identifier names a route end-to-end.
+    function computeFlowId(
+        uint8 mode,
+        uint64 evmChainId,
+        address evmBridge,
+        address evmToken,
+        bytes32 opnetBridge,
+        bytes32 opnetToken
+    ) public pure returns (bytes32) {
+        return sha256(
+            abi.encodePacked(
+                mode,
+                evmChainId,
+                evmBridge,
+                evmToken,
+                opnetBridge,
+                opnetToken
+            )
+        );
+    }
+
+    /// @notice Inputs to `addFlow`. Bundled in a struct to keep the call
+    ///         under the Solidity stack-depth limit. Output / hot fields
+    ///         (`mintedToday`, `lastWindowStart`, `inventory`, plus `status`
+    ///         which always starts active) are not caller-supplied.
+    struct FlowAddParams {
+        uint8   mode;
+        uint64  evmChainId;
+        address evmBridge;
+        address evmToken;
+        uint8   evmDecimals;
+        bytes32 opnetBridge;
+        bytes32 opnetToken;
+        uint8   opnetDecimals;
+        uint16  feeBps;
+        uint128 minFee;
+        uint128 minAmount;
+        uint128 cap;
+        uint128 dailyLimit;
+    }
+
+    /// @notice Register a new flow. Governor-only — production deploys
+    ///         route this through the Safe + 48h TimelockController.
+    ///         Set-once for all immutable fields. Initial status is active.
+    /// @dev    `mintedToday`, `lastWindowStart`, `inventory` start at 0.
+    ///         Caller is responsible for picking sane initial cap /
+    ///         dailyLimit / minAmount / fee values; bps is hard-capped at
+    ///         MAX_FEE_BPS (10%).
+    function addFlow(FlowAddParams calldata p) external onlyOwner returns (bytes32 flowId) {
+        if (p.mode > uint8(TokenMode.POOLED_LOCK_RELEASE)) revert FlowInvalidMode();
+        if (p.evmChainId == 0) revert FlowZeroChainId();
+        if (p.evmBridge == address(0) || p.evmToken == address(0)) revert ZeroAddress();
+        if (p.opnetBridge == bytes32(0) || p.opnetToken == bytes32(0)) revert ZeroAddress();
+        if (p.evmDecimals == 0 || p.evmDecimals > 30) revert FlowInvalidDecimals();
+        if (p.opnetDecimals == 0 || p.opnetDecimals > 30) revert FlowInvalidDecimals();
+        if (p.feeBps > MAX_FEE_BPS) revert FeeBpsTooHigh();
+
+        flowId = computeFlowId(
+            p.mode, p.evmChainId, p.evmBridge, p.evmToken, p.opnetBridge, p.opnetToken
+        );
+
+        // Set-once: an existing record with non-zero chainId means the
+        // flowId is already taken. Use chainId as the existence flag
+        // because addFlow rejects chainId==0.
+        if (flows[flowId].evmChainId != 0) revert FlowAlreadyExists();
+
+        FlowRecord storage f = flows[flowId];
+        f.mode = p.mode;
+        f.status = FLOW_STATUS_ACTIVE;
+        f.evmChainId = p.evmChainId;
+        f.evmBridge = p.evmBridge;
+        f.evmToken = p.evmToken;
+        f.evmDecimals = p.evmDecimals;
+        f.opnetDecimals = p.opnetDecimals;
+        f.opnetBridge = p.opnetBridge;
+        f.opnetToken = p.opnetToken;
+        f.feeBps = p.feeBps;
+        f.minFee = p.minFee;
+        f.minAmount = p.minAmount;
+        f.cap = p.cap;
+        f.dailyLimit = p.dailyLimit;
+        // mintedToday, lastWindowStart, inventory remain 0.
+
+        allFlowIds.push(flowId);
+        flowsByEvmToken[p.evmToken].push(flowId);
+        flowsByMode[p.mode].push(flowId);
+        flowsByEvmChain[p.evmChainId].push(flowId);
+
+        emit FlowAdded(flowId, p.mode, p.evmChainId, p.evmToken, p.opnetToken);
+    }
+
+    /// @notice Guardian-only protective freeze. Immediate (no timelock)
+    ///         so a compromise can be quarantined fast. Only valid from
+    ///         the active state.
+    function pauseFlow(bytes32 flowId) external {
+        if (msg.sender != guardian) revert NotGuardian();
+        FlowRecord storage f = flows[flowId];
+        if (f.evmChainId == 0) revert FlowNotFound();
+        if (f.status != FLOW_STATUS_ACTIVE) revert FlowInvalidStatusTransition();
+        emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_PAUSED);
+        f.status = FLOW_STATUS_PAUSED;
+    }
+
+    /// @notice Governor-only resume — flips paused → active.
+    function resumeFlow(bytes32 flowId) external onlyOwner {
+        FlowRecord storage f = flows[flowId];
+        if (f.evmChainId == 0) revert FlowNotFound();
+        if (f.status != FLOW_STATUS_PAUSED) revert FlowInvalidStatusTransition();
+        emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_ACTIVE);
+        f.status = FLOW_STATUS_ACTIVE;
+    }
+
+    /// @notice Governor-only — start winding a route down. Permitted from
+    ///         active or paused. Once draining, the only forward path is
+    ///         disabled (after inventory hits zero) — no resume back to
+    ///         active. Consumed by PR γ: claim/release allowed; lock/mint
+    ///         rejected.
+    function drainFlow(bytes32 flowId) external onlyOwner {
+        FlowRecord storage f = flows[flowId];
+        if (f.evmChainId == 0) revert FlowNotFound();
+        if (f.status != FLOW_STATUS_ACTIVE && f.status != FLOW_STATUS_PAUSED) {
+            revert FlowInvalidStatusTransition();
+        }
+        emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_DRAINING);
+        f.status = FLOW_STATUS_DRAINING;
+    }
+
+    /// @notice Governor-only — adjust the per-flow inventory ceiling.
+    ///         Cannot drop the cap below current inventory (would brick
+    ///         existing locks).
+    function setFlowCap(bytes32 flowId, uint128 newCap) external onlyOwner {
+        FlowRecord storage f = flows[flowId];
+        if (f.evmChainId == 0) revert FlowNotFound();
+        if (newCap < f.inventory) revert FlowCapBelowInventory();
+        emit FlowCapChanged(flowId, f.cap, newCap);
+        f.cap = newCap;
+    }
+
+    /// @notice Governor-only — adjust the per-flow rolling 24h limit.
+    ///         No floor: setting to zero disables new mints (paired with
+    ///         pause/drain for soft-shutdown UX).
+    function setFlowDailyLimit(bytes32 flowId, uint128 newLimit) external onlyOwner {
+        FlowRecord storage f = flows[flowId];
+        if (f.evmChainId == 0) revert FlowNotFound();
+        emit FlowDailyLimitChanged(flowId, f.dailyLimit, newLimit);
+        f.dailyLimit = newLimit;
+    }
+
+    /// @notice Governor-only — adjust the per-flow minimum source-side
+    ///         amount. Helps reject dust deposits that wouldn't pay their
+    ///         own gas back out.
+    function setFlowMinAmount(bytes32 flowId, uint128 newMin) external onlyOwner {
+        FlowRecord storage f = flows[flowId];
+        if (f.evmChainId == 0) revert FlowNotFound();
+        emit FlowMinAmountChanged(flowId, f.minAmount, newMin);
+        f.minAmount = newMin;
+    }
+
+    /// @notice Governor-only — adjust per-flow fee parameters. Hard-capped
+    ///         at MAX_FEE_BPS (10%).
+    function setFlowFee(bytes32 flowId, uint16 newBps, uint128 newMinFee) external onlyOwner {
+        if (newBps > MAX_FEE_BPS) revert FeeBpsTooHigh();
+        FlowRecord storage f = flows[flowId];
+        if (f.evmChainId == 0) revert FlowNotFound();
+        emit FlowFeeChanged(flowId, f.feeBps, newBps, f.minFee, newMinFee);
+        f.feeBps = newBps;
+        f.minFee = newMinFee;
+    }
+
+    /// @notice Read-only accessor — returns the full FlowRecord. Easier
+    ///         to consume from off-chain than the auto-generated public
+    ///         mapping getter (which only returns the tuple).
+    function getFlow(bytes32 flowId) external view returns (FlowRecord memory) {
+        return flows[flowId];
+    }
+
+    /// @notice Read-only existence check.
+    function flowExists(bytes32 flowId) external view returns (bool) {
+        return flows[flowId].evmChainId != 0;
+    }
+
+    /// @notice Total registered flows (lifetime — includes disabled).
+    function flowCount() external view returns (uint256) {
+        return allFlowIds.length;
     }
 
     // ---------------------------------------------------------------------
