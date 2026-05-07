@@ -90,6 +90,13 @@ const FLOW_STATUS_PAUSED: u32 = 2;
 const FLOW_STATUS_DRAINING: u32 = 3;
 
 /**
+ * PR γ.1 — rolling-window length for per-flow `dailyLimit`. 24 hours.
+ * Hard-coded so a hostile governor cannot disable rate limiting by
+ * setting it absurdly long. Mirrors EVM `FLOW_WINDOW_DURATION`.
+ */
+const FLOW_WINDOW_DURATION: u64 = 86400;
+
+/**
  * Voucher preimage length in bytes.
  *
  * PR β.2.format — extended from the legacy 460B layout with two new fields
@@ -1336,12 +1343,43 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: flow not registered');
         }
 
+        // PR γ.1 — flow consumption (release path: inventory decreases).
+        // Order: status → minAmount → dailyLimit window → inventory check
+        // + decrement → tip cap/carve → transfer.
+        const flowStatusRel: u32 = this._flowStatus.get(flowIdRel).toU32();
+        if (flowStatusRel != FLOW_STATUS_ACTIVE && flowStatusRel != FLOW_STATUS_DRAINING) {
+            throw new Revert('BridgeDepository: flow not active');
+        }
+        const flowMinAmountRel: u256 = this._flowMinAmount.get(flowIdRel);
+        if (u256.lt(parsed.grossSrcAmount, flowMinAmountRel)) {
+            throw new Revert('BridgeDepository: amount below flow min');
+        }
+        const nowRel: u64 = Blockchain.block.medianTimestamp;
+        const windowStartRel: u64 = this._flowLastWindowStart.get(flowIdRel).toU64();
+        let mintedTodayRel: u256 = this._flowMintedToday.get(flowIdRel);
+        if (nowRel - windowStartRel > FLOW_WINDOW_DURATION) {
+            mintedTodayRel = u256.Zero;
+            this._flowLastWindowStart.set(flowIdRel, u256.fromU64(nowRel));
+        }
+        const newMintedRel: u256 = SafeMath.add(mintedTodayRel, parsed.grossAmount);
+        const flowDailyLimitRel: u256 = this._flowDailyLimit.get(flowIdRel);
+        if (u256.gt(newMintedRel, flowDailyLimitRel)) {
+            throw new Revert('BridgeDepository: daily limit exceeded');
+        }
+        this._flowMintedToday.set(flowIdRel, newMintedRel);
+
+        // Inventory ↓ (release). Revert if insufficient.
+        const inventoryRelBefore: u256 = this._flowInventory.get(flowIdRel);
+        if (u256.lt(inventoryRelBefore, parsed.grossAmount)) {
+            throw new Revert('BridgeDepository: insufficient flow inventory');
+        }
+        this._flowInventory.set(
+            flowIdRel,
+            SafeMath.sub(inventoryRelBefore, parsed.grossAmount),
+        );
+
         let recipientNetAmountRel: u256 = parsed.netAmount;
         if (!parsed.relayerTip.isZero()) {
-            const flowStatusRel: u32 = this._flowStatus.get(flowIdRel).toU32();
-            if (flowStatusRel != FLOW_STATUS_ACTIVE) {
-                throw new Revert('BridgeDepository: tip on inactive flow');
-            }
             const tipCapBpsRel: u32 = this._flowTipCapBps.get(flowIdRel).toU32();
             const bpsRel: u256 = SafeMath.div(
                 SafeMath.mul(parsed.relayerTip, u256.fromU32(10000)),
@@ -1842,12 +1880,11 @@ export class BridgeDepository extends ReentrancyGuard {
         this._usedVoucherIds.set(parsed.voucherId, u256.One);
         this._usedSourceEvents.set(sourceKey, u256.One);
 
-        // ── Step 10b: PR β.2.payout-opnet — flow lookup + tip payout ──
-        // Derive the canonical flowId for this route and look up the per-
-        // flow tip cap. If the voucher carries a non-zero `relayerTip`, pay
-        // it to `tx.sender` (NOT a stored relayer address — protocol-neutral)
-        // and reduce the recipient's mint to `netAmount - tip`. Cap and
-        // status checks mirror the EVM-side `claim` payout in PR #35.
+        // ── Step 10b: PR β.2.payout-opnet + PR γ.1 — flow lookup + consumption ──
+        // Derive the canonical flowId, enforce ALL per-flow knobs (status,
+        // minAmount, cap, dailyLimit, inventory), then carve the tip and
+        // mint. Order: flow lookup → status → minAmount → cap → dailyLimit
+        // window → inventory bump → tip cap/carve → mint.
         const flowIdMint: u256 = _flowIdFromVoucher(
             mintMode.toU32(),
             parsed.sourceChainId,
@@ -1860,12 +1897,53 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: flow not registered');
         }
 
+        // PR γ.1 — status enforced for ALL claims (tip-zero too). Mint
+        // path requires ACTIVE; DRAINING blocks new mints (winding down).
+        const flowStatusMint: u32 = this._flowStatus.get(flowIdMint).toU32();
+        if (flowStatusMint != FLOW_STATUS_ACTIVE) {
+            throw new Revert('BridgeDepository: flow not active');
+        }
+
+        // PR γ.1 — minAmount on source-side gross.
+        const flowMinAmountMint: u256 = this._flowMinAmount.get(flowIdMint);
+        if (u256.lt(parsed.grossSrcAmount, flowMinAmountMint)) {
+            throw new Revert('BridgeDepository: amount below flow min');
+        }
+
+        // PR γ.1 — cap (mode-2 mint ceiling, also applied for mode-0
+        // wrapped). Mint path INCREASES inventory; assert pre-add fits in
+        // cap. Use SafeMath.add to avoid u256 overflow on hostile inputs.
+        const flowCapMint: u256 = this._flowCap.get(flowIdMint);
+        const inventoryMintBefore: u256 = this._flowInventory.get(flowIdMint);
+        const inventoryMintAfter: u256 = SafeMath.add(
+            inventoryMintBefore,
+            parsed.grossAmount,
+        );
+        if (u256.gt(inventoryMintAfter, flowCapMint)) {
+            throw new Revert('BridgeDepository: flow cap exceeded');
+        }
+
+        // PR γ.1 — rolling 24h dailyLimit. Reset bucket if older than
+        // FLOW_WINDOW_DURATION (86400s); then assert and consume.
+        const nowMint: u64 = Blockchain.block.medianTimestamp;
+        const windowStartMint: u64 = this._flowLastWindowStart.get(flowIdMint).toU64();
+        let mintedTodayMint: u256 = this._flowMintedToday.get(flowIdMint);
+        if (nowMint - windowStartMint > FLOW_WINDOW_DURATION) {
+            mintedTodayMint = u256.Zero;
+            this._flowLastWindowStart.set(flowIdMint, u256.fromU64(nowMint));
+        }
+        const newMintedMint: u256 = SafeMath.add(mintedTodayMint, parsed.grossAmount);
+        const flowDailyLimitMint: u256 = this._flowDailyLimit.get(flowIdMint);
+        if (u256.gt(newMintedMint, flowDailyLimitMint)) {
+            throw new Revert('BridgeDepository: daily limit exceeded');
+        }
+        this._flowMintedToday.set(flowIdMint, newMintedMint);
+
+        // PR γ.1 — inventory ↑ (mint path).
+        this._flowInventory.set(flowIdMint, inventoryMintAfter);
+
         let recipientNetAmountMint: u256 = parsed.netAmount;
         if (!parsed.relayerTip.isZero()) {
-            const flowStatusMint: u32 = this._flowStatus.get(flowIdMint).toU32();
-            if (flowStatusMint != FLOW_STATUS_ACTIVE) {
-                throw new Revert('BridgeDepository: tip on inactive flow');
-            }
             const tipCapBpsMint: u32 = this._flowTipCapBps.get(flowIdMint).toU32();
             // bps = (tip * 10_000) / netDst — integer divide, mirrors EVM.
             const bpsMint: u256 = SafeMath.div(

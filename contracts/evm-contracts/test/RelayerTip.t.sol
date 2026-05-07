@@ -7,6 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {BridgeEscrow} from "../src/BridgeEscrow.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
+import {TestableBridgeEscrow} from "./mocks/TestableBridgeEscrow.sol";
 
 /// @notice Smart-contract relayer used in
 ///         `test_Claim_TipPaidToMsgSender_NotTxOrigin`. The tip MUST land
@@ -55,7 +56,7 @@ contract RelayerTipTest is Test {
         signerAddr = vm.addr(signerPk);
         usdc = new MockERC20("USD Coin", "USDC", 6);
 
-        impl = new BridgeEscrow();
+        impl = BridgeEscrow(address(new TestableBridgeEscrow()));
         address[] memory tokens = new address[](1);
         tokens[0] = address(usdc);
 
@@ -86,6 +87,12 @@ contract RelayerTipTest is Test {
             tipCapBps: 100
         }));
         vm.stopPrank();
+
+        // PR γ.1: bootstrap inventory; lock-side bump is γ.2.
+        TestableBridgeEscrow(address(escrow))._testSetInventory(
+            flowId,
+            type(uint128).max
+        );
 
         // Seed alice + give the escrow some balance to cover claims.
         usdc.mint(alice, 1_000_000e6);
@@ -230,7 +237,10 @@ contract RelayerTipTest is Test {
         BridgeEscrow.ReleaseIntent memory intent = _intent(10_000, 50, flowId, keccak256("paused"));
         bytes memory sig = _sign(signerPk, intent);
 
-        vm.expectRevert(BridgeEscrow.TipPaidOnInactiveFlow.selector);
+        // PR γ.1: status enforcement moved ahead of tip carve and now
+        // applies regardless of tip presence. The original PR β.2.payout
+        // behaviour (TipPaidOnInactiveFlow) is subsumed by FlowNotActive.
+        vm.expectRevert(BridgeEscrow.FlowNotActive.selector);
         escrow.claim(intent, sig);
     }
 

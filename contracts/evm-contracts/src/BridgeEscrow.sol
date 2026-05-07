@@ -442,6 +442,13 @@ contract BridgeEscrow is
     error TipExceedsFlowCap();
     error TipPaidOnInactiveFlow();
 
+    // ─── Flow consumption errors (PR γ.1) ──────────────────────────────
+    error FlowNotActive();
+    error AmountBelowFlowMin();
+    error FlowCapExceeded();
+    error DailyLimitExceeded();
+    error InsufficientFlowInventory();
+
     // ---------------------------------------------------------------------
     // Init
     // ---------------------------------------------------------------------
@@ -584,21 +591,54 @@ contract BridgeEscrow is
         FlowRecord storage flow = flows[intent.flowId];
         if (flow.evmChainId == 0) revert FlowNotFound();
 
+        // ─── PR γ.1: flow consumption — minAmount / status / dailyLimit /
+        //     inventory enforcement on the EVM claim (release) path. ──────
+        // Order: status → minAmount → dailyLimit (window rotate + check) →
+        // inventory decrement → tip cap → effects → external transfers.
+        // Cap is NOT enforced here: EVM `claim` is a release path (modes
+        // 0 / 3) — inventory only decreases, never grows past `cap`.
+
+        // 1. status: claim allowed only on active or draining flows.
+        //    PAUSED is a guardian quarantine; DISABLED means non-existent.
+        if (flow.status != FLOW_STATUS_ACTIVE && flow.status != FLOW_STATUS_DRAINING) {
+            revert FlowNotActive();
+        }
+
+        // 2. minAmount — uses source-side gross from the voucher (PR β.2).
+        if (intent.grossSrcAmount < uint256(flow.minAmount)) revert AmountBelowFlowMin();
+
+        // 3. dailyLimit (rolling 24h window keyed off `grossSrcAmount`).
+        //    Window rotate: if more than 86400s since last window start,
+        //    reset the bucket. Then assert and consume.
+        uint128 grossDst128 = uint128(intent.grossSrcAmount);
+        if (intent.grossSrcAmount > type(uint128).max) revert DailyLimitExceeded();
+        if (block.timestamp - uint256(flow.lastWindowStart) > uint256(FLOW_WINDOW_DURATION)) {
+            flow.mintedToday = 0;
+            flow.lastWindowStart = uint64(block.timestamp);
+        }
+        // Check + consume. Use uint256 math to avoid uint128 overflow on
+        // the addition itself. We can safely cast back because dailyLimit
+        // is uint128.
+        uint256 newMinted = uint256(flow.mintedToday) + uint256(grossDst128);
+        if (newMinted > uint256(flow.dailyLimit)) revert DailyLimitExceeded();
+        flow.mintedToday = uint128(newMinted);
+
+        // 4. inventory: release direction. Decrement by grossDst. Revert
+        //    if inventory < grossDst (insufficient).
+        if (uint256(flow.inventory) < uint256(grossDst128)) revert InsufficientFlowInventory();
+        unchecked {
+            flow.inventory = flow.inventory - grossDst128;
+        }
+
+        // 5. tip cap + carve. Status was already enforced above so we drop
+        //    the redundant TipPaidOnInactiveFlow gate; tipped paths still
+        //    surface FlowNotActive on inactive flows. Bps math identical to
+        //    pre-PR γ.1 — uses `amount` (= netDst) as the denominator.
         uint256 recipientAmount = intent.amount;
         uint128 tip = intent.relayerTip;
         if (tip > 0) {
-            // Tipping is a permissionless service — only meaningful when
-            // the flow is actively bridging. Pause/drain/disabled flows
-            // reject tipped vouchers; an honest relayer can resubmit a
-            // zero-tip variant if the server re-issues.
-            if (flow.status != FLOW_STATUS_ACTIVE) revert TipPaidOnInactiveFlow();
-            // bps cap is computed against `amount` (the recipient amount
-            // = netDst in voucher terms — the same amount the contract
-            // would otherwise transfer to `to`). Integer math; rounds
-            // down which is fine — strict `<= cap` upper bound.
             uint256 bps = (uint256(tip) * 10_000) / intent.amount;
             if (bps > uint256(flow.tipCapBps)) revert TipExceedsFlowCap();
-
             unchecked {
                 // tip <= amount enforced indirectly: bps <= MAX_TIP_BPS = 200
                 // (governor-capped at addFlow / setFlowTipCap). 200 bps = 2%
