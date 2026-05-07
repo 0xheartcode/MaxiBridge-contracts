@@ -329,6 +329,16 @@ contract BridgeEscrow is
         uint256 indexed depositNonce
     );
 
+    /// @notice PR γ.2a — flow-tagged lock event. Emitted alongside `Locked`
+    ///         so existing indexers keep working while flow-aware tooling
+    ///         can subscribe to the per-flow stream.
+    event LockedToFlow(
+        bytes32 indexed flowId,
+        address indexed user,
+        address indexed token,
+        uint256 amount
+    );
+
     event Claimed(
         address indexed token,
         address indexed to,
@@ -507,7 +517,8 @@ contract BridgeEscrow is
     function lock(
         address token,
         uint256 amount,
-        bytes32 opnetRecipient
+        bytes32 opnetRecipient,
+        bytes32 flowId
     )
         external
         whenNotPaused
@@ -526,6 +537,11 @@ contract BridgeEscrow is
         if (amount == 0) revert AmountZero();
         if (opnetRecipient == bytes32(0)) revert InvalidRecipient();
 
+        // ─── PR γ.2a: flow binding + consumption (lock side) ──────────────
+        // All status / minAmount / dailyLimit / cap enforcement happens in
+        // a small helper to keep this function under the stack-depth limit.
+        _consumeLockFlow(flowId, token, amount);
+
         IERC20 erc20 = IERC20(token);
         uint256 balBefore = erc20.balanceOf(address(this));
         erc20.safeTransferFrom(msg.sender, address(this), amount);
@@ -536,11 +552,59 @@ contract BridgeEscrow is
         }
         if (amountReceived_ == 0) revert NothingReceived();
 
+        // 4. cap + inventory increment, on the ACTUAL received amount
+        //    (post fee-on-transfer balance delta).
+        _bumpLockInventory(flowId, amountReceived_);
+
         unchecked {
             depositNonce_ = ++depositNonce;
         }
 
         emit Locked(token, msg.sender, amount, amountReceived_, opnetRecipient, depositNonce_);
+        emit LockedToFlow(flowId, msg.sender, token, amountReceived_);
+    }
+
+    /// @dev PR γ.2a — flow binding + status / minAmount / dailyLimit
+    ///      enforcement on the lock side. Extracted to keep `lock` under
+    ///      the Solidity stack-depth limit. Uses `amount` (the caller's
+    ///      requested source-side base units) for the enforcement keys —
+    ///      identical semantics to the claim path's `grossSrcAmount`.
+    function _consumeLockFlow(bytes32 flowId, address token, uint256 amount) internal {
+        FlowRecord storage flow = flows[flowId];
+        if (flow.evmChainId == 0) revert FlowNotFound();
+        // Caller-supplied flowId must match the token being deposited —
+        // a flow uniquely names the (mode, chains, both bridges, both
+        // tokens) tuple, EVM token field is `flow.evmToken`.
+        if (flow.evmToken != token) revert FlowNotFound();
+
+        // 1. status: lock is a forward (inbound) path. Allowed only on
+        //    ACTIVE. PAUSED = guardian quarantine; DRAINING = winding down,
+        //    no new deposits; DISABLED = non-existent.
+        if (flow.status != FLOW_STATUS_ACTIVE) revert FlowNotActive();
+
+        // 2. minAmount — by spec always source-side base units.
+        if (amount < uint256(flow.minAmount)) revert AmountBelowFlowMin();
+
+        // 3. dailyLimit (rolling 24h window). Mirrors the claim path.
+        if (amount > type(uint128).max) revert DailyLimitExceeded();
+        if (block.timestamp - uint256(flow.lastWindowStart) > uint256(FLOW_WINDOW_DURATION)) {
+            flow.mintedToday = 0;
+            flow.lastWindowStart = uint64(block.timestamp);
+        }
+        uint256 newMinted = uint256(flow.mintedToday) + amount;
+        if (newMinted > uint256(flow.dailyLimit)) revert DailyLimitExceeded();
+        flow.mintedToday = uint128(newMinted);
+    }
+
+    /// @dev PR γ.2a — cap check + inventory increment, post-pull. Uses the
+    ///      balance-delta `received` so the bookkeeping reflects what the
+    ///      bridge actually holds, not what the caller asked to send.
+    function _bumpLockInventory(bytes32 flowId, uint256 received) internal {
+        if (received > type(uint128).max) revert FlowCapExceeded();
+        FlowRecord storage flow = flows[flowId];
+        uint256 newInventory = uint256(flow.inventory) + received;
+        if (newInventory > uint256(flow.cap)) revert FlowCapExceeded();
+        flow.inventory = uint128(newInventory);
     }
 
     // ---------------------------------------------------------------------

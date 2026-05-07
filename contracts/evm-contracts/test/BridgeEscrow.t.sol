@@ -115,12 +115,10 @@ contract BridgeEscrowTest is Test {
         }));
         vm.stopPrank();
 
-        // PR γ.1: claim now decrements `flow.inventory` by `grossSrcAmount`.
-        // Lock-side inventory bumps are γ.2 territory; until they land,
-        // tests bootstrap the bucket directly.
-        TestableBridgeEscrow t = TestableBridgeEscrow(address(escrow));
-        t._testSetInventory(usdcFlowId, type(uint128).max);
-        t._testSetInventory(usdtFlowId, type(uint128).max);
+        // PR γ.2a: lock side now bumps `flow.inventory`; claim path
+        // (PR γ.1) decrements it. Round-trip is consistent — `_fundEscrow`
+        // (which calls `lock`) populates inventory naturally for every
+        // claim test below. No more direct `_testSetInventory` bootstrap.
     }
 
     // ---------------------------------------------------------------------
@@ -315,7 +313,7 @@ contract BridgeEscrowTest is Test {
     function test_Lock_USDC_Succeeds() public {
         uint256 amount = 100e6;
         vm.prank(alice);
-        (uint256 nonce_, uint256 received_) = escrow.lock(address(usdc), amount, keccak256("recipient-1"));
+        (uint256 nonce_, uint256 received_) = escrow.lock(address(usdc), amount, keccak256("recipient-1"), usdcFlowId);
         assertEq(nonce_, 1);
         assertEq(received_, amount);
         assertEq(usdc.balanceOf(address(escrow)), amount);
@@ -324,7 +322,7 @@ contract BridgeEscrowTest is Test {
     function test_Lock_USDT_NoBoolReturn_Succeeds() public {
         uint256 amount = 100e6;
         vm.prank(alice);
-        (uint256 nonce_, uint256 received_) = escrow.lock(address(usdt), amount, keccak256("recipient-usdt"));
+        (uint256 nonce_, uint256 received_) = escrow.lock(address(usdt), amount, keccak256("recipient-usdt"), usdtFlowId);
         assertEq(nonce_, 1);
         assertEq(received_, amount);
         assertEq(usdt.balanceOf(address(escrow)), amount);
@@ -332,13 +330,30 @@ contract BridgeEscrowTest is Test {
 
     function test_Lock_BalanceDelta_FeeOnTransfer() public {
         FeeOnTransferToken fee = new FeeOnTransferToken(100); // 1% fee
-        vm.prank(owner);
+        vm.startPrank(owner);
         escrow.setSupportedToken(address(fee), true);
+        bytes32 feeFlowId = escrow.addFlow(BridgeEscrow.FlowAddParams({
+            mode: 0,
+            evmChainId: TEST_EVM_CHAIN_ID,
+            evmBridge: TEST_EVM_BRIDGE,
+            evmToken: address(fee),
+            evmDecimals: 18,
+            opnetBridge: TEST_OPNET_BRIDGE,
+            opnetToken: bytes32(uint256(0xFEE)),
+            opnetDecimals: 18,
+            feeBps: 0,
+            minFee: 0,
+            minAmount: 0,
+            cap: type(uint128).max,
+            dailyLimit: type(uint128).max,
+            tipCapBps: 0
+        }));
+        vm.stopPrank();
 
         fee.mint(alice, 1_000e18);
         vm.startPrank(alice);
         fee.approve(address(escrow), type(uint256).max);
-        (, uint256 received_) = escrow.lock(address(fee), 1_000e18, keccak256("fee-rec"));
+        (, uint256 received_) = escrow.lock(address(fee), 1_000e18, keccak256("fee-rec"), feeFlowId);
         vm.stopPrank();
 
         // 1% fee → received is 99%
@@ -349,13 +364,13 @@ contract BridgeEscrowTest is Test {
     function test_Lock_ZeroAmountReverts() public {
         vm.prank(alice);
         vm.expectRevert(BridgeEscrow.AmountZero.selector);
-        escrow.lock(address(usdc), 0, keccak256("x"));
+        escrow.lock(address(usdc), 0, keccak256("x"), usdcFlowId);
     }
 
     function test_Lock_ZeroRecipientReverts() public {
         vm.prank(alice);
         vm.expectRevert(BridgeEscrow.InvalidRecipient.selector);
-        escrow.lock(address(usdc), 1, bytes32(0));
+        escrow.lock(address(usdc), 1, bytes32(0), usdcFlowId);
     }
 
     function test_Lock_UnsupportedTokenReverts() public {
@@ -364,7 +379,7 @@ contract BridgeEscrowTest is Test {
         vm.startPrank(alice);
         rando.approve(address(escrow), type(uint256).max);
         vm.expectRevert(BridgeEscrow.TokenNotSupported.selector);
-        escrow.lock(address(rando), 1e18, keccak256("y"));
+        escrow.lock(address(rando), 1e18, keccak256("y"), bytes32(0));
         vm.stopPrank();
     }
 
@@ -373,13 +388,13 @@ contract BridgeEscrowTest is Test {
         escrow.pause();
         vm.prank(alice);
         vm.expectRevert();
-        escrow.lock(address(usdc), 1e6, keccak256("z"));
+        escrow.lock(address(usdc), 1e6, keccak256("z"), usdcFlowId);
     }
 
     function test_Lock_EmitsLockedEvent() public {
         vm.recordLogs();
         vm.prank(alice);
-        escrow.lock(address(usdc), 50e6, keccak256("evt"));
+        escrow.lock(address(usdc), 50e6, keccak256("evt"), usdcFlowId);
         Vm.Log[] memory entries = vm.getRecordedLogs();
         // Find our Locked event (topic0 = keccak of signature)
         bytes32 topic = keccak256(
@@ -1147,8 +1162,9 @@ contract BridgeEscrowTest is Test {
     // =====================================================================
 
     function _fundEscrow(address token, uint256 amount) internal {
+        bytes32 fId = token == address(usdc) ? usdcFlowId : usdtFlowId;
         vm.prank(alice);
-        escrow.lock(token, amount, keccak256("seed"));
+        escrow.lock(token, amount, keccak256("seed"), fId);
     }
 
     // =====================================================================
@@ -1263,14 +1279,31 @@ contract BridgeEscrowTest is Test {
     function test_SetTokenMode_PooledLockRelease_Succeeds() public {
         MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
         bytes32 opnetMoto = bytes32(uint256(0xDEAD));
-        vm.prank(owner);
+        vm.startPrank(owner);
         escrow.setTokenMode(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, opnetMoto);
+        bytes32 motoFlowId = escrow.addFlow(BridgeEscrow.FlowAddParams({
+            mode: uint8(BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE),
+            evmChainId: TEST_EVM_CHAIN_ID,
+            evmBridge: TEST_EVM_BRIDGE,
+            evmToken: address(moto),
+            evmDecimals: 6,
+            opnetBridge: TEST_OPNET_BRIDGE,
+            opnetToken: opnetMoto,
+            opnetDecimals: 6,
+            feeBps: 0,
+            minFee: 0,
+            minAmount: 0,
+            cap: type(uint128).max,
+            dailyLimit: type(uint128).max,
+            tipCapBps: 0
+        }));
+        vm.stopPrank();
         assertEq(uint256(escrow.tokenMode(address(moto))), uint256(BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE));
         // Mode-4 tokens also pass through `lock` (just like mode-1).
         moto.mint(alice, 100e6);
         vm.startPrank(alice);
         moto.approve(address(escrow), type(uint256).max);
-        (uint256 nonce, uint256 received) = escrow.lock(address(moto), 50e6, keccak256("rcp"));
+        (uint256 nonce, uint256 received) = escrow.lock(address(moto), 50e6, keccak256("rcp"), motoFlowId);
         vm.stopPrank();
         assertEq(nonce, 1);
         assertEq(received, 50e6);
@@ -1284,7 +1317,7 @@ contract BridgeEscrowTest is Test {
         vm.startPrank(alice);
         w.approve(address(escrow), type(uint256).max);
         vm.expectRevert(BridgeEscrow.WrongMode.selector);
-        escrow.lock(address(w), 1e6, keccak256("x"));
+        escrow.lock(address(w), 1e6, keccak256("x"), bytes32(0));
         vm.stopPrank();
     }
 
