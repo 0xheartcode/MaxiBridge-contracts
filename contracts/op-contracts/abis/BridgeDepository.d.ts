@@ -52,6 +52,11 @@ export type FlowFeeChangedEvent = {
     readonly oldMinFee: bigint;
     readonly newMinFee: bigint;
 };
+export type FlowTipCapUpdatedEvent = {
+    readonly flowId: bigint;
+    readonly oldBps: number;
+    readonly newBps: number;
+};
 export type LockedForBridgeEvent = {
     readonly canonicalToken: Address;
     readonly user: Address;
@@ -266,6 +271,11 @@ export type SetFlowMinAmount = CallResult<{}, OPNetEvent<FlowMinAmountChangedEve
  * @description Represents the result of the setFlowFee function call.
  */
 export type SetFlowFee = CallResult<{}, OPNetEvent<FlowFeeChangedEvent>[]>;
+
+/**
+ * @description Represents the result of the setFlowTipCap function call.
+ */
+export type SetFlowTipCap = CallResult<{}, OPNetEvent<FlowTipCapUpdatedEvent>[]>;
 
 /**
  * @description Represents the result of the flowExists function call.
@@ -508,6 +518,7 @@ export interface IBridgeDepository extends IOP_NETContract {
         minAmount: bigint,
         cap: bigint,
         dailyLimit: bigint,
+        tipCapBps: bigint,
     ): Promise<AddFlow>;
     pauseFlow(flowId: bigint): Promise<PauseFlow>;
     resumeFlow(flowId: bigint): Promise<ResumeFlow>;
@@ -516,6 +527,7 @@ export interface IBridgeDepository extends IOP_NETContract {
     setFlowDailyLimit(flowId: bigint, newLimit: bigint): Promise<SetFlowDailyLimit>;
     setFlowMinAmount(flowId: bigint, newMin: bigint): Promise<SetFlowMinAmount>;
     setFlowFee(flowId: bigint, newBps: bigint, newMinFee: bigint): Promise<SetFlowFee>;
+    setFlowTipCap(flowId: bigint, newBps: bigint): Promise<SetFlowTipCap>;
     flowExists(): Promise<FlowExists>;
     flowCount(): Promise<FlowCount>;
     getFlow(): Promise<GetFlow>;

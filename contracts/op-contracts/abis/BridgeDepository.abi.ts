@@ -86,6 +86,15 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'FlowTipCapUpdated',
+        values: [
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
+            { name: 'oldBps', type: ABIDataTypes.UINT32 },
+            { name: 'newBps', type: ABIDataTypes.UINT32 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'LockedForBridge',
         values: [
             { name: 'canonicalToken', type: ABIDataTypes.ADDRESS },
@@ -302,6 +311,7 @@ export const BridgeDepositoryAbi = [
             { name: 'minAmount', type: ABIDataTypes.UINT256 },
             { name: 'cap', type: ABIDataTypes.UINT256 },
             { name: 'dailyLimit', type: ABIDataTypes.UINT256 },
+            { name: 'tipCapBps', type: ABIDataTypes.UINT256 },
         ],
         outputs: [{ name: 'flowId', type: ABIDataTypes.UINT256 }],
         type: BitcoinAbiTypes.Function,
@@ -357,6 +367,15 @@ export const BridgeDepositoryAbi = [
             { name: 'flowId', type: ABIDataTypes.UINT256 },
             { name: 'newBps', type: ABIDataTypes.UINT256 },
             { name: 'newMinFee', type: ABIDataTypes.UINT256 },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setFlowTipCap',
+        inputs: [
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
+            { name: 'newBps', type: ABIDataTypes.UINT256 },
         ],
         outputs: [],
         type: BitcoinAbiTypes.Function,

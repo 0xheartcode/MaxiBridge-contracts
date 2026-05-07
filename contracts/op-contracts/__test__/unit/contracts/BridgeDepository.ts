@@ -308,6 +308,7 @@ export class BridgeDepository extends ContractRuntime {
         ABIDataTypes.UINT256,
         ABIDataTypes.UINT256,
         ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
     );
     private readonly pauseFlowSelector: number = encodeSelectorWithParams(
         'pauseFlow',
@@ -339,6 +340,11 @@ export class BridgeDepository extends ContractRuntime {
     private readonly setFlowFeeSelector: number = encodeSelectorWithParams(
         'setFlowFee',
         ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+    );
+    private readonly setFlowTipCapSelector: number = encodeSelectorWithParams(
+        'setFlowTipCap',
         ABIDataTypes.UINT256,
         ABIDataTypes.UINT256,
     );
@@ -380,6 +386,7 @@ export class BridgeDepository extends ContractRuntime {
         minAmount: bigint;
         cap: bigint;
         dailyLimit: bigint;
+        tipCapBps?: bigint;
     }): Promise<bigint> {
         const w = new BinaryWriter();
         w.writeSelector(this.addFlowSelector);
@@ -396,6 +403,7 @@ export class BridgeDepository extends ContractRuntime {
         w.writeU256(p.minAmount);
         w.writeU256(p.cap);
         w.writeU256(p.dailyLimit);
+        w.writeU256(p.tipCapBps ?? 0n);
         const r = await this.getResponse(w.getBuffer());
         return r.readU256();
     }
@@ -454,6 +462,14 @@ export class BridgeDepository extends ContractRuntime {
         await this.getResponse(w.getBuffer());
     }
 
+    public async setFlowTipCap(flowId: bigint, newBps: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setFlowTipCapSelector);
+        w.writeU256(flowId);
+        w.writeU256(newBps);
+        await this.getResponse(w.getBuffer());
+    }
+
     public async flowExists(flowId: bigint): Promise<boolean> {
         const w = new BinaryWriter();
         w.writeSelector(this.flowExistsSelector);
@@ -470,12 +486,12 @@ export class BridgeDepository extends ContractRuntime {
     }
 
     /**
-     * Reads the 17-field flow record. Returns array of u256 values in
+     * Reads the 18-field flow record. Returns array of u256 values in
      * the order:
      *   [mode, status, chainId, evmBridge, evmToken, evmDecimals,
      *    opnetBridge, opnetToken, opnetDecimals, feeBps, minFee,
      *    minAmount, cap, dailyLimit, mintedToday, lastWindowStart,
-     *    inventory]
+     *    inventory, tipCapBps] (PR β.2.scaffold appended tipCapBps)
      */
     public async getFlow(flowId: bigint): Promise<bigint[]> {
         const w = new BinaryWriter();
@@ -483,10 +499,10 @@ export class BridgeDepository extends ContractRuntime {
         w.writeU256(flowId);
         const r = await this.getResponse(w.getBuffer());
         // Returned as ABIDataTypes.BYTES (length-prefixed). Read the
-        // length prefix then 17 × u256 = 544 bytes.
+        // length prefix then 18 × u256 = 576 bytes.
         const blob = r.readBytesWithLength();
         const out: bigint[] = [];
-        for (let i = 0; i < 17; i++) {
+        for (let i = 0; i < 18; i++) {
             // Each u256 is 32 bytes BE.
             let v = 0n;
             for (let j = 0; j < 32; j++) {

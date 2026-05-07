@@ -254,3 +254,17 @@ export class FlowFeeChanged extends NetEvent {
         super('FlowFeeChanged', data);
     }
 }
+
+/**
+ * PR β.2.scaffold — emitted when the per-flow tip cap is updated.
+ * tipCapBps is bounded to MAX_TIP_BPS (200 = 2%) at the contract layer.
+ */
+export class FlowTipCapUpdated extends NetEvent {
+    constructor(flowId: u256, oldBps: u32, newBps: u32) {
+        const data = new BytesWriter(32 + 4 + 4);
+        data.writeU256(flowId);
+        data.writeU32(oldBps);
+        data.writeU32(newBps);
+        super('FlowTipCapUpdated', data);
+    }
+}
