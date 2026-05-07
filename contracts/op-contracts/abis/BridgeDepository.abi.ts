@@ -124,6 +124,15 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'RelayerTipPaid',
+        values: [
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
+            { name: 'relayer', type: ABIDataTypes.ADDRESS },
+            { name: 'tip', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'InventoryProvisionedOpNet',
         values: [
             { name: 'token', type: ABIDataTypes.ADDRESS },

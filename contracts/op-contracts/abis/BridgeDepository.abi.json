@@ -1075,6 +1075,24 @@
             "type": "Event"
         },
         {
+            "name": "RelayerTipPaid",
+            "values": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "relayer",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "tip",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
             "name": "InventoryProvisionedOpNet",
             "values": [
                 {

@@ -268,3 +268,19 @@ export class FlowTipCapUpdated extends NetEvent {
         super('FlowTipCapUpdated', data);
     }
 }
+
+/**
+ * PR β.2.payout-opnet — emitted when a relayer tip is paid out as part of a
+ * successful claim (mint or release). `relayer` is `Blockchain.tx.sender`,
+ * NOT a stored relayer address — keeps the protocol neutral. `tip` is in
+ * destination-side base units of the wrapped/canonical token being paid.
+ */
+export class RelayerTipPaid extends NetEvent {
+    constructor(flowId: u256, relayer: Address, tip: u256) {
+        const data = new BytesWriter(32 + ADDRESS_BYTE_LENGTH + 32);
+        data.writeU256(flowId);
+        data.writeAddress(relayer);
+        data.writeU256(tip);
+        super('RelayerTipPaid', data);
+    }
+}

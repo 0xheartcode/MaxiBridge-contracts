@@ -39,6 +39,7 @@ import {
     FlowMinAmountChanged,
     FlowFeeChanged,
     FlowTipCapUpdated,
+    RelayerTipPaid,
 } from './events';
 
 /**
@@ -1201,7 +1202,7 @@ export class BridgeDepository extends ReentrancyGuard {
         { name: 'voucher', type: ABIDataTypes.BYTES },
         { name: 'mldsaSig', type: ABIDataTypes.BYTES },
     )
-    @emit('ReleasedFromVoucher')
+    @emit('ReleasedFromVoucher', 'RelayerTipPaid')
     @nonReentrant
     public claimReleaseWithVoucher(calldata: Calldata): BytesWriter {
         this.requireNotPaused();
@@ -1318,13 +1319,57 @@ export class BridgeDepository extends ReentrancyGuard {
         this._usedReleaseVoucherIds.set(parsed.voucherId, u256.One);
         this._usedEvmBurnEvents.set(sourceKey, u256.One);
 
-        // Cross-contract call: OP20.transfer(recipient, netAmount)
+        // PR β.2.payout-opnet — flow lookup + tip payout (mode-1/3 inverse
+        // path). Mirrors `claimMintWithVoucher` semantics: the relayer is
+        // paid the tip in the same canonical OP20 being released; the
+        // recipient receives `netAmount - tip`. `Blockchain.tx.sender` —
+        // protocol-neutral, NOT a stored relayer.
+        const flowIdRel: u256 = _flowIdFromVoucher(
+            releaseMode.toU32(),
+            parsed.sourceChainId,
+            parsed.sourceBridgeAddr,
+            parsed.sourceTokenAddr,
+            this.address,
+            parsed.wrappedToken,
+        );
+        if (this._flowExists.get(flowIdRel).isZero()) {
+            throw new Revert('BridgeDepository: flow not registered');
+        }
+
+        let recipientNetAmountRel: u256 = parsed.netAmount;
+        if (!parsed.relayerTip.isZero()) {
+            const flowStatusRel: u32 = this._flowStatus.get(flowIdRel).toU32();
+            if (flowStatusRel != FLOW_STATUS_ACTIVE) {
+                throw new Revert('BridgeDepository: tip on inactive flow');
+            }
+            const tipCapBpsRel: u32 = this._flowTipCapBps.get(flowIdRel).toU32();
+            const bpsRel: u256 = SafeMath.div(
+                SafeMath.mul(parsed.relayerTip, u256.fromU32(10000)),
+                parsed.netAmount,
+            );
+            if (u256.gt(bpsRel, u256.fromU32(tipCapBpsRel))) {
+                throw new Revert('BridgeDepository: tip exceeds flow cap');
+            }
+            const relayerRel: Address = Blockchain.tx.sender;
+            const transferSelectorTip: u32 = encodeSelector('transfer(address,uint256)');
+            const tipWriter = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+            tipWriter.writeSelector(transferSelectorTip);
+            tipWriter.writeAddress(relayerRel);
+            tipWriter.writeU256(parsed.relayerTip);
+            Blockchain.call(parsed.wrappedToken, tipWriter);
+
+            this.emitEvent(new RelayerTipPaid(flowIdRel, relayerRel, parsed.relayerTip));
+
+            recipientNetAmountRel = SafeMath.sub(parsed.netAmount, parsed.relayerTip);
+        }
+
+        // Cross-contract call: OP20.transfer(recipient, netAmount - tip)
         // — bridge holds the canonical OP20 and sends to recipient.
         const transferSelector: u32 = encodeSelector('transfer(address,uint256)');
         const tWriter = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
         tWriter.writeSelector(transferSelector);
         tWriter.writeAddress(parsed.recipient);
-        tWriter.writeU256(parsed.netAmount);
+        tWriter.writeU256(recipientNetAmountRel);
         Blockchain.call(parsed.wrappedToken, tWriter);
 
         this.emitEvent(new ReleasedFromVoucher(
@@ -1581,7 +1626,7 @@ export class BridgeDepository extends ReentrancyGuard {
         { name: 'voucher', type: ABIDataTypes.BYTES },
         { name: 'mldsaSig', type: ABIDataTypes.BYTES },
     )
-    @emit('MintedFromVoucher')
+    @emit('MintedFromVoucher', 'RelayerTipPaid')
     public claimMintWithVoucher(calldata: Calldata): BytesWriter {
         this.requireNotPaused();
 
@@ -1797,13 +1842,60 @@ export class BridgeDepository extends ReentrancyGuard {
         this._usedVoucherIds.set(parsed.voucherId, u256.One);
         this._usedSourceEvents.set(sourceKey, u256.One);
 
-        // ── Step 11: cross-contract mintTo(recipient, netAmount) ──
+        // ── Step 10b: PR β.2.payout-opnet — flow lookup + tip payout ──
+        // Derive the canonical flowId for this route and look up the per-
+        // flow tip cap. If the voucher carries a non-zero `relayerTip`, pay
+        // it to `tx.sender` (NOT a stored relayer address — protocol-neutral)
+        // and reduce the recipient's mint to `netAmount - tip`. Cap and
+        // status checks mirror the EVM-side `claim` payout in PR #35.
+        const flowIdMint: u256 = _flowIdFromVoucher(
+            mintMode.toU32(),
+            parsed.sourceChainId,
+            parsed.sourceBridgeAddr,
+            parsed.sourceTokenAddr,
+            this.address,
+            parsed.wrappedToken,
+        );
+        if (this._flowExists.get(flowIdMint).isZero()) {
+            throw new Revert('BridgeDepository: flow not registered');
+        }
+
+        let recipientNetAmountMint: u256 = parsed.netAmount;
+        if (!parsed.relayerTip.isZero()) {
+            const flowStatusMint: u32 = this._flowStatus.get(flowIdMint).toU32();
+            if (flowStatusMint != FLOW_STATUS_ACTIVE) {
+                throw new Revert('BridgeDepository: tip on inactive flow');
+            }
+            const tipCapBpsMint: u32 = this._flowTipCapBps.get(flowIdMint).toU32();
+            // bps = (tip * 10_000) / netDst — integer divide, mirrors EVM.
+            const bpsMint: u256 = SafeMath.div(
+                SafeMath.mul(parsed.relayerTip, u256.fromU32(10000)),
+                parsed.netAmount,
+            );
+            if (u256.gt(bpsMint, u256.fromU32(tipCapBpsMint))) {
+                throw new Revert('BridgeDepository: tip exceeds flow cap');
+            }
+            // Mint tip to tx.sender FIRST, then mint residual to recipient.
+            const relayer: Address = Blockchain.tx.sender;
+            const mintSelectorTip = encodeSelector('mintTo(address,uint256)');
+            const tipCalldata = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+            tipCalldata.writeSelector(mintSelectorTip);
+            tipCalldata.writeAddress(relayer);
+            tipCalldata.writeU256(parsed.relayerTip);
+            Blockchain.call(parsed.wrappedToken, tipCalldata);
+
+            this.emitEvent(new RelayerTipPaid(flowIdMint, relayer, parsed.relayerTip));
+
+            recipientNetAmountMint = SafeMath.sub(parsed.netAmount, parsed.relayerTip);
+        }
+
+        // ── Step 11: cross-contract mintTo(recipient, netAmount - tip) ──
         // mintTo(address,uint256) — Solidity-style selector.
         const mintSelector = encodeSelector('mintTo(address,uint256)');
         const mintCalldata = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
         mintCalldata.writeSelector(mintSelector);
         mintCalldata.writeAddress(parsed.recipient);
-        mintCalldata.writeU256(parsed.netAmount);
+        mintCalldata.writeU256(recipientNetAmountMint);
         Blockchain.call(parsed.wrappedToken, mintCalldata);
 
         this.emitEvent(new MintedFromVoucher(
@@ -2116,4 +2208,61 @@ function _computeFlowId(
     }
 
     return u256.fromUint8ArrayBE(sha256(buf));
+}
+
+/**
+ * PR β.2.payout-opnet — convert an EVM-style 32-byte address field encoded
+ * with right-padding (`addr in [0..20), zeros in [20..32)` — voucher
+ * convention) into the left-padded u256 representation that `addFlow` /
+ * `_computeFlowId` consume (`zeros in [0..12), addr in [12..32)`). The two
+ * encodings carry the same 20-byte address but live in opposite halves of
+ * the 32-byte word.
+ */
+function _evmAddrRightPadToLeftPadU256(rightPad: Address): u256 {
+    const out = new Uint8Array(32);
+    for (let i: u32 = 0; i < 20; i++) {
+        out[12 + i] = rightPad[i];
+    }
+    return u256.fromUint8ArrayBE(out);
+}
+
+/**
+ * PR β.2.payout-opnet — convert an OPNet 32-byte address into its u256 BE
+ * representation. OPNet addresses are full 32-byte identities so the bytes
+ * map directly to a u256.
+ */
+function _opnetAddrToU256(addr: Address): u256 {
+    const out = new Uint8Array(32);
+    for (let i: u32 = 0; i < 32; i++) {
+        out[i] = addr[i];
+    }
+    return u256.fromUint8ArrayBE(out);
+}
+
+/**
+ * PR β.2.payout-opnet — derive the canonical flowId for the route identified
+ * by a parsed voucher. The voucher carries the EVM-side identities right-
+ * padded (matching the EIP-712 / signing convention) so we re-encode them
+ * into the addFlow convention before hashing.
+ *
+ * Caller passes `mode` (read from `_tokenMode[wrappedToken]`) and
+ * `contractSelf` (this depository's identity, which `addFlow` consumed as
+ * `opnetBridge`).
+ */
+function _flowIdFromVoucher(
+    mode: u32,
+    sourceChainId: u256,
+    sourceBridgeAddr: Address,
+    sourceTokenAddr: Address,
+    contractSelf: Address,
+    wrappedToken: Address,
+): u256 {
+    return _computeFlowId(
+        mode,
+        sourceChainId.toU64(),
+        _evmAddrRightPadToLeftPadU256(sourceBridgeAddr),
+        _evmAddrRightPadToLeftPadU256(sourceTokenAddr),
+        _opnetAddrToU256(contractSelf),
+        _opnetAddrToU256(wrappedToken),
+    );
 }
