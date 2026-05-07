@@ -78,16 +78,18 @@ contract FlowConsumptionTest is Test {
         );
         vm.stopPrank();
 
-        // Seed escrow's USDC balance + flow inventory.
+        // Seed escrow's USDC balance directly — bypasses `lock` so we
+        // don't trip the lock-side dailyLimit (PR γ.2a) which would reject
+        // a 1_000_000e6 seed against this flow's 100_000e6 daily ceiling.
+        // This file isolates the claim-side path; the lock-side round-trip
+        // is covered in LockInventory.t.sol.
+        usdc.mint(address(escrow), 1_000_000e6);
         usdc.mint(alice, 10_000_000e6);
-        vm.startPrank(alice);
+        vm.prank(alice);
         usdc.approve(address(escrow), type(uint256).max);
-        escrow.lock(address(usdc), 1_000_000e6, keccak256("seed"));
-        vm.stopPrank();
 
-        // Seed inventory directly — `lock` doesn't bump inventory yet
-        // (γ.2 territory). Tests in this file rely on a non-zero starting
-        // inventory so the release path can decrement it.
+        // Seed inventory directly to a non-zero starting state so the
+        // release path can decrement it.
         escrow._testSetInventory(flowId, 1_000_000e6);
     }
 

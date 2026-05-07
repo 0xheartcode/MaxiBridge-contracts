@@ -94,12 +94,16 @@ contract RelayerTipTest is Test {
             type(uint128).max
         );
 
-        // Seed alice + give the escrow some balance to cover claims.
+        // Seed alice + give the escrow balance to cover claims.
+        // Direct-mint (not `lock`) because PR γ.2a's lock-side cap check
+        // would reject the seed: inventory above is already at uint128.max,
+        // so any further increment overflows the cap. This test isolates
+        // claim-side tip behaviour; lock-side coverage lives in
+        // LockInventory.t.sol.
+        usdc.mint(address(escrow), 100_000e6);
         usdc.mint(alice, 1_000_000e6);
-        vm.startPrank(alice);
+        vm.prank(alice);
         usdc.approve(address(escrow), type(uint256).max);
-        escrow.lock(address(usdc), 100_000e6, keccak256("seed"));
-        vm.stopPrank();
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────

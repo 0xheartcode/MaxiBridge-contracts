@@ -111,11 +111,34 @@ contract BridgeEscrowForkTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
+    /// @dev PR γ.2a — `lock` now binds to a flowId. Register a flat
+    ///      tipping-off flow for the fork token so the lookup resolves.
+    function _registerForkFlow(address token) internal returns (bytes32) {
+        vm.prank(owner);
+        return escrow.addFlow(BridgeEscrow.FlowAddParams({
+            mode: 0,
+            evmChainId: 11155111,
+            evmBridge: address(0xE5C0),
+            evmToken: token,
+            evmDecimals: 6,
+            opnetBridge: bytes32(uint256(0xDEAD)),
+            opnetToken: bytes32(uint256(0xC0FFEE)),
+            opnetDecimals: 6,
+            feeBps: 0,
+            minFee: 0,
+            minAmount: 0,
+            cap: type(uint128).max,
+            dailyLimit: type(uint128).max,
+            tipCapBps: 0
+        }));
+    }
+
     function test_Fork_Lock_USDC() public {
         if (_skipIfNoRpc()) return;
+        bytes32 flowId = _registerForkFlow(forkUsdc);
         vm.startPrank(alice);
         IERC20(forkUsdc).approve(address(escrow), type(uint256).max);
-        (uint256 nonce_, uint256 received_) = escrow.lock(forkUsdc, 100e6, keccak256("r"));
+        (uint256 nonce_, uint256 received_) = escrow.lock(forkUsdc, 100e6, keccak256("r"), flowId);
         vm.stopPrank();
         assertEq(nonce_, 1);
         assertEq(received_, 100e6);
@@ -130,9 +153,10 @@ contract BridgeEscrowForkTest is Test {
     function test_Fork_Lock_USDT() public {
         if (_skipIfNoRpc()) return;
         if (vm.envOr("RUN_FORK_USDT", uint256(0)) == 0) return;
+        bytes32 flowId = _registerForkFlow(forkUsdt);
         vm.startPrank(alice);
         IERC20(forkUsdt).approve(address(escrow), type(uint256).max);
-        (uint256 nonce_, uint256 received_) = escrow.lock(forkUsdt, 100e6, keccak256("r"));
+        (uint256 nonce_, uint256 received_) = escrow.lock(forkUsdt, 100e6, keccak256("r"), flowId);
         vm.stopPrank();
         assertEq(nonce_, 1);
         assertEq(received_, 100e6);
@@ -141,31 +165,14 @@ contract BridgeEscrowForkTest is Test {
 
     function test_Fork_Claim_USDC_RoundTrip() public {
         if (_skipIfNoRpc()) return;
+        // Register the flow first so `lock` (PR γ.2a) can bind to it; the
+        // claim path (PR β.2.payout-evm) reuses the same flowId.
+        bytes32 flowId = _registerForkFlow(forkUsdc);
+
         vm.startPrank(alice);
         IERC20(forkUsdc).approve(address(escrow), type(uint256).max);
-        escrow.lock(forkUsdc, 1_000e6, keccak256("rc"));
+        escrow.lock(forkUsdc, 1_000e6, keccak256("rc"), flowId);
         vm.stopPrank();
-
-        // PR β.2.payout-evm: claim binds to a flowId. Register a
-        // tipping-off flow for the fork token so the new lookup
-        // resolves cleanly. Sepolia chainId = 11155111.
-        vm.prank(owner);
-        bytes32 flowId = escrow.addFlow(BridgeEscrow.FlowAddParams({
-            mode: 0,
-            evmChainId: 11155111,
-            evmBridge: address(0xE5C0),
-            evmToken: forkUsdc,
-            evmDecimals: 6,
-            opnetBridge: bytes32(uint256(0xDEAD)),
-            opnetToken: bytes32(uint256(0xC0FFEE)),
-            opnetDecimals: 6,
-            feeBps: 0,
-            minFee: 0,
-            minAmount: 0,
-            cap: type(uint128).max,
-            dailyLimit: type(uint128).max,
-            tipCapBps: 0
-        }));
 
         BridgeEscrow.ReleaseIntent memory intent = BridgeEscrow.ReleaseIntent({
             token: forkUsdc,
