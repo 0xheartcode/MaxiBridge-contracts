@@ -234,7 +234,7 @@ npm run integration:drills             # security drills (replay, rotation, reor
 
 ## 6. Voucher preimages (CRITICAL — both sides)
 
-### EVM → OPNet (ML-DSA, 460 bytes)
+### EVM → OPNet (ML-DSA, 508 bytes — PR β.2.format)
 
 ```
 Offset  Size  Field
@@ -250,15 +250,19 @@ Offset  Size  Field
 232     32    sourceDepositNonce  (u256 BE) — from Locked event
 264     32    sourceBlockHash     (bytes32) — canonical hash at sign time (reorg guard)
 296     32    wrappedToken        (Address) — OPNet wUSDC or wUSDT
-328     32    grossAmount         (u256 BE)
-360     32    feeAmount           (u256 BE)
-392     32    netAmount           (u256 BE)
-424      4    signerEpoch         (u32 BE)  — MUST equal _signerEpoch at verify time
-428     32    voucherId           (u256 BE) — per-voucher replay guard
-460          = total → SHA-256 → 32B hash → ML-DSA verify
+328     32    grossSrcAmount      (u256 BE) — source-side gross (PR β.2.format)
+360     32    grossDstAmount      (u256 BE) — destination-side gross (was grossAmount)
+392     32    feeDstAmount        (u256 BE) — destination-side fee (was feeAmount)
+424     32    netDstAmount        (u256 BE) — destination-side net (was netAmount)
+456     16    relayerTip          (u128 BE) — permissionless tip (PR β.2.format; payout in next sub-PR)
+472      4    signerEpoch         (u32 BE)  — MUST equal _signerEpoch at verify time
+476     32    voucherId           (u256 BE) — per-voucher replay guard
+508          = total → SHA-256 → 32B hash → ML-DSA verify
 ```
 
-14 × 32B + 3 × 4B = 460B. Server + contract + test fixture must agree **bit-for-bit** — a single-byte drift fails ML-DSA verify on-chain.
+14 × 32B + 16B + 2 × 4B = 508B. Server + contract + test fixture must agree **bit-for-bit** — a single-byte drift fails ML-DSA verify on-chain.
+
+**Migration note (PR β.2.format):** `grossSrcAmount` is plumbed equal to `grossDstAmount` until decimal-aware AmountPolicy lands; `relayerTip` is signed over but not paid out yet (the contract parses the new fields, mint amount still comes from `netDstAmount`).
 
 Cross-validation fixture: `scripts/src/integration/fixtures/voucher-fixture.{json,bin,sig}`. Run `npm run integration:fixture:verify` to diff against committed bytes (catches drift with first-divergent-byte reporting).
 
@@ -275,6 +279,8 @@ struct ReleaseIntent {
     uint256 burnNonce;
     uint32  signerEpoch;
     bytes32 opnetNonce;
+    uint256 grossSrcAmount;   // PR β.2.format
+    uint128 relayerTip;       // PR β.2.format (payout in next sub-PR)
 }
 ```
 
@@ -282,7 +288,7 @@ Domain: `{ name: "BridgeEscrow", version: "1", chainId: <EVM_CHAIN_ID>, verifyin
 
 Typehash string (MUST match `BridgeEscrow.sol` byte-for-byte):
 ```
-ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)
+ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip)
 ```
 
 ---
@@ -392,6 +398,7 @@ Server MUST pack in exactly this order. Frontend passes the blob through unchang
 
 | Method | Signature | Selector |
 |--------|-----------|----------|
+| `claim` (PR β.2.format) | `claim((address,address,uint256,uint256,bytes32,uint32,uint256,uint32,bytes32,uint256,uint128),bytes)` | `0x9dc05e05` |
 | `cancelVoucher` | `cancelVoucher(bytes32)` | `0x5df2af98` |
 | `setTreasury` | `setTreasury(address)` | `0xf0f44260` |
 | `setGuardian` | `setGuardian(address)` | `0x8a0dac4a` |

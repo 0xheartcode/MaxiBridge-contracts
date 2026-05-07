@@ -19,7 +19,7 @@ interface IOwnable {
 contract BridgeEscrowTest is Test {
     bytes32 internal constant RELEASE_INTENT_TYPEHASH =
         keccak256(
-            "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)"
+            "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip)"
         );
 
     BridgeEscrow internal impl;
@@ -86,7 +86,9 @@ contract BridgeEscrowTest is Test {
                     intent.opnetEventIndex,
                     intent.burnNonce,
                     intent.signerEpoch,
-                    intent.opnetNonce
+                    intent.opnetNonce,
+                    intent.grossSrcAmount,
+                    intent.relayerTip
                 )
             );
     }
@@ -176,7 +178,11 @@ contract BridgeEscrowTest is Test {
             opnetEventIndex: 0,
             burnNonce: 1,
             signerEpoch: escrow.currentEpoch(),
-            opnetNonce: keccak256("opnet-nonce-1")
+            opnetNonce: keccak256("opnet-nonce-1"),
+            // PR β.2.format — until decimal-aware AmountPolicy lands,
+            // grossSrcAmount = amount and relayerTip = 0.
+            grossSrcAmount: amount,
+            relayerTip: 0
         });
     }
 

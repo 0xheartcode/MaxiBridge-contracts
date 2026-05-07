@@ -91,35 +91,42 @@ const FLOW_STATUS_DRAINING: u32 = 3;
 /**
  * Voucher preimage length in bytes.
  *
- * Layout (byte-for-byte, MUST match server/src/voucher.ts):
+ * PR β.2.format — extended from the legacy 460B layout with two new fields
+ * (`grossSrcAmount` u256, `relayerTip` u128) so the next sub-PR can wire
+ * decimal-aware fee math + relayer tip payout. THIS PR only parses the new
+ * fields; the mint/release amount continues to come from `netDstAmount`.
+ *
+ * Layout (byte-for-byte, MUST match server/src/voucher/opnet-voucher.ts):
  *   networkId           u256     32
  *   contractSelf        Address  32
  *   selector            u32       4
  *   recipient           Address  32
  *   sourceChainId       u256     32
- *   sourceBridgeAddr    Address  32   (EVM 20-byte addr left-padded to 32)
- *   sourceTokenAddr     Address  32   (EVM 20-byte addr left-padded to 32)
+ *   sourceBridgeAddr    Address  32   (EVM 20-byte addr right-padded to 32)
+ *   sourceTokenAddr     Address  32   (EVM 20-byte addr right-padded to 32)
  *   sourceTxHash        u256     32
  *   sourceLogIndex      u32       4
  *   sourceDepositNonce  u256     32
  *   sourceBlockHash     u256     32
  *   wrappedToken        Address  32
- *   grossAmount         u256     32
- *   feeAmount           u256     32
- *   netAmount           u256     32
+ *   grossSrcAmount      u256     32   ← NEW
+ *   grossDstAmount      u256     32   (was grossAmount)
+ *   feeDstAmount        u256     32   (was feeAmount)
+ *   netDstAmount        u256     32   (was netAmount)
+ *   relayerTip          u128     16   ← NEW (uint128 BE)
  *   signerEpoch         u32       4
  *   voucherId           u256     32
  *   ────────────────────────────────
- *   total                       460
+ *   total                       508
  */
-const VOUCHER_PREIMAGE_LEN: i32 = 460;
+const VOUCHER_PREIMAGE_LEN: i32 = 508;
 
 /**
  * BridgeDepository — mint authority for WrappedOP20.
  *
  * Users call `claimMintWithVoucher(voucher, mldsaSig)` paying their own gas.
  * The contract verifies:
- *   (1) parsed voucher length == 460 bytes
+ *   (1) parsed voucher length == 508 bytes
  *   (2) embedded signerEpoch matches current `_signerEpoch`
  *   (3) ML-DSA signature verifies against `_bridgeSignerHash[epoch]`
  *   (4) recipient == Blockchain.tx.sender  (front-run safe)
@@ -1915,9 +1922,17 @@ class ParsedVoucher {
     sourceDepositNonce: u256 = u256.Zero;
     sourceBlockHash: u256 = u256.Zero;
     wrappedToken: Address = Address.zero();
+    // PR β.2.format — source-side gross input. Parsed but not yet enforced.
+    grossSrcAmount: u256 = u256.Zero;
+    // Renamed from grossAmount → grossDstAmount in spec; field name kept as
+    // `grossAmount` here so existing fee-math invariant code paths
+    // (gross == fee + net) read naturally. Holds the destination-side gross.
     grossAmount: u256 = u256.Zero;
     feeAmount: u256 = u256.Zero;
     netAmount: u256 = u256.Zero;
+    // PR β.2.format — relayer tip carved from netDst by the next sub-PR.
+    // Parsed but ignored in this PR (no payout, no cap check).
+    relayerTip: u256 = u256.Zero;
     signerEpoch: u32 = 0;
     voucherId: u256 = u256.Zero;
 }
@@ -1937,9 +1952,11 @@ function parseVoucher(buf: Uint8Array): ParsedVoucher {
     p.sourceDepositNonce = readU256BE(buf, off); off += 32;
     p.sourceBlockHash = readU256BE(buf, off); off += 32;
     p.wrappedToken = readAddress(buf, off); off += 32;
+    p.grossSrcAmount = readU256BE(buf, off); off += 32;
     p.grossAmount = readU256BE(buf, off); off += 32;
     p.feeAmount = readU256BE(buf, off); off += 32;
     p.netAmount = readU256BE(buf, off); off += 32;
+    p.relayerTip = readU128BE(buf, off); off += 16;
     p.signerEpoch = readU32BE(buf, off); off += 4;
     p.voucherId = readU256BE(buf, off); off += 32;
     // Sanity check — if this fails the constant is out of sync.
@@ -1960,6 +1977,22 @@ function readU256BE(buf: Uint8Array, off: u32): u256 {
     const tmp = new Uint8Array(32);
     for (let i: u32 = 0; i < 32; i++) {
         tmp[i] = buf[off + i];
+    }
+    return u256.fromUint8ArrayBE(tmp);
+}
+
+/**
+ * Read a 16-byte (uint128) big-endian value into a u256. We use u256 as the
+ * carrying type (rather than u128) so downstream fee-math, comparisons and
+ * SafeMath ops compose with the rest of the contract without conversions.
+ * Caller must ensure offsets stay within the 508-byte preimage bound.
+ */
+function readU128BE(buf: Uint8Array, off: u32): u256 {
+    const tmp = new Uint8Array(32);
+    // Place the 16 source bytes into the low half of a 32-byte buffer so
+    // u256.fromUint8ArrayBE produces the correct value (high 16 bytes zero).
+    for (let i: u32 = 0; i < 16; i++) {
+        tmp[16 + i] = buf[off + i];
     }
     return u256.fromUint8ArrayBE(tmp);
 }

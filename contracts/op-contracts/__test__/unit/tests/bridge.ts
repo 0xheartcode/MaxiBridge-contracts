@@ -31,7 +31,7 @@ import { BridgeDepository } from '../contracts/BridgeDepository.js';
 
 const VOUCHER_NETWORK_ID: bigint = 2n; // testnet
 const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x59893fe6;
-const VOUCHER_PREIMAGE_LEN = 460;
+const VOUCHER_PREIMAGE_LEN = 508;
 
 const ETH_CHAIN_ID: bigint = 1n; // Ethereum mainnet
 
@@ -136,15 +136,30 @@ interface VoucherFields {
     sourceDepositNonce?: bigint;
     sourceBlockHash?: bigint;
     wrappedToken: Address;
+    /** PR β.2.format — defaults to grossAmount when omitted (1:1 src=dst). */
+    grossSrcAmount?: bigint;
     grossAmount: bigint;
     feeAmount: bigint;
     netAmount: bigint;
+    /** PR β.2.format — relayer tip in destination units, uint128. Default 0. */
+    relayerTip?: bigint;
     signerEpoch?: number;
     voucherId: bigint;
 }
 
+/** Write a 16-byte (uint128) big-endian value. */
+function writeU128BE(w: BinaryWriter, v: bigint): void {
+    const buf = new Uint8Array(16);
+    let x = v;
+    for (let i = 15; i >= 0; i--) {
+        buf[i] = Number(x & 0xffn);
+        x >>= 8n;
+    }
+    w.writeBytes(buf);
+}
+
 /**
- * Builds the 460-byte voucher preimage exactly as BridgeDepository.parseVoucher
+ * Builds the 508-byte voucher preimage exactly as BridgeDepository.parseVoucher
  * reads it, and returns the SHA-256 hash of the preimage ready for ML-DSA.
  */
 function buildVoucher(v: VoucherFields): { preimage: Uint8Array; hash: Uint8Array } {
@@ -161,9 +176,11 @@ function buildVoucher(v: VoucherFields): { preimage: Uint8Array; hash: Uint8Arra
     w.writeU256(v.sourceDepositNonce ?? 0n);
     w.writeU256(v.sourceBlockHash ?? 0n);
     w.writeAddress(v.wrappedToken);
+    w.writeU256(v.grossSrcAmount ?? v.grossAmount);
     w.writeU256(v.grossAmount);
     w.writeU256(v.feeAmount);
     w.writeU256(v.netAmount);
+    writeU128BE(w, v.relayerTip ?? 0n);
     w.writeU32(v.signerEpoch ?? 1);
     w.writeU256(v.voucherId);
 
@@ -308,6 +325,39 @@ await opnet('BridgeDepository — happy path', async (vm: OPNetUnit) => {
 
         Assert.expect(await wusdc.balanceOf(alice)).toEqual(f1.netAmount);
         Assert.expect(await wusdt.balanceOf(alice)).toEqual(f2.netAmount);
+    });
+
+    // PR β.2.format — voucher length guard now enforces 508 (was 460).
+    await vm.it('legacy 460-byte voucher reverts on length check', async () => {
+        const { depository, signerWallet } = setup;
+        const fields = defaultFields(setup, alice);
+        const { preimage } = buildVoucher(fields);
+        // Truncate to the legacy 460B size.
+        const legacy = preimage.slice(0, 460);
+        const legacyHash = sha256(legacy);
+        const legacySig = signVoucher(signerWallet, legacyHash);
+
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(legacy, legacySig);
+        }).toThrow();
+    });
+
+    // PR β.2.format — round-trip the new fields through the parser. We only
+    // assert the claim still succeeds; tip payout / cap enforcement land in
+    // the next sub-PR.
+    await vm.it('relayerTip + grossSrcAmount round-trip through parser', async () => {
+        const { depository, wusdc, signerWallet } = setup;
+        const fields = {
+            ...defaultFields(setup, alice),
+            grossSrcAmount: 12_345_678n, // distinct from grossAmount
+            relayerTip: 9_999n,           // non-zero u128
+        };
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(alice);
+        await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        // Mint amount still sourced from netDstAmount — tip not yet enforced.
+        Assert.expect(await wusdc.balanceOf(alice)).toEqual(fields.netAmount);
     });
 });
 
