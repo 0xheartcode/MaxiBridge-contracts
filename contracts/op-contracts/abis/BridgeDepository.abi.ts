@@ -249,6 +249,38 @@ export const BridgeDepositoryAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
+        name: 'setUpgradeAuthority',
+        inputs: [{ name: 'newUpgradeAuthority', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'proposeUpgrade',
+        inputs: [],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'cancelProposedUpgrade',
+        inputs: [],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'upgradeAuthority',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'upgradeAuthority', type: ABIDataTypes.ADDRESS }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'pendingUpgradeAuthorized',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'pendingUpgradeAuthorized', type: ABIDataTypes.BOOL }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
         name: 'setWrapFeeBps',
         inputs: [{ name: 'bps', type: ABIDataTypes.UINT256 }],
         outputs: [],
