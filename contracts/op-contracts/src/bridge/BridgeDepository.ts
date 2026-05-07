@@ -38,6 +38,7 @@ import {
     FlowDailyLimitChanged,
     FlowMinAmountChanged,
     FlowFeeChanged,
+    FlowTipCapUpdated,
 } from './events';
 
 /**
@@ -68,6 +69,14 @@ const MLDSA_SIG_BLOB_LEN: u32 = 4 + MLDSA_LEVEL2_PUBKEY_LEN + MLDSA_LEVEL2_SIG_L
  * inflation.
  */
 const MAX_WRAP_FEE_BPS: u32 = 1000;
+
+/**
+ * Hard cap on per-flow `tipCapBps` (PR β.2.scaffold). 200 = 2%. Bounds
+ * the permissionless relayer tip a flow can be configured to pay out.
+ * Default per-flow tipCapBps is 0 — tipping disabled until governance
+ * sets it. Mirrors EVM `BridgeEscrow.MAX_TIP_BPS`.
+ */
+const MAX_TIP_BPS: u32 = 200;
 
 /**
  * PR α — flow status enum. Mirrors the EVM-side constants on
@@ -264,6 +273,10 @@ export class BridgeDepository extends ReentrancyGuard {
     private _flowMintedToday: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
     private _flowLastWindowStart: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
     private _flowInventory: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    // PR β.2.scaffold — per-flow permissionless relayer tip cap (bps).
+    // 0 = tipping disabled (default); ≤ MAX_TIP_BPS = 200 (2%); governor-set.
+    // Appended at the end to preserve append-only storage discipline.
+    private _flowTipCapBps: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
     // Lifetime count (includes disabled flows) — for off-chain enumeration
     // hand-shaking. PR γ may extend with on-chain enumeration arrays if
     // needed.
@@ -759,6 +772,7 @@ export class BridgeDepository extends ReentrancyGuard {
         { name: 'minAmount', type: ABIDataTypes.UINT256 },
         { name: 'cap', type: ABIDataTypes.UINT256 },
         { name: 'dailyLimit', type: ABIDataTypes.UINT256 },
+        { name: 'tipCapBps', type: ABIDataTypes.UINT256 },
     )
     @returns({ name: 'flowId', type: ABIDataTypes.UINT256 })
     @emit('FlowAdded')
@@ -778,6 +792,7 @@ export class BridgeDepository extends ReentrancyGuard {
         const minAmount: u256 = calldata.readU256();
         const cap: u256 = calldata.readU256();
         const dailyLimit: u256 = calldata.readU256();
+        const tipCapBps: u32 = calldata.readU256().toU32();
 
         if (mode > 3) throw new Revert('BridgeDepository: invalid flow mode');
         if (chainId == 0) throw new Revert('BridgeDepository: zero chainId');
@@ -795,6 +810,9 @@ export class BridgeDepository extends ReentrancyGuard {
         }
         if (feeBps > MAX_WRAP_FEE_BPS) {
             throw new Revert('BridgeDepository: feeBps too high');
+        }
+        if (tipCapBps > MAX_TIP_BPS) {
+            throw new Revert('BridgeDepository: tipCapBps too high');
         }
 
         const flowId: u256 = _computeFlowId(
@@ -824,6 +842,7 @@ export class BridgeDepository extends ReentrancyGuard {
         this._flowMinAmount.set(flowId, minAmount);
         this._flowCap.set(flowId, cap);
         this._flowDailyLimit.set(flowId, dailyLimit);
+        this._flowTipCapBps.set(flowId, u256.fromU32(tipCapBps));
         // mintedToday, lastWindowStart, inventory remain 0.
 
         this._flowTotalCount.value = SafeMath.add(this._flowTotalCount.value, u256.One);
@@ -997,6 +1016,32 @@ export class BridgeDepository extends ReentrancyGuard {
         return new BytesWriter(0);
     }
 
+    /**
+     * PR β.2.scaffold — adjust the per-flow permissionless relayer tip
+     * cap (bps). 0 = tipping disabled. Hard-capped at MAX_TIP_BPS (2%).
+     * Storage + governance only; tip payout wiring lands in a follow-up.
+     */
+    @method(
+        { name: 'flowId', type: ABIDataTypes.UINT256 },
+        { name: 'newBps', type: ABIDataTypes.UINT256 },
+    )
+    @emit('FlowTipCapUpdated')
+    public setFlowTipCap(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const flowId: u256 = calldata.readU256();
+        const newBps: u32 = calldata.readU256().toU32();
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        if (newBps > MAX_TIP_BPS) {
+            throw new Revert('BridgeDepository: tipCapBps too high');
+        }
+        const oldBps: u32 = this._flowTipCapBps.get(flowId).toU32();
+        this._flowTipCapBps.set(flowId, u256.fromU32(newBps));
+        this.emitEvent(new FlowTipCapUpdated(flowId, oldBps, newBps));
+        return new BytesWriter(0);
+    }
+
     @view
     @returns({ name: 'exists', type: ABIDataTypes.BOOL })
     public flowExists(calldata: Calldata): BytesWriter {
@@ -1015,19 +1060,19 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     /**
-     * Read every field of a flow. Returns 17 × 32-byte words.
+     * Read every field of a flow. Returns 18 × 32-byte words.
      * Layout (matches EVM `getFlow(flowId).FlowRecord` ordering):
      *   mode, status, chainId, evmBridge, evmToken, evmDecimals,
      *   opnetBridge, opnetToken, opnetDecimals, feeBps, minFee,
      *   minAmount, cap, dailyLimit, mintedToday, lastWindowStart,
-     *   inventory
+     *   inventory, tipCapBps (PR β.2.scaffold — appended)
      */
     @view
     @returns({ name: 'flow', type: ABIDataTypes.BYTES })
     public getFlow(calldata: Calldata): BytesWriter {
         const flowId: u256 = calldata.readU256();
         // ABIDataTypes.BYTES return must be u32 length-prefixed.
-        const payloadLen: u32 = 17 * 32;
+        const payloadLen: u32 = 18 * 32;
         const r = new BytesWriter(4 + payloadLen);
         r.writeU32(payloadLen);
         r.writeU256(this._flowMode.get(flowId));
@@ -1047,6 +1092,7 @@ export class BridgeDepository extends ReentrancyGuard {
         r.writeU256(this._flowMintedToday.get(flowId));
         r.writeU256(this._flowLastWindowStart.get(flowId));
         r.writeU256(this._flowInventory.get(flowId));
+        r.writeU256(this._flowTipCapBps.get(flowId));
         return r;
     }
 

@@ -121,6 +121,12 @@ contract BridgeEscrow is
     ///         this — protects users from being effectively trapped.
     uint256 public constant MAX_FEE_BPS = 1000;
 
+    /// @notice Hard cap on per-flow `tipCapBps`. 200 = 2%. Bounds the
+    ///         permissionless relayer tip a flow can be configured to pay
+    ///         out (PR β.2). Default per-flow tipCapBps is 0 — tipping
+    ///         disabled until governance sets it.
+    uint256 public constant MAX_TIP_BPS = 200;
+
     // ---------------------------------------------------------------------
     // Flow Registry (PR α — storage + governance only; consumed by PR γ)
     // ---------------------------------------------------------------------
@@ -178,6 +184,10 @@ contract BridgeEscrow is
         uint128 mintedToday;
         uint64  lastWindowStart;
         uint128 inventory;        // mode 0/3: locked tokens; mode 2: synthetic supply
+        // PR β.2 — per-flow permissionless relayer tip cap.
+        // 0 = tipping disabled (default); cap is per-flow,
+        // ≤ MAX_TIP_BPS = 200 (2%); governor-set.
+        uint16  tipCapBps;
     }
 
     // ---------------------------------------------------------------------
@@ -350,6 +360,7 @@ contract BridgeEscrow is
     event FlowDailyLimitChanged(bytes32 indexed flowId, uint128 oldLimit, uint128 newLimit);
     event FlowMinAmountChanged(bytes32 indexed flowId, uint128 oldMin, uint128 newMin);
     event FlowFeeChanged(bytes32 indexed flowId, uint16 oldBps, uint16 newBps, uint128 oldMinFee, uint128 newMinFee);
+    event FlowTipCapUpdated(bytes32 indexed flowId, uint16 oldBps, uint16 newBps);
     event SignerSetMigrated(
         uint32 indexed oldEpoch,
         uint32 indexed newEpoch,
@@ -391,6 +402,7 @@ contract BridgeEscrow is
     error AlreadyASigner();
     error InvalidThreshold();
     error FeeBpsTooHigh();
+    error TipCapTooHigh();
     error TokenModeFinalized();
     error InvalidTokenMode();
     error WrongMode();
@@ -941,6 +953,7 @@ contract BridgeEscrow is
         uint128 minAmount;
         uint128 cap;
         uint128 dailyLimit;
+        uint16  tipCapBps;
     }
 
     /// @notice Register a new flow. Governor-only — production deploys
@@ -958,6 +971,7 @@ contract BridgeEscrow is
         if (p.evmDecimals == 0 || p.evmDecimals > 30) revert FlowInvalidDecimals();
         if (p.opnetDecimals == 0 || p.opnetDecimals > 30) revert FlowInvalidDecimals();
         if (p.feeBps > MAX_FEE_BPS) revert FeeBpsTooHigh();
+        if (p.tipCapBps > MAX_TIP_BPS) revert TipCapTooHigh();
 
         flowId = computeFlowId(
             p.mode, p.evmChainId, p.evmBridge, p.evmToken, p.opnetBridge, p.opnetToken
@@ -983,6 +997,7 @@ contract BridgeEscrow is
         f.minAmount = p.minAmount;
         f.cap = p.cap;
         f.dailyLimit = p.dailyLimit;
+        f.tipCapBps = p.tipCapBps;
         // mintedToday, lastWindowStart, inventory remain 0.
 
         allFlowIds.push(flowId);
@@ -1069,6 +1084,18 @@ contract BridgeEscrow is
         emit FlowFeeChanged(flowId, f.feeBps, newBps, f.minFee, newMinFee);
         f.feeBps = newBps;
         f.minFee = newMinFee;
+    }
+
+    /// @notice Governor-only — adjust the per-flow permissionless relayer
+    ///         tip cap. 0 = tipping disabled. Hard-capped at MAX_TIP_BPS
+    ///         (2%). PR β.2.scaffold lays storage + governance only —
+    ///         actual tip payout wiring lands in a follow-up PR.
+    function setFlowTipCap(bytes32 flowId, uint16 newBps) external onlyOwner {
+        if (newBps > MAX_TIP_BPS) revert TipCapTooHigh();
+        FlowRecord storage f = flows[flowId];
+        if (f.evmChainId == 0) revert FlowNotFound();
+        emit FlowTipCapUpdated(flowId, f.tipCapBps, newBps);
+        f.tipCapBps = newBps;
     }
 
     /// @notice Read-only accessor — returns the full FlowRecord. Easier

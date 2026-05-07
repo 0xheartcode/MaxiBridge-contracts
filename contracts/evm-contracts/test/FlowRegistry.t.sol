@@ -78,7 +78,8 @@ contract FlowRegistryTest is Test {
             minFee: 0,
             minAmount: 1_000_000, // 1 USDC
             cap: 1_000_000_000_000, // 1M USDC
-            dailyLimit: 100_000_000_000 // 100k USDC
+            dailyLimit: 100_000_000_000, // 100k USDC
+            tipCapBps: 0 // tipping disabled by default (PR β.2.scaffold)
         });
     }
 
@@ -370,6 +371,60 @@ contract FlowRegistryTest is Test {
         BridgeEscrow.FlowRecord memory f = escrow.getFlow(flowId);
         assertEq(f.feeBps, 75);
         assertEq(uint256(f.minFee), 1_000);
+    }
+
+    // ─── tipCapBps (PR β.2.scaffold) ───────────────────────────────────
+
+    function test_AddFlow_DefaultTipCap_IsZero() public {
+        bytes32 flowId = _addDefault(address(usdc), OPNET_USDC);
+        assertEq(escrow.getFlow(flowId).tipCapBps, 0);
+    }
+
+    function test_AddFlow_TipCap_Above200_Reverts() public {
+        BridgeEscrow.FlowAddParams memory p = _defaultParams(address(usdc), OPNET_USDC);
+        p.tipCapBps = 201;
+        vm.prank(owner);
+        vm.expectRevert(BridgeEscrow.TipCapTooHigh.selector);
+        escrow.addFlow(p);
+    }
+
+    function test_AddFlow_TipCap_AtMax_Succeeds() public {
+        BridgeEscrow.FlowAddParams memory p = _defaultParams(address(usdc), OPNET_USDC);
+        p.tipCapBps = 200;
+        vm.prank(owner);
+        bytes32 flowId = escrow.addFlow(p);
+        assertEq(escrow.getFlow(flowId).tipCapBps, 200);
+    }
+
+    function test_SetFlowTipCap_GovernorOnly() public {
+        bytes32 flowId = _addDefault(address(usdc), OPNET_USDC);
+        vm.prank(stranger);
+        vm.expectRevert(); // OZ Ownable
+        escrow.setFlowTipCap(flowId, 100);
+    }
+
+    function test_SetFlowTipCap_HappyPath() public {
+        bytes32 flowId = _addDefault(address(usdc), OPNET_USDC);
+        vm.prank(owner);
+        vm.expectEmit(true, false, false, true, address(escrow));
+        emit BridgeEscrow.FlowTipCapUpdated(flowId, 0, 100);
+        escrow.setFlowTipCap(flowId, 100);
+        assertEq(escrow.getFlow(flowId).tipCapBps, 100);
+    }
+
+    function test_SetFlowTipCap_AboveMax_Reverts() public {
+        bytes32 flowId = _addDefault(address(usdc), OPNET_USDC);
+        // Hoist the constant read so vm.expectRevert applies to setFlowTipCap.
+        uint16 tooHigh = uint16(escrow.MAX_TIP_BPS()) + 1;
+        vm.prank(owner);
+        vm.expectRevert(BridgeEscrow.TipCapTooHigh.selector);
+        escrow.setFlowTipCap(flowId, tooHigh);
+    }
+
+    function test_SetFlowTipCap_UnknownFlow_Reverts() public {
+        vm.prank(owner);
+        vm.expectRevert(BridgeEscrow.FlowNotFound.selector);
+        escrow.setFlowTipCap(bytes32(uint256(0xDEADBEEF)), 50);
     }
 
     // ─── Existence / read views ────────────────────────────────────────

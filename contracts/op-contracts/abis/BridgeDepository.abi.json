@@ -302,6 +302,10 @@
                 {
                     "name": "dailyLimit",
                     "type": "UINT256"
+                },
+                {
+                    "name": "tipCapBps",
+                    "type": "UINT256"
                 }
             ],
             "outputs": [
@@ -417,6 +421,23 @@
                 },
                 {
                     "name": "newMinFee",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setFlowTipCap",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "newBps",
                     "type": "UINT256"
                 }
             ],
@@ -951,6 +972,24 @@
                 {
                     "name": "newMinFee",
                     "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "FlowTipCapUpdated",
+            "values": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "oldBps",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "newBps",
+                    "type": "UINT32"
                 }
             ],
             "type": "Event"

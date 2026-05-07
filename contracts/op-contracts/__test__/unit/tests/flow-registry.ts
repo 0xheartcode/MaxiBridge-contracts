@@ -372,3 +372,60 @@ await opnet('BridgeDepository — PR α — read views', async (vm: OPNetUnit) =
         Assert.expect(await depository.flowCount()).toEqual(0n);
     });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PR β.2.scaffold — per-flow tipCapBps storage + governance
+// ─────────────────────────────────────────────────────────────────────────────
+
+await opnet('BridgeDepository — PR β.2.scaffold — tipCapBps', async (vm: OPNetUnit) => {
+    let depository: BridgeDepository;
+    let flowId: bigint;
+
+    vm.beforeEach(async () => {
+        depository = await setupDepository();
+    });
+
+    vm.afterAll(async () => {
+        depository.dispose();
+    });
+
+    await vm.it('addFlow — default tipCapBps is zero', async () => {
+        flowId = await depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC));
+        const f = await depository.getFlow(flowId);
+        Assert.expect(f[17]).toEqual(0n); // tipCapBps appended at index 17
+    });
+
+    await vm.it('addFlow — tipCapBps above 200 reverts', async () => {
+        const p = { ...defaultParams(EVM_USDC, OPNET_WUSDC), tipCapBps: 201n };
+        await expectRevert(() => depository.addFlow(p), 'tipCapBps>200');
+    });
+
+    await vm.it('addFlow — tipCapBps at MAX_TIP_BPS (200) succeeds', async () => {
+        const p = { ...defaultParams(EVM_USDC, OPNET_WUSDC), tipCapBps: 200n };
+        flowId = await depository.addFlow(p);
+        const f = await depository.getFlow(flowId);
+        Assert.expect(f[17]).toEqual(200n);
+    });
+
+    await vm.it('setFlowTipCap — governor only', async () => {
+        flowId = await depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC));
+        setSender(stranger);
+        await expectRevert(() => depository.setFlowTipCap(flowId, 100n), 'non-gov');
+    });
+
+    await vm.it('setFlowTipCap — happy path updates value', async () => {
+        flowId = await depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC));
+        await depository.setFlowTipCap(flowId, 100n);
+        const f = await depository.getFlow(flowId);
+        Assert.expect(f[17]).toEqual(100n);
+    });
+
+    await vm.it('setFlowTipCap — above MAX_TIP_BPS reverts', async () => {
+        flowId = await depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC));
+        await expectRevert(() => depository.setFlowTipCap(flowId, 201n), 'tipCapBps>200');
+    });
+
+    await vm.it('setFlowTipCap — unknown flowId reverts', async () => {
+        await expectRevert(() => depository.setFlowTipCap(0xdeadbeefn, 50n), 'unknown');
+    });
+});
