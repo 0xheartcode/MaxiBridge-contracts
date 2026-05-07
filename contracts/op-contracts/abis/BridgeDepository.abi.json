@@ -602,6 +602,70 @@
             "outputs": []
         },
         {
+            "name": "migrateSignerSet",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "payload",
+                    "type": "BYTES"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "governorProvisionFlowInventory",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "confirmBurn",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "depositId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "attestation",
+                    "type": "BYTES"
+                },
+                {
+                    "name": "mldsaSig",
+                    "type": "BYTES"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "isBurnConfirmed",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "confirmed",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
             "name": "authorityAddress",
             "type": "View",
             "payable": false,
@@ -1128,6 +1192,28 @@
                 {
                     "name": "amount",
                     "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "BurnConfirmed",
+            "values": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "depositId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "releasedAmount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "attester",
+                    "type": "ADDRESS"
                 }
             ],
             "type": "Event"

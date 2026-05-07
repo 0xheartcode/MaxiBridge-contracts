@@ -284,3 +284,20 @@ export class RelayerTipPaid extends NetEvent {
         super('RelayerTipPaid', data);
     }
 }
+
+/**
+ * PR γ.2b — emitted when an EVM-side burn is attested via `confirmBurn`.
+ * The deposit-id replay guard is keyed by `depositId`; `releasedAmount` is
+ * in source-side base units. `attester` is `Blockchain.tx.sender` —
+ * permissionless, anyone holding a valid M-of-N attestation may submit.
+ */
+export class BurnConfirmed extends NetEvent {
+    constructor(flowId: u256, depositId: u256, releasedAmount: u256, attester: Address) {
+        const data = new BytesWriter(32 + 32 + 32 + ADDRESS_BYTE_LENGTH);
+        data.writeU256(flowId);
+        data.writeU256(depositId);
+        data.writeU256(releasedAmount);
+        data.writeAddress(attester);
+        super('BurnConfirmed', data);
+    }
+}

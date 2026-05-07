@@ -94,6 +94,12 @@ export type InventoryDrainedOpNetEvent = {
     readonly by: Address;
     readonly amount: bigint;
 };
+export type BurnConfirmedEvent = {
+    readonly flowId: bigint;
+    readonly depositId: bigint;
+    readonly releasedAmount: bigint;
+    readonly attester: Address;
+};
 export type PausedEvent = {};
 export type UnpausedEvent = {};
 export type GovernorUpdatedEvent = {
@@ -348,6 +354,31 @@ export type RemoveSignerFromSet = CallResult<{}, OPNetEvent<SignerRotatedEvent>[
 export type SetRequiredSignatures = CallResult<{}, OPNetEvent<SignerRotatedEvent>[]>;
 
 /**
+ * @description Represents the result of the migrateSignerSet function call.
+ */
+export type MigrateSignerSet = CallResult<{}, OPNetEvent<SignerRotatedEvent>[]>;
+
+/**
+ * @description Represents the result of the governorProvisionFlowInventory function call.
+ */
+export type GovernorProvisionFlowInventory = CallResult<{}, OPNetEvent<never>[]>;
+
+/**
+ * @description Represents the result of the confirmBurn function call.
+ */
+export type ConfirmBurn = CallResult<{}, OPNetEvent<BurnConfirmedEvent>[]>;
+
+/**
+ * @description Represents the result of the isBurnConfirmed function call.
+ */
+export type IsBurnConfirmed = CallResult<
+    {
+        confirmed: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
  * @description Represents the result of the authorityAddress function call.
  */
 export type AuthorityAddress = CallResult<
@@ -548,6 +579,10 @@ export interface IBridgeDepository extends IOP_NETContract {
     addSignerToSet(pubKeyHash: bigint): Promise<AddSignerToSet>;
     removeSignerFromSet(pubKeyHash: bigint): Promise<RemoveSignerFromSet>;
     setRequiredSignatures(threshold: bigint): Promise<SetRequiredSignatures>;
+    migrateSignerSet(payload: Uint8Array): Promise<MigrateSignerSet>;
+    governorProvisionFlowInventory(flowId: bigint, amount: bigint): Promise<GovernorProvisionFlowInventory>;
+    confirmBurn(depositId: bigint, attestation: Uint8Array, mldsaSig: Uint8Array): Promise<ConfirmBurn>;
+    isBurnConfirmed(): Promise<IsBurnConfirmed>;
     authorityAddress(): Promise<AuthorityAddress>;
     signerCount(): Promise<SignerCount>;
     requiredSignatures(): Promise<RequiredSignatures>;
