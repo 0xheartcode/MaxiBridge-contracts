@@ -53,12 +53,19 @@ contract BridgeEscrow is
         uint256 burnNonce;
         uint32 signerEpoch;
         bytes32 opnetNonce;
+        // PR β.2.format — source-side gross input (pre fee, pre decimal scale).
+        // Signed over but not yet enforced beyond the signature check.
+        uint256 grossSrcAmount;
+        // PR β.2.format — permissionless relayer tip in destination units.
+        // uint128 caps the tip below 2^128 — way more than any token supply.
+        // Parsed but not paid out in this PR; payout lands in the next sub-PR.
+        uint128 relayerTip;
     }
 
-    /// @dev keccak256("ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)")
+    /// @dev keccak256("ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip)")
     bytes32 public constant RELEASE_INTENT_TYPEHASH =
         keccak256(
-            "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)"
+            "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip)"
         );
 
     /// @notice EIP-712 type for mode-2/3 mints. Differs from ReleaseIntent
@@ -1150,7 +1157,9 @@ contract BridgeEscrow is
                     intent.opnetEventIndex,
                     intent.burnNonce,
                     intent.signerEpoch,
-                    intent.opnetNonce
+                    intent.opnetNonce,
+                    intent.grossSrcAmount,
+                    intent.relayerTip
                 )
             );
     }

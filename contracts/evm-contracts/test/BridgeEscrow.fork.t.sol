@@ -152,7 +152,9 @@ contract BridgeEscrowForkTest is Test {
             opnetEventIndex: 0,
             burnNonce: 1,
             signerEpoch: escrow.currentEpoch(),
-            opnetNonce: keccak256("fork-n")
+            opnetNonce: keccak256("fork-n"),
+            grossSrcAmount: 500e6,
+            relayerTip: 0
         });
         bytes memory sig = _sign(signerPk, intent);
         escrow.claim(intent, sig);
