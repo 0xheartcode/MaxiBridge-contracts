@@ -162,6 +162,14 @@ contract BridgeEscrow is
     ///         limiting by setting it absurdly long.
     uint64 public constant FLOW_WINDOW_DURATION = 86400;
 
+    /// @notice PR γ.2c — minimum elapsed time between a `lock` and the
+    ///         permissionless `refundLockedDeposit` escape hatch. 7 days.
+    ///         Hard-coded (not governor-settable) so a hostile governor
+    ///         cannot extend the window indefinitely and brick user
+    ///         refunds, and cannot shrink it to enable a refund + claim
+    ///         double-spend race against an in-flight voucher.
+    uint64 public constant REFUND_TIMEOUT = 7 days;
+
     /// @notice First-class object representing a single bridging route.
     ///         All fields except status / cap / dailyLimit / minAmount /
     ///         feeBps / minFee / mintedToday / lastWindowStart / inventory
@@ -308,13 +316,39 @@ contract BridgeEscrow is
     ///         tag for cross-chain admin tooling.
     mapping(uint64 => bytes32[]) public flowsByEvmChain;
 
+    // ─── PR γ.2c — permissionless refund storage ────────────────────────
+
+    /// @notice On-chain record of every successful `lock` call. Indexed by
+    ///         the per-deposit nonce returned by `lock`. Allows the
+    ///         original depositor to call `refundLockedDeposit` after
+    ///         `REFUND_TIMEOUT` has elapsed if the OPNet side never
+    ///         minted (signer offline, voucher invalidated by signer
+    ///         rotation, M-of-N never reached, etc.).
+    /// @dev    Layout: `user (160) + lockedAt (64) + refunded (8) = 232 bits`
+    ///         packs into one slot; `amount (uint128)` in the second slot
+    ///         alongside `flowId (bytes32)` in the third slot. Slot count
+    ///         in the top-level layout: 1 (the mapping itself).
+    struct LockRecord {
+        address user;       // original depositor — refund destination
+        uint64  lockedAt;   // block.timestamp at lock time
+        bool    refunded;   // idempotency guard
+        uint128 amount;     // post-balance-delta received amount (refund value)
+        address token;      // ERC-20 to send back
+        bytes32 flowId;     // for inventory decrement on refund
+    }
+
+    /// @notice depositNonce → LockRecord. Set in `lock`, consumed in
+    ///         `refundLockedDeposit`. Permissionless refund path.
+    mapping(uint256 => LockRecord) public lockedDeposits;
+
     /// @dev Reserved for future appends. New slots go BEFORE the gap and the
     ///      gap shrinks by the same count to preserve layout.
     ///      Slots past treasury: unwrapFeeBps + unwrapMinFee + tokenMode +
     ///      opnetCounterpartOf + _tokenModeFinalized + flows + allFlowIds
-    ///      + flowsByEvmToken + flowsByMode + flowsByEvmChain = 10.
-    ///      50 - 10 = 40.
-    uint256[40] private __gap;
+    ///      + flowsByEvmToken + flowsByMode + flowsByEvmChain
+    ///      + lockedDeposits = 11.
+    ///      50 - 11 = 39.
+    uint256[39] private __gap;
 
     // ---------------------------------------------------------------------
     // Events
@@ -337,6 +371,20 @@ contract BridgeEscrow is
         address indexed user,
         address indexed token,
         uint256 amount
+    );
+
+    /// @notice PR γ.2c — emitted on a successful permissionless refund of a
+    ///         stuck deposit. `depositNonce` matches the original `Locked`
+    ///         event so indexers can pair them. `caller` is `msg.sender` —
+    ///         anyone may submit (the original user, a relayer, etc.) but
+    ///         the funds always go to the original `user`.
+    event LockRefunded(
+        uint256 indexed depositNonce,
+        address indexed user,
+        address indexed token,
+        uint256 amount,
+        bytes32 flowId,
+        address caller
     );
 
     event Claimed(
@@ -459,6 +507,11 @@ contract BridgeEscrow is
     error DailyLimitExceeded();
     error InsufficientFlowInventory();
 
+    // ─── PR γ.2c — permissionless refund errors ────────────────────────
+    error LockNotFound();
+    error RefundTimeoutNotElapsed();
+    error LockAlreadyRefunded();
+
     // ---------------------------------------------------------------------
     // Init
     // ---------------------------------------------------------------------
@@ -560,8 +613,97 @@ contract BridgeEscrow is
             depositNonce_ = ++depositNonce;
         }
 
+        // PR γ.2c — persist a refund-eligible record. `amountReceived_`
+        // already passed the `_bumpLockInventory` uint128 cap check above,
+        // so the cast is safe.
+        lockedDeposits[depositNonce_] = LockRecord({
+            user: msg.sender,
+            lockedAt: uint64(block.timestamp),
+            refunded: false,
+            amount: uint128(amountReceived_),
+            token: token,
+            flowId: flowId
+        });
+
         emit Locked(token, msg.sender, amount, amountReceived_, opnetRecipient, depositNonce_);
         emit LockedToFlow(flowId, msg.sender, token, amountReceived_);
+    }
+
+    // ---------------------------------------------------------------------
+    // Core — refund (PR γ.2c, permissionless after REFUND_TIMEOUT)
+    // ---------------------------------------------------------------------
+
+    /// @notice Permissionless escape hatch for a stuck `lock`. After
+    ///         `REFUND_TIMEOUT` elapsed since the deposit was locked, anyone
+    ///         (typically the original user, but a relayer is fine — the
+    ///         tokens always go to the recorded depositor) can call this
+    ///         to refund the lock and decrement per-flow inventory.
+    ///
+    /// @dev    Time-based, NOT coordinated with the OPNet side. If the
+    ///         OPNet voucher was already minted and claimed, the EVM
+    ///         contract does not know — it cannot, by design, since the
+    ///         two chains are independent. Governance is responsible for
+    ///         calling `cancelVoucher(opnetNonce)` BEFORE the timeout
+    ///         elapses on any voucher it does not want refundable. After
+    ///         REFUND_TIMEOUT the refund proceeds unconditionally; the
+    ///         simultaneous-claim race is bounded by the 7-day window
+    ///         which is far longer than any realistic voucher
+    ///         coordination window.
+    ///
+    ///         CEI: read → mark refunded → mutate inventory → transfer.
+    ///         Reentrancy guarded; refund is idempotent (second call
+    ///         reverts with `LockAlreadyRefunded`).
+    function refundLockedDeposit(uint256 depositNonce_) external nonReentrant {
+        LockRecord storage rec = lockedDeposits[depositNonce_];
+
+        // `user == address(0)` means the slot was never written (no such
+        // depositNonce). depositNonce starts at 1, so nonce 0 is also
+        // unmapped — the user check covers it cleanly.
+        if (rec.user == address(0)) revert LockNotFound();
+        if (rec.refunded) revert LockAlreadyRefunded();
+        if (block.timestamp - uint256(rec.lockedAt) < uint256(REFUND_TIMEOUT)) {
+            revert RefundTimeoutNotElapsed();
+        }
+
+        // Snapshot the fields we need post-mark (storage-pointer stays
+        // stable but reads are cheaper from memory).
+        address user = rec.user;
+        address token = rec.token;
+        uint128 amount = rec.amount;
+        bytes32 flowId = rec.flowId;
+
+        // Effects.
+        rec.refunded = true;
+
+        // Decrement per-flow inventory. `lock` always bumped it so the
+        // flow record is guaranteed to exist with at least `amount`
+        // accounted. We still floor-clamp defensively against the unlikely
+        // case where governance manually adjusted inventory downward via
+        // a future ops path — under-flow would corrupt accounting.
+        FlowRecord storage flow = flows[flowId];
+        if (uint256(flow.inventory) >= uint256(amount)) {
+            unchecked {
+                flow.inventory = flow.inventory - amount;
+            }
+        } else {
+            // Inventory was already reset/drained by ops — clamp to zero
+            // rather than revert. The user's refund is the higher-priority
+            // invariant; flow accounting is best-effort during emergency
+            // recovery scenarios.
+            flow.inventory = 0;
+        }
+
+        // Interactions — actual token return.
+        IERC20(token).safeTransfer(user, uint256(amount));
+
+        emit LockRefunded(
+            depositNonce_,
+            user,
+            token,
+            uint256(amount),
+            flowId,
+            msg.sender
+        );
     }
 
     /// @dev PR γ.2a — flow binding + status / minAmount / dailyLimit
