@@ -11,6 +11,7 @@ import {BridgeEscrowV2} from "./mocks/BridgeEscrowV2.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockUSDT} from "./mocks/MockUSDT.sol";
 import {FeeOnTransferToken} from "./mocks/FeeOnTransferToken.sol";
+import {TestableBridgeEscrow} from "./mocks/TestableBridgeEscrow.sol";
 
 interface IOwnable {
     function owner() external view returns (address);
@@ -54,7 +55,7 @@ contract BridgeEscrowTest is Test {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         usdt = new MockUSDT();
 
-        impl = new BridgeEscrow();
+        impl = BridgeEscrow(address(new TestableBridgeEscrow()));
 
         address[] memory tokens = new address[](2);
         tokens[0] = address(usdc);
@@ -113,6 +114,13 @@ contract BridgeEscrowTest is Test {
             tipCapBps: 0
         }));
         vm.stopPrank();
+
+        // PR γ.1: claim now decrements `flow.inventory` by `grossSrcAmount`.
+        // Lock-side inventory bumps are γ.2 territory; until they land,
+        // tests bootstrap the bucket directly.
+        TestableBridgeEscrow t = TestableBridgeEscrow(address(escrow));
+        t._testSetInventory(usdcFlowId, type(uint128).max);
+        t._testSetInventory(usdtFlowId, type(uint128).max);
     }
 
     // ---------------------------------------------------------------------

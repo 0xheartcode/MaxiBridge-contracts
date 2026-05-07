@@ -479,7 +479,13 @@ await opnet('BridgeDepository — PR β.2.payout-opnet — release path', async 
         if (r.error) throw r.error;
     }
 
-    await vm.it('mode-1 release: tip > 0 happy path', async () => {
+    await vm.it('mode-1 release: insufficient inventory reverts (γ.1 enforcement)', async () => {
+        // PR γ.1 enforces inventory ≥ grossDst on the mode-1 release path.
+        // Until γ.2 ships the burn-side inventory bump (or a governor-set
+        // inventory bootstrap), mode-1 release flows start at inventory=0
+        // and cannot pay out. Verify the new reversion. The happy-path
+        // version of this test moves to PR γ.2 once inventory bootstrap
+        // exists.
         await preFundAndFlipMode1(2_000_000n);
         const releaseSrcBridge = Blockchain.generateRandomAddress();
         const releaseSrcToken = Blockchain.generateRandomAddress();
@@ -489,7 +495,7 @@ await opnet('BridgeDepository — PR β.2.payout-opnet — release path', async 
             sourceTokenAddr: releaseSrcToken,
             tipCapBps: 200n,
         });
-        const { depository, wusdc, signerWallet } = setup;
+        const { depository, signerWallet } = setup;
         const fields: VoucherFields = {
             contractSelf: setup.depositoryAddress,
             selector: CLAIM_RELEASE_WITH_VOUCHER_SELECTOR,
@@ -502,20 +508,18 @@ await opnet('BridgeDepository — PR β.2.payout-opnet — release path', async 
             grossAmount: 1_000_000n,
             feeAmount: 5_000n,
             netAmount: 995_000n,
-            relayerTip: 9_950n, // 100 bps
+            relayerTip: 9_950n,
             voucherId: 0xb01n,
         };
         const { preimage, hash } = buildVoucher(fields);
-        // Mode-1 release path also enforces `recipient == tx.sender`.
         setSender(alice);
-        const aliceBefore = await wusdc.balanceOf(alice);
-        await callClaimReleaseWithVoucher(
-            depository,
-            preimage,
-            signVoucher(signerWallet, hash),
-        );
-        // Splits cleanly — alice (recipient + relayer) receives full netDst.
-        Assert.expect(await wusdc.balanceOf(alice)).toEqual(aliceBefore + fields.netAmount);
+        await Assert.expect(async () => {
+            await callClaimReleaseWithVoucher(
+                depository,
+                preimage,
+                signVoucher(signerWallet, hash),
+            );
+        }).toThrow();
     });
 
     await vm.it('mode-1 release: tip > flowTipCap reverts', async () => {
