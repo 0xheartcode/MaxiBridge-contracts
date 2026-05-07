@@ -2083,7 +2083,15 @@ export class BridgeDepository extends ReentrancyGuard {
     @method({ name: 'newGovernor', type: ABIDataTypes.ADDRESS })
     @emit('GovernorUpdated')
     public setGovernor(calldata: Calldata): BytesWriter {
-        this.onlyGovernor();
+        // Accept governor OR registered BridgeAuthority. The authority's
+        // pushGovernor cascade calls into here every time the human governor
+        // rotates — once we cascade alice in, this slot is no longer the
+        // authority's address, so a future re-push from the same authority
+        // would revert under a strict onlyGovernor gate. The authority
+        // address is set-once via setAuthorityAddress (governor-only), so
+        // accepting it here doesn't widen the trust surface — it just keeps
+        // the cascade workable across multiple handoffs.
+        this.onlyGovernorOrAuthority();
         const newGovernor: Address = calldata.readAddress();
         if (newGovernor.isZero()) {
             throw new Revert('BridgeDepository: zero governor');
