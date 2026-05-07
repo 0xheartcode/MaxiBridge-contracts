@@ -32,6 +32,12 @@ import {
     ReleasedFromVoucher,
     InventoryProvisionedOpNet,
     InventoryDrainedOpNet,
+    FlowAdded,
+    FlowStatusChanged,
+    FlowCapChanged,
+    FlowDailyLimitChanged,
+    FlowMinAmountChanged,
+    FlowFeeChanged,
 } from './events';
 
 /**
@@ -62,6 +68,16 @@ const MLDSA_SIG_BLOB_LEN: u32 = 4 + MLDSA_LEVEL2_PUBKEY_LEN + MLDSA_LEVEL2_SIG_L
  * inflation.
  */
 const MAX_WRAP_FEE_BPS: u32 = 1000;
+
+/**
+ * PR α — flow status enum. Mirrors the EVM-side constants on
+ * BridgeEscrow so a flow can be identified by the same status code on
+ * either chain.
+ */
+const FLOW_STATUS_DISABLED: u32 = 0;
+const FLOW_STATUS_ACTIVE: u32 = 1;
+const FLOW_STATUS_PAUSED: u32 = 2;
+const FLOW_STATUS_DRAINING: u32 = 3;
 
 /**
  * Voucher preimage length in bytes.
@@ -216,6 +232,45 @@ export class BridgeDepository extends ReentrancyGuard {
     // claim paths can't accidentally share state.
     private _usedReleaseVoucherIds: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
     private _usedEvmBurnEvents: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+
+    // ─── PR α — Flow Registry (storage + governance only) ─────────────
+    // A flow is the smallest atom of bridge routing — keyed by:
+    //
+    //   flowId = sha256(packed(mode || evmChainId || evmBridge ||
+    //                          evmToken || opnetBridge || opnetToken))
+    //
+    // The same flowId is computed on the EVM side over the same byte
+    // order so a single 32-byte identifier names a route end-to-end.
+    //
+    // No claim / lock path consumes flow data yet — that lands in PR γ.
+    // For now: pure storage + admin layer. AssemblyScript has no
+    // compound storage struct; one StoredMapU256 per scalar field
+    // keeps each setter trivial and the gas cost of getFlow predictable.
+    private _flowExists: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowMode: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowStatus: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowChainId: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowEvmBridge: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowEvmToken: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowEvmDecimals: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowOpnetBridge: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowOpnetToken: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowOpnetDecimals: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowFeeBps: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowMinFee: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowMinAmount: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowCap: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowDailyLimit: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowMintedToday: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowLastWindowStart: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _flowInventory: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    // Lifetime count (includes disabled flows) — for off-chain enumeration
+    // hand-shaking. PR γ may extend with on-chain enumeration arrays if
+    // needed.
+    private _flowTotalCount: StoredU256 = new StoredU256(
+        Blockchain.nextPointer,
+        EMPTY_POINTER,
+    );
 
     public constructor() {
         super();
@@ -615,6 +670,383 @@ export class BridgeDepository extends ReentrancyGuard {
         const token: Address = calldata.readAddress();
         const r = new BytesWriter(32);
         r.writeU256(this._evmCounterpart.get(_addrKey(token)));
+        return r;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  PR α — Flow Registry (storage + governance only; consumed by PR γ)
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // A flow is the smallest atom of bridge routing — uniquely defined by:
+    //   (mode, evmChainId, evmBridge, evmToken, opnetBridge, opnetToken)
+    //
+    //   flowId = sha256(packed(mode_u8 || evmChainId_be64 ||
+    //                          evmBridge_20 || evmToken_20 ||
+    //                          opnetBridge_32 || opnetToken_32))
+    //
+    // Same flowId on EVM `BridgeEscrow.computeFlowId(...)` over the same
+    // byte order so a single 32-byte identifier names a route end-to-end.
+    //
+    // Set-once-on-add (immutable for the lifetime of the flow):
+    //   mode, evmChainId, evmBridge, evmToken, evmDecimals,
+    //   opnetBridge, opnetToken, opnetDecimals
+    // Mutable via `onlyGovernor` (timelocked through BridgeAuthority):
+    //   feeBps, minFee, minAmount, cap, dailyLimit
+    // Mutable via `onlyGovernor` (immediate, status semantics):
+    //   status (pause / resume / drain)
+
+    /**
+     * Pure compute helper — anyone can call. Same byte order as the EVM
+     * `BridgeEscrow.computeFlowId`. Used by tests and tooling.
+     *
+     * Calldata layout (113 bytes):
+     *   mode             u8       1
+     *   evmChainId       u64 BE   8
+     *   evmBridge        20 byte 20   (EVM addr; left-pad zeros to 20 if shorter)
+     *   evmToken         20 byte 20
+     *   opnetBridge      u256    32   (OPNet identity, 32B)
+     *   opnetToken       u256    32
+     */
+    @method(
+        { name: 'mode', type: ABIDataTypes.UINT256 },
+        { name: 'evmChainId', type: ABIDataTypes.UINT256 },
+        { name: 'evmBridge', type: ABIDataTypes.UINT256 },
+        { name: 'evmToken', type: ABIDataTypes.UINT256 },
+        { name: 'opnetBridge', type: ABIDataTypes.UINT256 },
+        { name: 'opnetToken', type: ABIDataTypes.UINT256 },
+    )
+    @returns({ name: 'flowId', type: ABIDataTypes.UINT256 })
+    public computeFlowId(calldata: Calldata): BytesWriter {
+        const mode: u32 = calldata.readU256().toU32();
+        const chainId: u64 = calldata.readU256().toU64();
+        const evmBridge: u256 = calldata.readU256();
+        const evmToken: u256 = calldata.readU256();
+        const opnetBridge: u256 = calldata.readU256();
+        const opnetToken: u256 = calldata.readU256();
+
+        const flowId: u256 = _computeFlowId(
+            mode,
+            chainId,
+            evmBridge,
+            evmToken,
+            opnetBridge,
+            opnetToken,
+        );
+        const r = new BytesWriter(32);
+        r.writeU256(flowId);
+        return r;
+    }
+
+    /**
+     * Register a new flow. `onlyGovernor` — production deploys route this
+     * through the BridgeAuthority → governor → 48h timelock chain.
+     *
+     * Set-once for all immutable identity fields. Initial status is
+     * active. Hot fields (mintedToday, lastWindowStart, inventory) start
+     * at zero.
+     */
+    @method(
+        { name: 'mode', type: ABIDataTypes.UINT256 },
+        { name: 'evmChainId', type: ABIDataTypes.UINT256 },
+        { name: 'evmBridge', type: ABIDataTypes.UINT256 },
+        { name: 'evmToken', type: ABIDataTypes.UINT256 },
+        { name: 'evmDecimals', type: ABIDataTypes.UINT256 },
+        { name: 'opnetBridge', type: ABIDataTypes.UINT256 },
+        { name: 'opnetToken', type: ABIDataTypes.UINT256 },
+        { name: 'opnetDecimals', type: ABIDataTypes.UINT256 },
+        { name: 'feeBps', type: ABIDataTypes.UINT256 },
+        { name: 'minFee', type: ABIDataTypes.UINT256 },
+        { name: 'minAmount', type: ABIDataTypes.UINT256 },
+        { name: 'cap', type: ABIDataTypes.UINT256 },
+        { name: 'dailyLimit', type: ABIDataTypes.UINT256 },
+    )
+    @returns({ name: 'flowId', type: ABIDataTypes.UINT256 })
+    @emit('FlowAdded')
+    public addFlow(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+
+        const mode: u32 = calldata.readU256().toU32();
+        const chainId: u64 = calldata.readU256().toU64();
+        const evmBridge: u256 = calldata.readU256();
+        const evmToken: u256 = calldata.readU256();
+        const evmDecimals: u32 = calldata.readU256().toU32();
+        const opnetBridge: u256 = calldata.readU256();
+        const opnetToken: u256 = calldata.readU256();
+        const opnetDecimals: u32 = calldata.readU256().toU32();
+        const feeBps: u32 = calldata.readU256().toU32();
+        const minFee: u256 = calldata.readU256();
+        const minAmount: u256 = calldata.readU256();
+        const cap: u256 = calldata.readU256();
+        const dailyLimit: u256 = calldata.readU256();
+
+        if (mode > 3) throw new Revert('BridgeDepository: invalid flow mode');
+        if (chainId == 0) throw new Revert('BridgeDepository: zero chainId');
+        if (evmBridge.isZero() || evmToken.isZero()) {
+            throw new Revert('BridgeDepository: zero EVM addr');
+        }
+        if (opnetBridge.isZero() || opnetToken.isZero()) {
+            throw new Revert('BridgeDepository: zero OPNet addr');
+        }
+        if (evmDecimals == 0 || evmDecimals > 30) {
+            throw new Revert('BridgeDepository: bad evmDecimals');
+        }
+        if (opnetDecimals == 0 || opnetDecimals > 30) {
+            throw new Revert('BridgeDepository: bad opnetDecimals');
+        }
+        if (feeBps > MAX_WRAP_FEE_BPS) {
+            throw new Revert('BridgeDepository: feeBps too high');
+        }
+
+        const flowId: u256 = _computeFlowId(
+            mode,
+            chainId,
+            evmBridge,
+            evmToken,
+            opnetBridge,
+            opnetToken,
+        );
+        if (!this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow already exists');
+        }
+
+        this._flowExists.set(flowId, u256.One);
+        this._flowMode.set(flowId, u256.fromU32(mode));
+        this._flowStatus.set(flowId, u256.fromU32(FLOW_STATUS_ACTIVE));
+        this._flowChainId.set(flowId, u256.fromU64(chainId));
+        this._flowEvmBridge.set(flowId, evmBridge);
+        this._flowEvmToken.set(flowId, evmToken);
+        this._flowEvmDecimals.set(flowId, u256.fromU32(evmDecimals));
+        this._flowOpnetBridge.set(flowId, opnetBridge);
+        this._flowOpnetToken.set(flowId, opnetToken);
+        this._flowOpnetDecimals.set(flowId, u256.fromU32(opnetDecimals));
+        this._flowFeeBps.set(flowId, u256.fromU32(feeBps));
+        this._flowMinFee.set(flowId, minFee);
+        this._flowMinAmount.set(flowId, minAmount);
+        this._flowCap.set(flowId, cap);
+        this._flowDailyLimit.set(flowId, dailyLimit);
+        // mintedToday, lastWindowStart, inventory remain 0.
+
+        this._flowTotalCount.value = SafeMath.add(this._flowTotalCount.value, u256.One);
+
+        this.emitEvent(new FlowAdded(flowId, mode, chainId, evmToken, opnetToken));
+
+        const r = new BytesWriter(32);
+        r.writeU256(flowId);
+        return r;
+    }
+
+    /**
+     * Move a flow into status=PAUSED. Only allowed from active. Governor
+     * gated — on EVM the equivalent is guardian-immediate, but on OPNet
+     * the BridgeAuthority chain already short-circuits to a guardian
+     * role; we keep the gate uniform.
+     */
+    @method({ name: 'flowId', type: ABIDataTypes.UINT256 })
+    @emit('FlowStatusChanged')
+    public pauseFlow(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const flowId: u256 = calldata.readU256();
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        const oldStatus: u32 = this._flowStatus.get(flowId).toU32();
+        if (oldStatus != FLOW_STATUS_ACTIVE) {
+            throw new Revert('BridgeDepository: invalid status transition');
+        }
+        this._flowStatus.set(flowId, u256.fromU32(FLOW_STATUS_PAUSED));
+        this.emitEvent(new FlowStatusChanged(flowId, oldStatus, FLOW_STATUS_PAUSED));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Move a flow back to status=ACTIVE. Only allowed from paused.
+     */
+    @method({ name: 'flowId', type: ABIDataTypes.UINT256 })
+    @emit('FlowStatusChanged')
+    public resumeFlow(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const flowId: u256 = calldata.readU256();
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        const oldStatus: u32 = this._flowStatus.get(flowId).toU32();
+        if (oldStatus != FLOW_STATUS_PAUSED) {
+            throw new Revert('BridgeDepository: invalid status transition');
+        }
+        this._flowStatus.set(flowId, u256.fromU32(FLOW_STATUS_ACTIVE));
+        this.emitEvent(new FlowStatusChanged(flowId, oldStatus, FLOW_STATUS_ACTIVE));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Move a flow into status=DRAINING — one-way wind-down. Allowed from
+     * active or paused. PR γ: claim/release allowed; lock/mint rejected.
+     */
+    @method({ name: 'flowId', type: ABIDataTypes.UINT256 })
+    @emit('FlowStatusChanged')
+    public drainFlow(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const flowId: u256 = calldata.readU256();
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        const oldStatus: u32 = this._flowStatus.get(flowId).toU32();
+        if (oldStatus != FLOW_STATUS_ACTIVE && oldStatus != FLOW_STATUS_PAUSED) {
+            throw new Revert('BridgeDepository: invalid status transition');
+        }
+        this._flowStatus.set(flowId, u256.fromU32(FLOW_STATUS_DRAINING));
+        this.emitEvent(new FlowStatusChanged(flowId, oldStatus, FLOW_STATUS_DRAINING));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Adjust the per-flow inventory ceiling. Cannot drop the cap below
+     * the current `inventory` (would brick existing locks).
+     */
+    @method(
+        { name: 'flowId', type: ABIDataTypes.UINT256 },
+        { name: 'newCap', type: ABIDataTypes.UINT256 },
+    )
+    @emit('FlowCapChanged')
+    public setFlowCap(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const flowId: u256 = calldata.readU256();
+        const newCap: u256 = calldata.readU256();
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        const inv: u256 = this._flowInventory.get(flowId);
+        if (u256.lt(newCap, inv)) {
+            throw new Revert('BridgeDepository: cap below inventory');
+        }
+        const oldCap: u256 = this._flowCap.get(flowId);
+        this._flowCap.set(flowId, newCap);
+        this.emitEvent(new FlowCapChanged(flowId, oldCap, newCap));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Adjust the per-flow rolling 24h limit. Zero is allowed (acts as a
+     * soft mint freeze paired with pause/drain).
+     */
+    @method(
+        { name: 'flowId', type: ABIDataTypes.UINT256 },
+        { name: 'newLimit', type: ABIDataTypes.UINT256 },
+    )
+    @emit('FlowDailyLimitChanged')
+    public setFlowDailyLimit(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const flowId: u256 = calldata.readU256();
+        const newLimit: u256 = calldata.readU256();
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        const oldLimit: u256 = this._flowDailyLimit.get(flowId);
+        this._flowDailyLimit.set(flowId, newLimit);
+        this.emitEvent(new FlowDailyLimitChanged(flowId, oldLimit, newLimit));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Adjust the per-flow minimum source-side amount. Helps reject dust
+     * deposits.
+     */
+    @method(
+        { name: 'flowId', type: ABIDataTypes.UINT256 },
+        { name: 'newMin', type: ABIDataTypes.UINT256 },
+    )
+    @emit('FlowMinAmountChanged')
+    public setFlowMinAmount(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const flowId: u256 = calldata.readU256();
+        const newMin: u256 = calldata.readU256();
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        const oldMin: u256 = this._flowMinAmount.get(flowId);
+        this._flowMinAmount.set(flowId, newMin);
+        this.emitEvent(new FlowMinAmountChanged(flowId, oldMin, newMin));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Adjust per-flow fee parameters. Hard-capped at MAX_WRAP_FEE_BPS.
+     */
+    @method(
+        { name: 'flowId', type: ABIDataTypes.UINT256 },
+        { name: 'newBps', type: ABIDataTypes.UINT256 },
+        { name: 'newMinFee', type: ABIDataTypes.UINT256 },
+    )
+    @emit('FlowFeeChanged')
+    public setFlowFee(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const flowId: u256 = calldata.readU256();
+        const newBps: u32 = calldata.readU256().toU32();
+        const newMinFee: u256 = calldata.readU256();
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        if (newBps > MAX_WRAP_FEE_BPS) {
+            throw new Revert('BridgeDepository: feeBps too high');
+        }
+        const oldBps: u32 = this._flowFeeBps.get(flowId).toU32();
+        const oldMinFee: u256 = this._flowMinFee.get(flowId);
+        this._flowFeeBps.set(flowId, u256.fromU32(newBps));
+        this._flowMinFee.set(flowId, newMinFee);
+        this.emitEvent(new FlowFeeChanged(flowId, oldBps, newBps, oldMinFee, newMinFee));
+        return new BytesWriter(0);
+    }
+
+    @view
+    @returns({ name: 'exists', type: ABIDataTypes.BOOL })
+    public flowExists(calldata: Calldata): BytesWriter {
+        const flowId: u256 = calldata.readU256();
+        const r = new BytesWriter(1);
+        r.writeBoolean(!this._flowExists.get(flowId).isZero());
+        return r;
+    }
+
+    @view
+    @returns({ name: 'count', type: ABIDataTypes.UINT256 })
+    public flowCount(_calldata: Calldata): BytesWriter {
+        const r = new BytesWriter(32);
+        r.writeU256(this._flowTotalCount.value);
+        return r;
+    }
+
+    /**
+     * Read every field of a flow. Returns 17 × 32-byte words.
+     * Layout (matches EVM `getFlow(flowId).FlowRecord` ordering):
+     *   mode, status, chainId, evmBridge, evmToken, evmDecimals,
+     *   opnetBridge, opnetToken, opnetDecimals, feeBps, minFee,
+     *   minAmount, cap, dailyLimit, mintedToday, lastWindowStart,
+     *   inventory
+     */
+    @view
+    @returns({ name: 'flow', type: ABIDataTypes.BYTES })
+    public getFlow(calldata: Calldata): BytesWriter {
+        const flowId: u256 = calldata.readU256();
+        // ABIDataTypes.BYTES return must be u32 length-prefixed.
+        const payloadLen: u32 = 17 * 32;
+        const r = new BytesWriter(4 + payloadLen);
+        r.writeU32(payloadLen);
+        r.writeU256(this._flowMode.get(flowId));
+        r.writeU256(this._flowStatus.get(flowId));
+        r.writeU256(this._flowChainId.get(flowId));
+        r.writeU256(this._flowEvmBridge.get(flowId));
+        r.writeU256(this._flowEvmToken.get(flowId));
+        r.writeU256(this._flowEvmDecimals.get(flowId));
+        r.writeU256(this._flowOpnetBridge.get(flowId));
+        r.writeU256(this._flowOpnetToken.get(flowId));
+        r.writeU256(this._flowOpnetDecimals.get(flowId));
+        r.writeU256(this._flowFeeBps.get(flowId));
+        r.writeU256(this._flowMinFee.get(flowId));
+        r.writeU256(this._flowMinAmount.get(flowId));
+        r.writeU256(this._flowCap.get(flowId));
+        r.writeU256(this._flowDailyLimit.get(flowId));
+        r.writeU256(this._flowMintedToday.get(flowId));
+        r.writeU256(this._flowLastWindowStart.get(flowId));
+        r.writeU256(this._flowInventory.get(flowId));
         return r;
     }
 
@@ -1546,4 +1978,63 @@ function _addrKey(addr: Address): u256 {
     const buf = new BytesWriter(32);
     buf.writeAddress(addr);
     return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
+}
+
+/**
+ * PR α — canonical flowId derivation. Mirrors EVM
+ * `BridgeEscrow.computeFlowId(...)` exactly so the same 32-byte
+ * identifier names a route end-to-end.
+ *
+ * Packed byte layout (113 bytes total):
+ *   mode_u8           1
+ *   evmChainId_be64   8
+ *   evmBridge_20     20  (low 20 bytes of the u256 big-endian rep)
+ *   evmToken_20      20
+ *   opnetBridge_32   32  (full u256 BE)
+ *   opnetToken_32    32
+ *
+ * Then `flowId = sha256(packed) → u256(BE)`.
+ */
+function _computeFlowId(
+    mode: u32,
+    chainId: u64,
+    evmBridge: u256,
+    evmToken: u256,
+    opnetBridge: u256,
+    opnetToken: u256,
+): u256 {
+    const buf = new Uint8Array(113);
+    buf[0] = <u8>mode;
+
+    // chainId as 8 bytes big-endian.
+    buf[1] = <u8>(chainId >> 56);
+    buf[2] = <u8>(chainId >> 48);
+    buf[3] = <u8>(chainId >> 40);
+    buf[4] = <u8>(chainId >> 32);
+    buf[5] = <u8>(chainId >> 24);
+    buf[6] = <u8>(chainId >> 16);
+    buf[7] = <u8>(chainId >> 8);
+    buf[8] = <u8>chainId;
+
+    // EVM addresses — extract low 20 bytes from u256 BE (bytes 12..32).
+    const eb = evmBridge.toUint8Array(true);
+    for (let i: u32 = 0; i < 20; i++) {
+        buf[9 + i] = eb[12 + i];
+    }
+    const et = evmToken.toUint8Array(true);
+    for (let i: u32 = 0; i < 20; i++) {
+        buf[29 + i] = et[12 + i];
+    }
+
+    // OPNet addresses — full 32-byte big-endian.
+    const ob = opnetBridge.toUint8Array(true);
+    for (let i: u32 = 0; i < 32; i++) {
+        buf[49 + i] = ob[i];
+    }
+    const ot = opnetToken.toUint8Array(true);
+    for (let i: u32 = 0; i < 32; i++) {
+        buf[81 + i] = ot[i];
+    }
+
+    return u256.fromUint8ArrayBE(sha256(buf));
 }

@@ -282,6 +282,221 @@ export class BridgeDepository extends ContractRuntime {
         return r.readU256();
     }
 
+    // ─── PR α — Flow Registry wrappers ────────────────────────────────
+
+    private readonly computeFlowIdSelector: number = encodeSelectorWithParams(
+        'computeFlowId',
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+    );
+    private readonly addFlowSelector: number = encodeSelectorWithParams(
+        'addFlow',
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+    );
+    private readonly pauseFlowSelector: number = encodeSelectorWithParams(
+        'pauseFlow',
+        ABIDataTypes.UINT256,
+    );
+    private readonly resumeFlowSelector: number = encodeSelectorWithParams(
+        'resumeFlow',
+        ABIDataTypes.UINT256,
+    );
+    private readonly drainFlowSelector: number = encodeSelectorWithParams(
+        'drainFlow',
+        ABIDataTypes.UINT256,
+    );
+    private readonly setFlowCapSelector: number = encodeSelectorWithParams(
+        'setFlowCap',
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+    );
+    private readonly setFlowDailyLimitSelector: number = encodeSelectorWithParams(
+        'setFlowDailyLimit',
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+    );
+    private readonly setFlowMinAmountSelector: number = encodeSelectorWithParams(
+        'setFlowMinAmount',
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+    );
+    private readonly setFlowFeeSelector: number = encodeSelectorWithParams(
+        'setFlowFee',
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.UINT256,
+    );
+    private readonly flowExistsSelector: number = encodeNumericSelector('flowExists()');
+    private readonly flowCountSelector: number = encodeNumericSelector('flowCount()');
+    private readonly getFlowSelector: number = encodeNumericSelector('getFlow()');
+
+    public async computeFlowId(
+        mode: bigint,
+        chainId: bigint,
+        evmBridge: bigint,
+        evmToken: bigint,
+        opnetBridge: bigint,
+        opnetToken: bigint,
+    ): Promise<bigint> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.computeFlowIdSelector);
+        w.writeU256(mode);
+        w.writeU256(chainId);
+        w.writeU256(evmBridge);
+        w.writeU256(evmToken);
+        w.writeU256(opnetBridge);
+        w.writeU256(opnetToken);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readU256();
+    }
+
+    public async addFlow(p: {
+        mode: bigint;
+        chainId: bigint;
+        evmBridge: bigint;
+        evmToken: bigint;
+        evmDecimals: bigint;
+        opnetBridge: bigint;
+        opnetToken: bigint;
+        opnetDecimals: bigint;
+        feeBps: bigint;
+        minFee: bigint;
+        minAmount: bigint;
+        cap: bigint;
+        dailyLimit: bigint;
+    }): Promise<bigint> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.addFlowSelector);
+        w.writeU256(p.mode);
+        w.writeU256(p.chainId);
+        w.writeU256(p.evmBridge);
+        w.writeU256(p.evmToken);
+        w.writeU256(p.evmDecimals);
+        w.writeU256(p.opnetBridge);
+        w.writeU256(p.opnetToken);
+        w.writeU256(p.opnetDecimals);
+        w.writeU256(p.feeBps);
+        w.writeU256(p.minFee);
+        w.writeU256(p.minAmount);
+        w.writeU256(p.cap);
+        w.writeU256(p.dailyLimit);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readU256();
+    }
+
+    public async pauseFlow(flowId: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.pauseFlowSelector);
+        w.writeU256(flowId);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async resumeFlow(flowId: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.resumeFlowSelector);
+        w.writeU256(flowId);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async drainFlow(flowId: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.drainFlowSelector);
+        w.writeU256(flowId);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async setFlowCap(flowId: bigint, newCap: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setFlowCapSelector);
+        w.writeU256(flowId);
+        w.writeU256(newCap);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async setFlowDailyLimit(flowId: bigint, newLimit: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setFlowDailyLimitSelector);
+        w.writeU256(flowId);
+        w.writeU256(newLimit);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async setFlowMinAmount(flowId: bigint, newMin: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setFlowMinAmountSelector);
+        w.writeU256(flowId);
+        w.writeU256(newMin);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async setFlowFee(flowId: bigint, newBps: bigint, newMinFee: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setFlowFeeSelector);
+        w.writeU256(flowId);
+        w.writeU256(newBps);
+        w.writeU256(newMinFee);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async flowExists(flowId: bigint): Promise<boolean> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.flowExistsSelector);
+        w.writeU256(flowId);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readBoolean();
+    }
+
+    public async flowCount(): Promise<bigint> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.flowCountSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readU256();
+    }
+
+    /**
+     * Reads the 17-field flow record. Returns array of u256 values in
+     * the order:
+     *   [mode, status, chainId, evmBridge, evmToken, evmDecimals,
+     *    opnetBridge, opnetToken, opnetDecimals, feeBps, minFee,
+     *    minAmount, cap, dailyLimit, mintedToday, lastWindowStart,
+     *    inventory]
+     */
+    public async getFlow(flowId: bigint): Promise<bigint[]> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.getFlowSelector);
+        w.writeU256(flowId);
+        const r = await this.getResponse(w.getBuffer());
+        // Returned as ABIDataTypes.BYTES (length-prefixed). Read the
+        // length prefix then 17 × u256 = 544 bytes.
+        const blob = r.readBytesWithLength();
+        const out: bigint[] = [];
+        for (let i = 0; i < 17; i++) {
+            // Each u256 is 32 bytes BE.
+            let v = 0n;
+            for (let j = 0; j < 32; j++) {
+                v = (v << 8n) | BigInt(blob[i * 32 + j]!);
+            }
+            out.push(v);
+        }
+        return out;
+    }
+
     public override async init(): Promise<void> {
         this.defineRequiredBytecodes();
         this._bytecode = BytecodeManager.getBytecode(this.address) as Buffer;

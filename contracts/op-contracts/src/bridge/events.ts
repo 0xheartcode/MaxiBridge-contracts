@@ -184,3 +184,73 @@ export class InventoryDrainedOpNet extends NetEvent {
         super('InventoryDrainedOpNet', data);
     }
 }
+
+// ─── PR α — Flow Registry events ──────────────────────────────────────
+
+/**
+ * Emitted on `addFlow`. flowId is the sha256 of the canonical key tuple,
+ * shared with EVM `BridgeEscrow.computeFlowId`.
+ */
+export class FlowAdded extends NetEvent {
+    constructor(flowId: u256, mode: u32, evmChainId: u64, evmToken: u256, opnetToken: u256) {
+        const data = new BytesWriter(32 + 4 + 8 + 32 + 32);
+        data.writeU256(flowId);
+        data.writeU32(mode);
+        data.writeU64(evmChainId);
+        data.writeU256(evmToken);
+        data.writeU256(opnetToken);
+        super('FlowAdded', data);
+    }
+}
+
+export class FlowStatusChanged extends NetEvent {
+    constructor(flowId: u256, oldStatus: u32, newStatus: u32) {
+        const data = new BytesWriter(32 + 4 + 4);
+        data.writeU256(flowId);
+        data.writeU32(oldStatus);
+        data.writeU32(newStatus);
+        super('FlowStatusChanged', data);
+    }
+}
+
+export class FlowCapChanged extends NetEvent {
+    constructor(flowId: u256, oldCap: u256, newCap: u256) {
+        const data = new BytesWriter(32 + 32 + 32);
+        data.writeU256(flowId);
+        data.writeU256(oldCap);
+        data.writeU256(newCap);
+        super('FlowCapChanged', data);
+    }
+}
+
+export class FlowDailyLimitChanged extends NetEvent {
+    constructor(flowId: u256, oldLimit: u256, newLimit: u256) {
+        const data = new BytesWriter(32 + 32 + 32);
+        data.writeU256(flowId);
+        data.writeU256(oldLimit);
+        data.writeU256(newLimit);
+        super('FlowDailyLimitChanged', data);
+    }
+}
+
+export class FlowMinAmountChanged extends NetEvent {
+    constructor(flowId: u256, oldMin: u256, newMin: u256) {
+        const data = new BytesWriter(32 + 32 + 32);
+        data.writeU256(flowId);
+        data.writeU256(oldMin);
+        data.writeU256(newMin);
+        super('FlowMinAmountChanged', data);
+    }
+}
+
+export class FlowFeeChanged extends NetEvent {
+    constructor(flowId: u256, oldBps: u32, newBps: u32, oldMinFee: u256, newMinFee: u256) {
+        const data = new BytesWriter(32 + 4 + 4 + 32 + 32);
+        data.writeU256(flowId);
+        data.writeU32(oldBps);
+        data.writeU32(newBps);
+        data.writeU256(oldMinFee);
+        data.writeU256(newMinFee);
+        super('FlowFeeChanged', data);
+    }
+}
