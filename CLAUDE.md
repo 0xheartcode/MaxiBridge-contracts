@@ -17,7 +17,7 @@ EVM → OPNet (deposit)                    OPNet → EVM (withdraw)
    BridgeEscrow.lock(...)                   WrappedOP20.burnForRelease(...)
    → Locked event                           → BurnedForRelease event
 2. Indexer waits EVM_CONFIRMATIONS       2. Indexer waits OPNET_CONFIRMATIONS
-3. Server signs 460-byte ML-DSA          3. Server signs EIP-712 ReleaseIntent
+3. Server signs 508-byte ML-DSA          3. Server signs EIP-712 ReleaseIntent
    voucher (free, off-chain)                (free, off-chain)
 4. dApp shows "Claim wUSDC"              4. dApp shows "Claim USDC"
 5. User signs claimMintWithVoucher       5. User signs BridgeEscrow.claim(sig)
