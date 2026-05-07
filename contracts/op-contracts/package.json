@@ -7,10 +7,11 @@
         "build": "npm run build:wrapped && npm run build:depository && npm run build:authority",
         "build:wrapped": "asc src/wrapped/index.ts --config asconfig.json --target wrapped --use abort=src/wrapped/index/abort",
         "build:depository": "asc src/bridge/index.ts --config asconfig.json --target depository --use abort=src/bridge/index/abort",
-        "test": "npm run test:wrapped && npm run test:bridge && npm run test:authority && npm run test:flow-registry",
+        "test": "npm run test:wrapped && npm run test:bridge && npm run test:authority && npm run test:flow-registry && npm run test:relayer-tip",
         "test:wrapped": "npx tsx __test__/unit/tests/wrapped.ts",
         "test:bridge": "npx tsx __test__/unit/tests/bridge.ts",
         "test:flow-registry": "npx tsx __test__/unit/tests/flow-registry.ts",
+        "test:relayer-tip": "npx tsx __test__/unit/tests/relayer-tip-opnet.ts",
         "clean": "rm -rf build/*",
         "build:authority": "asc src/authority/index.ts --config asconfig.json --target authority --use abort=src/authority/index/abort",
         "test:authority": "npx tsx __test__/unit/tests/authority.ts"

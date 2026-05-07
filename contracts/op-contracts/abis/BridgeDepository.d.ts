@@ -78,6 +78,11 @@ export type ReleasedFromVoucherEvent = {
     readonly voucherId: bigint;
     readonly signerEpoch: number;
 };
+export type RelayerTipPaidEvent = {
+    readonly flowId: bigint;
+    readonly relayer: Address;
+    readonly tip: bigint;
+};
 export type InventoryProvisionedOpNetEvent = {
     readonly token: Address;
     readonly by: Address;
@@ -315,7 +320,7 @@ export type LockForBridge = CallResult<{}, OPNetEvent<LockedForBridgeEvent>[]>;
 /**
  * @description Represents the result of the claimReleaseWithVoucher function call.
  */
-export type ClaimReleaseWithVoucher = CallResult<{}, OPNetEvent<ReleasedFromVoucherEvent>[]>;
+export type ClaimReleaseWithVoucher = CallResult<{}, OPNetEvent<ReleasedFromVoucherEvent | RelayerTipPaidEvent>[]>;
 
 /**
  * @description Represents the result of the provisionInventoryOpNet function call.
@@ -395,7 +400,7 @@ export type SetGovernor = CallResult<{}, OPNetEvent<GovernorUpdatedEvent>[]>;
 /**
  * @description Represents the result of the claimMintWithVoucher function call.
  */
-export type ClaimMintWithVoucher = CallResult<{}, OPNetEvent<MintedFromVoucherEvent>[]>;
+export type ClaimMintWithVoucher = CallResult<{}, OPNetEvent<MintedFromVoucherEvent | RelayerTipPaidEvent>[]>;
 
 /**
  * @description Represents the result of the governor function call.

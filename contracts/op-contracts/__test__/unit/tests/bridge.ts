@@ -104,12 +104,21 @@ async function setupContracts(): Promise<BridgeSetup> {
     const pubKey = new Uint8Array(signerWallet.mldsaKeypair.publicKey);
     await depository.setInitialSigner(pubKey);
 
-    return {
+    const out: BridgeSetup = {
         depository, depositoryAddress,
         wusdc, wusdcAddress,
         wusdt, wusdtAddress,
         signerWallet,
     };
+
+    // PR β.2.payout-opnet — claim path now derives a flowId per voucher and
+    // requires the flow to be registered. Register the two default routes
+    // (wUSDC + wUSDT @ DEFAULT_SOURCE_*) so the existing happy-path tests
+    // don't have to do it inline. Tests that vary source addrs / chain id /
+    // wrapped token register their own flow.
+    await registerDefaultFlows(out);
+
+    return out;
 }
 
 function disposeSetup(s: BridgeSetup): void {
@@ -239,6 +248,94 @@ function signVoucher(wallet: Wallet, hash: Uint8Array): Uint8Array {
     return packSigBlob(pubKey, rawSig);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Flow registration helpers (PR β.2.payout-opnet)
+//
+// The claim path now derives a flowId from voucher fields and reverts if the
+// flow is not registered. These helpers mirror the contract's u256 encoding
+// conventions so tests can register a matching flow per voucher.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Convert a 32-byte Address (right-padded EVM-style — addr in bytes [0..20),
+ * zeros in [20..32)) into the left-padded u256 the contract's `addFlow` /
+ * `_computeFlowId` consume (zeros in high 12 bytes, addr in low 20 bytes).
+ */
+function evmAddrRightPadToBigInt(addr: Address): bigint {
+    const bytes = addr as unknown as Uint8Array;
+    let v = 0n;
+    for (let i = 0; i < 20; i++) {
+        v = (v << 8n) | BigInt(bytes[i]!);
+    }
+    return v;
+}
+
+/** Convert a 32-byte OPNet Address into its u256 BE bigint. */
+function opnetAddrToBigInt(addr: Address): bigint {
+    const bytes = addr as unknown as Uint8Array;
+    let v = 0n;
+    for (let i = 0; i < 32; i++) {
+        v = (v << 8n) | BigInt(bytes[i]!);
+    }
+    return v;
+}
+
+/**
+ * Register a flow that matches a voucher's (mode, sourceChainId,
+ * sourceBridgeAddr, sourceTokenAddr, contractSelf, wrappedToken) so the
+ * claim-path flow lookup succeeds. Returns the registered flowId.
+ */
+async function registerFlowFor(
+    setup: BridgeSetup,
+    opts: {
+        mode?: bigint;
+        chainId?: bigint;
+        sourceBridgeAddr: Address;
+        sourceTokenAddr: Address;
+        wrappedToken: Address;
+        tipCapBps?: bigint;
+    },
+): Promise<bigint> {
+    const params = {
+        mode: opts.mode ?? 0n,
+        chainId: opts.chainId ?? ETH_CHAIN_ID,
+        evmBridge: evmAddrRightPadToBigInt(opts.sourceBridgeAddr),
+        evmToken: evmAddrRightPadToBigInt(opts.sourceTokenAddr),
+        evmDecimals: 6n,
+        opnetBridge: opnetAddrToBigInt(setup.depositoryAddress),
+        opnetToken: opnetAddrToBigInt(opts.wrappedToken),
+        opnetDecimals: 6n,
+        feeBps: 50n,
+        minFee: 0n,
+        minAmount: 0n,
+        cap: 1_000_000_000_000n,
+        dailyLimit: 100_000_000_000n,
+        tipCapBps: opts.tipCapBps ?? 0n,
+    };
+    return await setup.depository.addFlow(params);
+}
+
+/**
+ * Default flows registered in `setupContracts`: one for wUSDC and one for
+ * wUSDT, both bound to (mode=0, ETH_CHAIN_ID, DEFAULT_SOURCE_BRIDGE,
+ * DEFAULT_SOURCE_TOKEN). Tests that vary chainId / source addrs / wrapped
+ * token register their own flow inline before claiming.
+ */
+async function registerDefaultFlows(setup: BridgeSetup, tipCapBps: bigint = 0n): Promise<void> {
+    await registerFlowFor(setup, {
+        sourceBridgeAddr: DEFAULT_SOURCE_BRIDGE,
+        sourceTokenAddr: DEFAULT_SOURCE_TOKEN,
+        wrappedToken: setup.wusdcAddress,
+        tipCapBps,
+    });
+    await registerFlowFor(setup, {
+        sourceBridgeAddr: DEFAULT_SOURCE_BRIDGE,
+        sourceTokenAddr: DEFAULT_SOURCE_TOKEN,
+        wrappedToken: setup.wusdtAddress,
+        tipCapBps,
+    });
+}
+
 // Stable EVM-side identities so "same source event" replay tests produce
 // an actually-identical replay key. (generateRandomAddress() here gives us
 // a deterministic-per-run value that we can pin into the preimage.)
@@ -343,9 +440,10 @@ await opnet('BridgeDepository — happy path', async (vm: OPNetUnit) => {
         }).toThrow();
     });
 
-    // PR β.2.format — round-trip the new fields through the parser. We only
-    // assert the claim still succeeds; tip payout / cap enforcement land in
-    // the next sub-PR.
+    // PR β.2.format — round-trip the new fields through the parser.
+    // PR β.2.payout-opnet — tip is now enforced; raise the flow's tipCapBps
+    // so the carried tip (9999 / 995_000 ≈ 100 bps) clears the cap, and
+    // assert the recipient gets `netDst - tip`, the relayer gets `tip`.
     await vm.it('relayerTip + grossSrcAmount round-trip through parser', async () => {
         const { depository, wusdc, signerWallet } = setup;
         const fields = {
@@ -353,10 +451,22 @@ await opnet('BridgeDepository — happy path', async (vm: OPNetUnit) => {
             grossSrcAmount: 12_345_678n, // distinct from grossAmount
             relayerTip: 9_999n,           // non-zero u128
         };
+        // Re-derive flowId for the default route and bump tipCap above 100 bps.
+        const flowId = await depository.computeFlowId(
+            0n,
+            ETH_CHAIN_ID,
+            evmAddrRightPadToBigInt(DEFAULT_SOURCE_BRIDGE),
+            evmAddrRightPadToBigInt(DEFAULT_SOURCE_TOKEN),
+            opnetAddrToBigInt(setup.depositoryAddress),
+            opnetAddrToBigInt(setup.wusdcAddress),
+        );
+        setSender(deployer);
+        await depository.setFlowTipCap(flowId, 200n); // 2% — accommodates ~100 bps tip
         const { preimage, hash } = buildVoucher(fields);
         setSender(alice);
         await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
-        // Mint amount still sourced from netDstAmount — tip not yet enforced.
+        // alice is BOTH recipient and tx.sender (relayer) — receives tip
+        // AND residual, so total balance == netDstAmount.
         Assert.expect(await wusdc.balanceOf(alice)).toEqual(fields.netAmount);
     });
 });
@@ -881,6 +991,14 @@ await opnet('BridgeDepository — Fix #5: source-event key includes chain id', a
             sourceChainId: 56n,             // BSC
             voucherId: 0x1002n,
         };
+        // PR β.2.payout-opnet — register the BSC route for the same wUSDC.
+        setSender(deployer);
+        await registerFlowFor(setup, {
+            chainId: 56n,
+            sourceBridgeAddr: f2.sourceBridgeAddr!,
+            sourceTokenAddr: f2.sourceTokenAddr!,
+            wrappedToken: setup.wusdcAddress,
+        });
         const v2 = buildVoucher(f2);
         setSender(alice);
         await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
@@ -918,6 +1036,13 @@ await opnet('BridgeDepository — Fix #5: source-event key includes chain id', a
             sourceBridgeAddr: altBridge,
             voucherId: 0x2002n,
         };
+        // PR β.2.payout-opnet — register a flow keyed on the alt source bridge.
+        setSender(deployer);
+        await registerFlowFor(setup, {
+            sourceBridgeAddr: altBridge,
+            sourceTokenAddr: f2.sourceTokenAddr!,
+            wrappedToken: setup.wusdcAddress,
+        });
         const v2 = buildVoucher(f2);
         setSender(alice);
         await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
