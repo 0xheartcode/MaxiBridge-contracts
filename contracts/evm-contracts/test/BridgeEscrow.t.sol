@@ -150,6 +150,14 @@ contract BridgeEscrowTest is Test {
             );
     }
 
+    /// @dev External read so via-IR cannot reorder the `block.chainid`
+    /// load past a subsequent `vm.chainId(...)` cheatcode (cheatcodes are
+    /// view-call-shaped, the optimizer treats them as side-effect-free
+    /// without this barrier).
+    function _readChainId() external view returns (uint256) {
+        return block.chainid;
+    }
+
     function _domainSeparator(address verifyingContract)
         internal
         view
@@ -534,7 +542,9 @@ contract BridgeEscrowTest is Test {
         BridgeEscrow.ReleaseIntent memory intent = _defaultIntent(address(usdc), bob, 100e6);
 
         // Sign under a different chainId (forge chainid manipulation).
-        uint256 original = block.chainid;
+        // Capture `original` via an external call so via-IR cannot
+        // hoist/reorder the read past the `vm.chainId(999)` cheatcode.
+        uint256 original = this._readChainId();
         vm.chainId(999);
         bytes memory sig = _sign(signerPk, intent);
         vm.chainId(original);
