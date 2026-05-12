@@ -86,24 +86,11 @@ contract BridgeEscrowAllModesTest is Test {
             TEST_OPNET_WMOTO
         );
 
-        // Tag tokens with their bridge mode (legacy `tokenMode[]` lookup
-        // path — still authoritative for lock/claim/claimMintWrapped
-        // mode dispatch until the storage cleanup commit migrates them
-        // to `flows[flowId].mode`).
         vm.startPrank(owner);
-        escrow.setTokenMode(
-            address(moto),
-            BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE,
-            TEST_OPNET_MOTO
-        );
-        escrow.setTokenMode(
-            address(wmoto),
-            BridgeEscrow.TokenMode.NATIVE_BURN_MINT,
-            TEST_OPNET_WMOTO
-        );
 
         // Register the mode-3 flow (real-asset pool — claim path
         // requires the flow record to exist with sufficient inventory).
+        // addFlow auto-whitelists `evmToken` in `supportedToken`.
         motoFlowId = escrow.addFlow(
             BridgeEscrow.FlowAddParams({
                 mode: uint8(BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE),
@@ -263,9 +250,9 @@ contract BridgeEscrowAllModesTest is Test {
     // =====================================================================
 
     function test_lock_rejects_nativeBurnMint_token() public {
-        // wmoto is mode NATIVE_BURN_MINT. setTokenMode auto-whitelists
-        // the token in `supportedToken`, so the lock passes that gate
-        // and falls through to the mode dispatch — which is the gate
+        // wmoto is mode NATIVE_BURN_MINT. addFlow auto-whitelists the
+        // token in `supportedToken`, so the lock passes that gate and
+        // falls through to the flow's mode dispatch — which is the gate
         // we care about: WrongMode for modes 1/2 (their EVM-side path
         // is WrappedERC20.burnForRelease, NOT BridgeEscrow.lock).
         vm.prank(address(escrow));

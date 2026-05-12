@@ -274,21 +274,6 @@ contract BridgeEscrow is
     ///         minFee is taken. Default 0.
     mapping(address => uint256) public unwrapMinFee;
 
-    /// @notice Bridge mode for each registered token. Default 0 = WRAPPED.
-    ///         For mode-2/3 tokens (WrappedERC20 instances), the governor
-    ///         calls `setTokenMode(addr, INVERSE_WRAPPED|NATIVE_BURN_MINT)`
-    ///         once at registration. Set-once per token (`_tokenModeFinalized`).
-    mapping(address => TokenMode) public tokenMode;
-
-    /// @notice For mode-2/3 tokens: 32-byte OPNet identity of the token's
-    ///         OPNet-side counterpart. Indexer-only — used to bind events
-    ///         across chains. Zero for mode-1 tokens.
-    mapping(address => bytes32) public opnetCounterpartOf;
-
-    /// @notice Set-once flag for `tokenMode[addr]`. Once finalized, the
-    ///         mode for that token can never change.
-    mapping(address => bool) private _tokenModeFinalized;
-
     // ─── Flow Registry storage (PR α — additive) ───────────────────────
 
     /// @notice Source of truth for all bridging routes. Keyed by `flowId`.
@@ -344,12 +329,13 @@ contract BridgeEscrow is
 
     /// @dev Reserved for future appends. New slots go BEFORE the gap and the
     ///      gap shrinks by the same count to preserve layout.
-    ///      Slots past treasury: unwrapFeeBps + unwrapMinFee + tokenMode +
-    ///      opnetCounterpartOf + _tokenModeFinalized + flows + allFlowIds
-    ///      + flowsByEvmToken + flowsByMode + flowsByEvmChain
-    ///      + lockedDeposits = 11.
-    ///      50 - 11 = 39.
-    uint256[39] private __gap;
+    ///      Slots past treasury: unwrapFeeBps + unwrapMinFee + flows +
+    ///      allFlowIds + flowsByEvmToken + flowsByMode + flowsByEvmChain +
+    ///      lockedDeposits = 8. (Legacy tokenMode + opnetCounterpartOf +
+    ///      _tokenModeFinalized were removed pre-mainnet; flow registry is
+    ///      the source of truth for mode + OPNet counterpart binding.)
+    ///      50 - 8 = 42.
+    uint256[42] private __gap;
 
     // ---------------------------------------------------------------------
     // Events
@@ -439,7 +425,6 @@ contract BridgeEscrow is
     );
     event UnwrapFeeBpsSet(uint256 indexed oldBps, uint256 indexed newBps);
     event UnwrapMinFeeSet(address indexed token, uint256 indexed amount);
-    event TokenModeSet(address indexed token, TokenMode indexed mode, bytes32 indexed opnetCounterpart);
     event WrappedMintedFromVoucher(
         address indexed wrappedToken,
         address indexed to,
@@ -478,8 +463,6 @@ contract BridgeEscrow is
     error InvalidThreshold();
     error FeeBpsTooHigh();
     error TipCapTooHigh();
-    error TokenModeFinalized();
-    error InvalidTokenMode();
     error WrongMode();
     error InsufficientInventory();
     error NotProvisioner();
@@ -580,14 +563,6 @@ contract BridgeEscrow is
         returns (uint256 depositNonce_, uint256 amountReceived_)
     {
         if (!supportedToken[token]) revert TokenNotSupported();
-        // Mode dispatch — `lock` is valid for WRAPPED (canonical USDC/USDT
-        // accumulating) and POOLED_LOCK_RELEASE (project tokens like MOTO
-        // where users top up the inventory pool). Modes 2/3 (mint-on-EVM)
-        // use WrappedERC20.burnForRelease on the wrapped contract directly.
-        TokenMode lockMode = tokenMode[token];
-        if (lockMode != TokenMode.WRAPPED && lockMode != TokenMode.POOLED_LOCK_RELEASE) {
-            revert WrongMode();
-        }
         if (amount == 0) revert AmountZero();
         if (opnetRecipient == bytes32(0)) revert InvalidRecipient();
 
@@ -720,6 +695,14 @@ contract BridgeEscrow is
         // tokens) tuple, EVM token field is `flow.evmToken`.
         if (flow.evmToken != token) revert FlowNotFound();
 
+        // Mode dispatch — `lock` is valid for WRAPPED (canonical USDC/USDT
+        // accumulating) and POOLED_LOCK_RELEASE (project tokens like MOTO
+        // where users top up the inventory pool). Modes 1/2 (mint-on-EVM)
+        // use WrappedERC20.burnForRelease on the wrapped contract directly.
+        if (flow.mode != uint8(TokenMode.WRAPPED) && flow.mode != uint8(TokenMode.POOLED_LOCK_RELEASE)) {
+            revert WrongMode();
+        }
+
         // 1. status: lock is a forward (inbound) path. Allowed only on
         //    ACTIVE. PAUSED = guardian quarantine; DRAINING = winding down,
         //    no new deposits; DISABLED = non-existent.
@@ -766,15 +749,6 @@ contract BridgeEscrow is
         nonReentrant
     {
         if (!supportedToken[intent.token]) revert TokenNotSupported();
-        // Mode dispatch — `claim` releases real tokens from the bridge's
-        // balance. Valid for WRAPPED (balance accumulates from user
-        // locks of canonical USDC/USDT) and POOLED_LOCK_RELEASE (balance
-        // is governor-provisioned project token like MOTO + user locks).
-        // Modes 2/3 (mint-on-EVM) use `claimMintWrapped` instead.
-        TokenMode claimMode = tokenMode[intent.token];
-        if (claimMode != TokenMode.WRAPPED && claimMode != TokenMode.POOLED_LOCK_RELEASE) {
-            revert WrongMode();
-        }
         if (intent.to == address(0)) revert InvalidRecipient();
         if (intent.amount == 0) revert AmountZero();
         if (intent.srcChainId != expectedOpnetChainId) revert InvalidSrcChainId();
@@ -797,6 +771,16 @@ contract BridgeEscrow is
         // the registry: chainId == 0 means "not registered".
         FlowRecord storage flow = flows[intent.flowId];
         if (flow.evmChainId == 0) revert FlowNotFound();
+        // Mode dispatch — `claim` releases real tokens from the bridge's
+        // balance. Valid for WRAPPED and POOLED_LOCK_RELEASE only. Mint-on-
+        // EVM modes (INVERSE_WRAPPED / NATIVE_BURN_MINT) go through
+        // `claimMintWrapped`. Bind the intent's `token` to `flow.evmToken`
+        // so a release sig can't be replayed against a different token's
+        // pool.
+        if (flow.mode != uint8(TokenMode.WRAPPED) && flow.mode != uint8(TokenMode.POOLED_LOCK_RELEASE)) {
+            revert WrongMode();
+        }
+        if (flow.evmToken != intent.token) revert WrongMode();
 
         // ─── PR γ.1: flow consumption — minAmount / status / dailyLimit /
         //     inventory enforcement on the EVM claim (release) path. ──────
@@ -1066,36 +1050,6 @@ contract BridgeEscrow is
     // Modal extensions — modes 2 + 3 (INVERSE_WRAPPED + NATIVE_BURN_MINT)
     // ---------------------------------------------------------------------
 
-    /// @notice Register a token's bridge mode + its OPNet-side counterpart
-    ///         identity. Set-once: any subsequent call for the same token
-    ///         reverts. Mode `LOCK_LOCK` is rejected — the enum slot is
-    ///         reserved for a future architecture, not implemented here.
-    /// @dev    Also flips `supportedToken[token] = true` so the token is
-    ///         immediately recognised by the rest of the contract. Mode-1
-    ///         tokens (USDC/USDT) should keep using the existing
-    ///         `setSupportedToken` path with mode left at default WRAPPED.
-    function setTokenMode(
-        address token,
-        TokenMode mode,
-        bytes32 opnetCounterpart
-    ) external onlyOwner {
-        if (token == address(0)) revert ZeroAddress();
-        if (_tokenModeFinalized[token]) revert TokenModeFinalized();
-        // Mode WRAPPED via this method requires no opnetCounterpart binding;
-        // modes 2/3/4 all do — they reference an OPNet-side counterpart asset
-        // (canonical OP20 for INVERSE_WRAPPED and POOLED_LOCK_RELEASE; wrapped
-        // OP20 twin for NATIVE_BURN_MINT).
-        if (mode != TokenMode.WRAPPED && opnetCounterpart == bytes32(0)) {
-            revert InvalidTokenMode();
-        }
-        tokenMode[token] = mode;
-        opnetCounterpartOf[token] = opnetCounterpart;
-        _tokenModeFinalized[token] = true;
-        supportedToken[token] = true;
-        emit TokenModeSet(token, mode, opnetCounterpart);
-        emit SupportedTokenUpdated(token, true);
-    }
-
     /// @notice Claim a mode-2/3 mint authorised by the M-of-N signer set.
     ///         Mints `intent.amount` WrappedERC20 tokens (the
     ///         `intent.wrappedToken` contract) to `intent.to`.
@@ -1112,14 +1066,6 @@ contract BridgeEscrow is
         nonReentrant
     {
         if (!supportedToken[intent.wrappedToken]) revert TokenNotSupported();
-        // Legacy mode dispatch — kept as belt-and-suspenders during the
-        // storage-cleanup transition. The flow record (looked up after
-        // sig-verify below) is the new authoritative source of mode +
-        // wrapped-token binding. Both must agree before any mint lands.
-        TokenMode m = tokenMode[intent.wrappedToken];
-        if (m != TokenMode.INVERSE_WRAPPED && m != TokenMode.NATIVE_BURN_MINT) {
-            revert WrongMode();
-        }
         if (intent.to == address(0)) revert InvalidRecipient();
         if (intent.amount == 0) revert AmountZero();
         if (intent.srcChainId != expectedOpnetChainId) revert InvalidSrcChainId();
@@ -1141,8 +1087,7 @@ contract BridgeEscrow is
         // lookups) and assert: (1) the flow exists, (2) its mode is one
         // of the mint-on-EVM modes, (3) the wrappedToken in the voucher
         // matches the flow's evmToken — prevents a sig signed for one
-        // wrapped from being replayed against a different wrapped that
-        // happens to share the legacy tokenMode[] entry.
+        // wrapped from being replayed against a different wrapped.
         FlowRecord storage flow = flows[intent.flowId];
         if (flow.evmChainId == 0) revert FlowNotFound();
         if (flow.mode != uint8(TokenMode.INVERSE_WRAPPED) && flow.mode != uint8(TokenMode.NATIVE_BURN_MINT)) {
@@ -1330,6 +1275,16 @@ contract BridgeEscrow is
         flowsByEvmToken[p.evmToken].push(flowId);
         flowsByMode[p.mode].push(flowId);
         flowsByEvmChain[p.evmChainId].push(flowId);
+
+        // Auto-whitelist the EVM token. Pre-storage-cleanup this was
+        // `setTokenMode`'s job; with flow registry as source of truth,
+        // a registered flow IS the registration. Subsequent flows for
+        // the same evmToken (different modes / opnetTokens) are
+        // idempotent here.
+        if (!supportedToken[p.evmToken]) {
+            supportedToken[p.evmToken] = true;
+            emit SupportedTokenUpdated(p.evmToken, true);
+        }
 
         emit FlowAdded(flowId, p.mode, p.evmChainId, p.evmToken, p.opnetToken);
     }
