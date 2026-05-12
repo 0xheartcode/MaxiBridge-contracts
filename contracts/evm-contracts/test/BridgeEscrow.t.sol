@@ -1252,53 +1252,24 @@ contract BridgeEscrowTest is Test {
     // Token modes — INVERSE_WRAPPED + NATIVE_BURN_MINT + POOLED_LOCK_RELEASE
     // =====================================================================
 
-    function test_TokenMode_DefaultsToWrapped() public view {
-        // USDC and USDT were registered via the legacy `setSupportedToken`
-        // path in setUp(); they must be in WRAPPED mode by default.
-        assertEq(uint256(escrow.tokenMode(address(usdc))), uint256(BridgeEscrow.TokenMode.WRAPPED));
-        assertEq(uint256(escrow.tokenMode(address(usdt))), uint256(BridgeEscrow.TokenMode.WRAPPED));
-    }
-
-    function test_SetTokenMode_InverseWrapped_Succeeds() public {
-        MockERC20 wrapped = new MockERC20("Wrapped MOTO", "wMOTO", 6);
-        bytes32 opnetCanonical = bytes32(uint256(0xCAFE));
+    /// @dev Helper — register a flow for a non-default token with sane open
+    ///      defaults. Returns the flowId. Used by mode tests post storage
+    ///      cleanup (legacy `setTokenMode` is gone; addFlow is the only
+    ///      registration path now and auto-whitelists `evmToken`).
+    function _registerFlow(
+        address evmToken,
+        BridgeEscrow.TokenMode mode,
+        bytes32 opnetToken
+    ) internal returns (bytes32 flowId) {
         vm.prank(owner);
-        escrow.setTokenMode(address(wrapped), BridgeEscrow.TokenMode.INVERSE_WRAPPED, opnetCanonical);
-        assertEq(uint256(escrow.tokenMode(address(wrapped))), uint256(BridgeEscrow.TokenMode.INVERSE_WRAPPED));
-        assertEq(escrow.opnetCounterpartOf(address(wrapped)), opnetCanonical);
-        assertTrue(escrow.supportedToken(address(wrapped)));
-    }
-
-    function test_SetTokenMode_SetOnce_Reverts() public {
-        MockERC20 wrapped = new MockERC20("X", "X", 6);
-        bytes32 cp = bytes32(uint256(1));
-        vm.prank(owner);
-        escrow.setTokenMode(address(wrapped), BridgeEscrow.TokenMode.NATIVE_BURN_MINT, cp);
-        vm.prank(owner);
-        vm.expectRevert(BridgeEscrow.TokenModeFinalized.selector);
-        escrow.setTokenMode(address(wrapped), BridgeEscrow.TokenMode.WRAPPED, bytes32(0));
-    }
-
-    function test_SetTokenMode_NonWrappedRequiresOpnetCounterpart() public {
-        MockERC20 wrapped = new MockERC20("X", "X", 6);
-        vm.prank(owner);
-        vm.expectRevert(BridgeEscrow.InvalidTokenMode.selector);
-        escrow.setTokenMode(address(wrapped), BridgeEscrow.TokenMode.INVERSE_WRAPPED, bytes32(0));
-    }
-
-    function test_SetTokenMode_PooledLockRelease_Succeeds() public {
-        MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
-        bytes32 opnetMoto = bytes32(uint256(0xDEAD));
-        vm.startPrank(owner);
-        escrow.setTokenMode(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, opnetMoto);
-        bytes32 motoFlowId = escrow.addFlow(BridgeEscrow.FlowAddParams({
-            mode: uint8(BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE),
+        flowId = escrow.addFlow(BridgeEscrow.FlowAddParams({
+            mode: uint8(mode),
             evmChainId: TEST_EVM_CHAIN_ID,
             evmBridge: TEST_EVM_BRIDGE,
-            evmToken: address(moto),
+            evmToken: evmToken,
             evmDecimals: 6,
             opnetBridge: TEST_OPNET_BRIDGE,
-            opnetToken: opnetMoto,
+            opnetToken: opnetToken,
             opnetDecimals: 6,
             feeBps: 0,
             minFee: 0,
@@ -1307,9 +1278,27 @@ contract BridgeEscrowTest is Test {
             dailyLimit: type(uint128).max,
             tipCapBps: 0
         }));
-        vm.stopPrank();
-        assertEq(uint256(escrow.tokenMode(address(moto))), uint256(BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE));
-        // Mode-4 tokens also pass through `lock` (just like mode-1).
+    }
+
+    function test_AddFlow_AutoWhitelistsEvmToken() public {
+        MockERC20 wrapped = new MockERC20("Wrapped MOTO", "wMOTO", 6);
+        bytes32 opnetCanonical = bytes32(uint256(0xCAFE));
+        assertFalse(escrow.supportedToken(address(wrapped)));
+        bytes32 flowId = _registerFlow(address(wrapped), BridgeEscrow.TokenMode.INVERSE_WRAPPED, opnetCanonical);
+        assertTrue(escrow.supportedToken(address(wrapped)));
+        BridgeEscrow.FlowRecord memory f = escrow.getFlow(flowId);
+        assertEq(uint256(f.mode), uint256(BridgeEscrow.TokenMode.INVERSE_WRAPPED));
+        assertEq(f.evmToken, address(wrapped));
+        assertEq(f.opnetToken, opnetCanonical);
+    }
+
+    function test_AddFlow_PooledLockRelease_Lockable() public {
+        MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
+        bytes32 opnetMoto = bytes32(uint256(0xDEAD));
+        bytes32 motoFlowId = _registerFlow(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, opnetMoto);
+        BridgeEscrow.FlowRecord memory f = escrow.getFlow(motoFlowId);
+        assertEq(uint256(f.mode), uint256(BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE));
+        // Mode-3 tokens also pass through `lock` (just like mode-0).
         moto.mint(alice, 100e6);
         vm.startPrank(alice);
         moto.approve(address(escrow), type(uint256).max);
@@ -1321,22 +1310,21 @@ contract BridgeEscrowTest is Test {
 
     function test_Lock_RevertsForInverseWrappedToken() public {
         MockERC20 w = new MockERC20("W", "W", 6);
-        vm.prank(owner);
-        escrow.setTokenMode(address(w), BridgeEscrow.TokenMode.INVERSE_WRAPPED, bytes32(uint256(1)));
+        bytes32 flowId = _registerFlow(address(w), BridgeEscrow.TokenMode.INVERSE_WRAPPED, bytes32(uint256(1)));
         w.mint(alice, 100e6);
         vm.startPrank(alice);
         w.approve(address(escrow), type(uint256).max);
         vm.expectRevert(BridgeEscrow.WrongMode.selector);
-        escrow.lock(address(w), 1e6, keccak256("x"), bytes32(0));
+        escrow.lock(address(w), 1e6, keccak256("x"), flowId);
         vm.stopPrank();
     }
 
     function test_Claim_RevertsForInverseWrappedToken() public {
         MockERC20 w = new MockERC20("W", "W", 6);
-        vm.prank(owner);
-        escrow.setTokenMode(address(w), BridgeEscrow.TokenMode.INVERSE_WRAPPED, bytes32(uint256(1)));
+        bytes32 flowId = _registerFlow(address(w), BridgeEscrow.TokenMode.INVERSE_WRAPPED, bytes32(uint256(1)));
 
         BridgeEscrow.ReleaseIntent memory intent = _defaultIntent(address(w), bob, 100e6);
+        intent.flowId = flowId;
         bytes memory sig = _sign(signerPk, intent);
         vm.expectRevert(BridgeEscrow.WrongMode.selector);
         escrow.claim(intent, sig);
@@ -1344,8 +1332,7 @@ contract BridgeEscrowTest is Test {
 
     function test_ProvisionInventory_AddsToBalance() public {
         MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
-        vm.prank(owner);
-        escrow.setTokenMode(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
+        _registerFlow(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
 
         moto.mint(owner, 1_000e6);
         uint256 escrowBefore = moto.balanceOf(address(escrow));
@@ -1360,8 +1347,7 @@ contract BridgeEscrowTest is Test {
 
     function test_ProvisionInventory_OnlyOwner() public {
         MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
-        vm.prank(owner);
-        escrow.setTokenMode(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
+        _registerFlow(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
         moto.mint(alice, 100e6);
         vm.startPrank(alice);
         moto.approve(address(escrow), 100e6);
@@ -1373,8 +1359,7 @@ contract BridgeEscrowTest is Test {
     function test_DrainInventory_GuardianOnlyWhenPaused() public {
         // Set up: register MOTO + provision + set treasury/guardian + pause.
         MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
-        vm.prank(owner);
-        escrow.setTokenMode(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
+        _registerFlow(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
         moto.mint(owner, 1_000e6);
         vm.startPrank(owner);
         moto.approve(address(escrow), 1_000e6);
@@ -1405,12 +1390,10 @@ contract BridgeEscrowTest is Test {
             EXPECTED_OPNET_CHAIN_ID,
             bytes32(uint256(0xC0DE))
         );
-        vm.prank(owner);
-        escrow.setTokenMode(address(wmoto), BridgeEscrow.TokenMode.INVERSE_WRAPPED, bytes32(uint256(0xC0DE)));
 
-        // PR β.2.payout-evm++ — claimMintWrapped now also binds to a
-        // flowId. Register a flow for wmoto so the post-sig flow lookup
-        // passes its mode + token match checks.
+        // PR β.2.payout-evm++ — claimMintWrapped binds to a flowId.
+        // Register a flow for wmoto; addFlow auto-whitelists the token,
+        // and the post-sig flow lookup asserts mode + token match.
         vm.prank(owner);
         bytes32 wmotoFlowId = escrow.addFlow(
             BridgeEscrow.FlowAddParams({
@@ -1450,10 +1433,10 @@ contract BridgeEscrowTest is Test {
         assertTrue(escrow.signaturesUsed(mi.opnetNonce));
     }
 
-    function test_ClaimMintWrapped_RevertsForWrappedToken() public {
-        // USDC is mode WRAPPED; claimMintWrapped against it should revert
-        // at the legacy tokenMode[] gate (defense-in-depth) before the
-        // flow lookup runs. Any flowId works; use zero.
+    function test_ClaimMintWrapped_RevertsForWrappedFlow() public {
+        // USDC is registered under a WRAPPED flow (mode 0) in setUp. The
+        // sig-verified flow lookup must reject any attempt to mint into a
+        // WRAPPED flow's evmToken — `claimMintWrapped` is mode 1/2 only.
         BridgeEscrow.MintIntent memory mi = BridgeEscrow.MintIntent({
             wrappedToken: address(usdc),
             to: bob,
@@ -1464,7 +1447,7 @@ contract BridgeEscrowTest is Test {
             burnNonce: 1,
             signerEpoch: escrow.currentEpoch(),
             opnetNonce: keccak256("y"),
-            flowId: bytes32(0)
+            flowId: usdcFlowId
         });
         bytes memory sig = _signMintIntent(signerPk, mi);
         vm.expectRevert(BridgeEscrow.WrongMode.selector);
