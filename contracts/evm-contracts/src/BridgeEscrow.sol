@@ -86,12 +86,13 @@ contract BridgeEscrow is
         uint256 burnNonce;      // OPNet burn nonce (mode 3) or lock nonce (mode 2)
         uint32 signerEpoch;
         bytes32 opnetNonce;
+        bytes32 flowId;         // PR β.2.payout-evm++ — flow binding for mode-dispatch
     }
 
-    /// @dev keccak256("MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)")
+    /// @dev keccak256("MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,bytes32 flowId)")
     bytes32 public constant MINT_INTENT_TYPEHASH =
         keccak256(
-            "MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)"
+            "MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,bytes32 flowId)"
         );
 
     /// @notice Token bridging mode — set per token at registration time.
@@ -1111,6 +1112,10 @@ contract BridgeEscrow is
         nonReentrant
     {
         if (!supportedToken[intent.wrappedToken]) revert TokenNotSupported();
+        // Legacy mode dispatch — kept as belt-and-suspenders during the
+        // storage-cleanup transition. The flow record (looked up after
+        // sig-verify below) is the new authoritative source of mode +
+        // wrapped-token binding. Both must agree before any mint lands.
         TokenMode m = tokenMode[intent.wrappedToken];
         if (m != TokenMode.INVERSE_WRAPPED && m != TokenMode.NATIVE_BURN_MINT) {
             revert WrongMode();
@@ -1129,6 +1134,24 @@ contract BridgeEscrow is
         bytes32 digest = _hashTypedDataV4(structHash);
 
         _verifySignatures(digest, sig);
+
+        // PR β.2.payout-evm++ — flow binding. The voucher commits to a
+        // specific flowId via MINT_INTENT_TYPEHASH. Look it up after
+        // sig-verify (so unauthenticated callers can't spam flow
+        // lookups) and assert: (1) the flow exists, (2) its mode is one
+        // of the mint-on-EVM modes, (3) the wrappedToken in the voucher
+        // matches the flow's evmToken — prevents a sig signed for one
+        // wrapped from being replayed against a different wrapped that
+        // happens to share the legacy tokenMode[] entry.
+        FlowRecord storage flow = flows[intent.flowId];
+        if (flow.evmChainId == 0) revert FlowNotFound();
+        if (flow.mode != uint8(TokenMode.INVERSE_WRAPPED) && flow.mode != uint8(TokenMode.NATIVE_BURN_MINT)) {
+            revert WrongMode();
+        }
+        if (flow.evmToken != intent.wrappedToken) revert WrongMode();
+        if (flow.status != FLOW_STATUS_ACTIVE && flow.status != FLOW_STATUS_DRAINING) {
+            revert FlowNotActive();
+        }
 
         // Effects BEFORE interaction (CEI).
         signaturesUsed[intent.opnetNonce] = true;
@@ -1474,7 +1497,8 @@ contract BridgeEscrow is
                     intent.opnetEventIndex,
                     intent.burnNonce,
                     intent.signerEpoch,
-                    intent.opnetNonce
+                    intent.opnetNonce,
+                    intent.flowId
                 )
             );
     }

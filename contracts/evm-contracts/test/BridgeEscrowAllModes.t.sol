@@ -36,7 +36,7 @@ contract BridgeEscrowAllModesTest is Test {
     );
 
     bytes32 internal constant MINT_INTENT_TYPEHASH = keccak256(
-        "MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)"
+        "MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,bytes32 flowId)"
     );
 
     uint256 internal constant EXPECTED_OPNET_CHAIN_ID = 2;
@@ -244,7 +244,8 @@ contract BridgeEscrowAllModesTest is Test {
             opnetEventIndex: 0,
             burnNonce: 1,
             signerEpoch: escrow.currentEpoch(),
-            opnetNonce: keccak256("opnet-nonce-mint-nbm")
+            opnetNonce: keccak256("opnet-nonce-mint-nbm"),
+            flowId: wmotoFlowId
         });
         bytes memory sig = _signMintIntent(signerPk, mi);
 
@@ -328,7 +329,8 @@ contract BridgeEscrowAllModesTest is Test {
                 mi.opnetEventIndex,
                 mi.burnNonce,
                 mi.signerEpoch,
-                mi.opnetNonce
+                mi.opnetNonce,
+                mi.flowId
             )
         );
         bytes32 digest = keccak256(

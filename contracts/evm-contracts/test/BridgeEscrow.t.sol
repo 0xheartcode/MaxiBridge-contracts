@@ -1408,6 +1408,29 @@ contract BridgeEscrowTest is Test {
         vm.prank(owner);
         escrow.setTokenMode(address(wmoto), BridgeEscrow.TokenMode.INVERSE_WRAPPED, bytes32(uint256(0xC0DE)));
 
+        // PR β.2.payout-evm++ — claimMintWrapped now also binds to a
+        // flowId. Register a flow for wmoto so the post-sig flow lookup
+        // passes its mode + token match checks.
+        vm.prank(owner);
+        bytes32 wmotoFlowId = escrow.addFlow(
+            BridgeEscrow.FlowAddParams({
+                mode: uint8(BridgeEscrow.TokenMode.INVERSE_WRAPPED),
+                evmChainId: TEST_EVM_CHAIN_ID,
+                evmBridge: TEST_EVM_BRIDGE,
+                evmToken: address(wmoto),
+                evmDecimals: 6,
+                opnetBridge: TEST_OPNET_BRIDGE,
+                opnetToken: bytes32(uint256(0xC0DE)),
+                opnetDecimals: 6,
+                feeBps: 0,
+                minFee: 0,
+                minAmount: 0,
+                cap: type(uint128).max,
+                dailyLimit: type(uint128).max,
+                tipCapBps: 0
+            })
+        );
+
         BridgeEscrow.MintIntent memory mi = BridgeEscrow.MintIntent({
             wrappedToken: address(wmoto),
             to: bob,
@@ -1417,7 +1440,8 @@ contract BridgeEscrowTest is Test {
             opnetEventIndex: 0,
             burnNonce: 1,
             signerEpoch: escrow.currentEpoch(),
-            opnetNonce: keccak256("opnet-nonce-mint-1")
+            opnetNonce: keccak256("opnet-nonce-mint-1"),
+            flowId: wmotoFlowId
         });
         bytes memory sig = _signMintIntent(signerPk, mi);
 
@@ -1427,7 +1451,9 @@ contract BridgeEscrowTest is Test {
     }
 
     function test_ClaimMintWrapped_RevertsForWrappedToken() public {
-        // USDC is mode WRAPPED; claimMintWrapped against it should revert.
+        // USDC is mode WRAPPED; claimMintWrapped against it should revert
+        // at the legacy tokenMode[] gate (defense-in-depth) before the
+        // flow lookup runs. Any flowId works; use zero.
         BridgeEscrow.MintIntent memory mi = BridgeEscrow.MintIntent({
             wrappedToken: address(usdc),
             to: bob,
@@ -1437,7 +1463,8 @@ contract BridgeEscrowTest is Test {
             opnetEventIndex: 0,
             burnNonce: 1,
             signerEpoch: escrow.currentEpoch(),
-            opnetNonce: keccak256("y")
+            opnetNonce: keccak256("y"),
+            flowId: bytes32(0)
         });
         bytes memory sig = _signMintIntent(signerPk, mi);
         vm.expectRevert(BridgeEscrow.WrongMode.selector);
@@ -1477,7 +1504,7 @@ contract BridgeEscrowTest is Test {
 
     bytes32 internal constant MINT_INTENT_TYPEHASH =
         keccak256(
-            "MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce)"
+            "MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,bytes32 flowId)"
         );
 
     function _signMintIntent(uint256 pk, BridgeEscrow.MintIntent memory mi)
@@ -1496,7 +1523,8 @@ contract BridgeEscrowTest is Test {
                 mi.opnetEventIndex,
                 mi.burnNonce,
                 mi.signerEpoch,
-                mi.opnetNonce
+                mi.opnetNonce,
+                mi.flowId
             )
         );
         bytes32 d = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(address(escrow)), structHash));
