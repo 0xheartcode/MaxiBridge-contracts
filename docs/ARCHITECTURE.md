@@ -31,7 +31,7 @@ OPNet → EVM (WITHDRAW)
 
 ## Message Formats
 
-### ML-DSA Voucher (EVM → OPNet, 420 bytes)
+### ML-DSA Voucher (EVM → OPNet, 508 bytes)
 
 Used by `BridgeDepository.claimMintWithVoucher`. The contract hashes the preimage with SHA-256, then verifies the ML-DSA signature against the registered signer pubkey for the current epoch.
 
@@ -42,16 +42,18 @@ Used by `BridgeDepository.claimMintWithVoucher`. The contract hashes the preimag
 | `selector` | 4B | SHA-256(`claimMintWithVoucher(bytes,bytes)`) |
 | `recipient` | 32B | OPNet identity key — only this address can claim |
 | `sourceChainId` | 32B | 1 = Ethereum mainnet |
-| `sourceBridgeAddr` | 32B | EVM BridgeEscrow address (20B padded) |
-| `sourceTokenAddr` | 32B | EVM USDC or USDT (20B padded) |
+| `sourceBridgeAddr` | 32B | EVM BridgeEscrow address (20B right-padded) |
+| `sourceTokenAddr` | 32B | EVM USDC or USDT (20B right-padded) |
 | `sourceTxHash` | 32B | EVM tx hash of the Locked event |
 | `sourceLogIndex` | 4B | Log ordinal — binds to one specific Locked event |
 | `sourceDepositNonce` | 32B | Locked.depositNonce from the EVM contract |
 | `sourceBlockHash` | 32B | Canonical block hash at sign time (reorg binding) |
 | `wrappedToken` | 32B | OPNet wUSDC or wUSDT address |
-| `grossAmount` | 32B | Gross USDC received in lock (balance-delta) |
-| `feeAmount` | 32B | 0.5% of grossAmount |
-| `netAmount` | 32B | Amount minted to recipient |
+| `grossSrcAmount` | 32B | Source-side gross (balance-delta on EVM) |
+| `grossDstAmount` | 32B | Destination-side gross (= grossSrcAmount until decimal-aware AmountPolicy lands) |
+| `feeDstAmount` | 32B | 0.5% fee on destination side |
+| `netDstAmount` | 32B | Amount minted to recipient |
+| `relayerTip` | 16B | Permissionless tip (signed over; payout in a future PR) |
 | `signerEpoch` | 4B | Must equal current on-chain epoch |
 | `voucherId` | 32B | Unpredictable server nonce — per-voucher replay guard |
 
@@ -134,6 +136,49 @@ Thresholds (alert triggers):
 | Critical | > $1,000          | > 0.10%           |
 
 Accrued fees (the 0.5% retained on the source side) are tracked separately and are intentionally excluded from the mismatch calc — they represent protocol revenue, not a reserve gap.
+
+---
+
+## Soft Config Layer
+
+Operators can toggle bridge behaviour at runtime without a server redeploy via a **three-tier config authority**:
+
+```
+Tier 1 — env vars (startup defaults, secret-safe)
+  ↓ overridden by
+Tier 2 — bridge_config DB table (live, operator-editable via admin panel)
+  ↓ overridden by
+Tier 3 — on-chain governance (immutable until next upgrade ceremony)
+```
+
+The `bridge_config` SQLite table holds namespaced string keys:
+
+| Namespace | Example keys | Purpose |
+|-----------|-------------|---------|
+| `global.*` | `global.maintenance_mode`, `global.maintenance_banner`, `global.announcement` | Site-wide toggles and banners |
+| `evm.<chainId>.*` | `evm.1.deposit_enabled`, `evm.1.withdraw_enabled` | Per-EVM-chain deposit/withdraw gates |
+| `opnet.<networkId>.*` | `opnet.1.deposit_enabled`, `opnet.1.withdraw_enabled` | Per-OPNet-network deposit/withdraw gates |
+
+**Public endpoint:** `GET /api/config` returns the subset of keys that the dApp is allowed to read (maintenance mode, chain toggles, announcement text). No auth required.
+
+**Admin endpoint:** `GET/POST /api/admin/server-config` allows operators to view all keys and upsert values from the **Server Config** page in the admin panel. Every write is audit-logged to `admin_audit`.
+
+**Frontend hook:** `useServerConfig()` fetches `/api/config` once per page load (module-level cache, deduped promise), then exposes typed helpers: `isMaintenanceMode`, `maintenanceBanner`, `announcement`, `isDepositEnabled(chainId)`, `isOpnetWithdrawEnabled(networkId)`, etc. When `isMaintenanceMode` is true, the Landing page replaces the bridge UI with a maintenance overlay — no redeploy needed.
+
+---
+
+## Token Mode & Dest-Method Tagging
+
+The bridge supports four token flow modes (on-chain enum on `BridgeEscrow`):
+
+| Mode | Name | EVM → OPNet | OPNet → EVM |
+|------|------|-------------|-------------|
+| 0 | `WRAPPED` | lock → `claimMintWithVoucher` | burn → `claim` |
+| 1 | `INVERSE_WRAPPED` | lock → `claimMintWithVoucher` | burn → `claimReleaseWithVoucher` |
+| 2 | `NATIVE_BURN_MINT` | burn → `claimMintWithVoucher` | burn → `claim` |
+| 3 | `POOLED_LOCK_RELEASE` | lock → `claimMintWrapped` | burn → `claim` |
+
+When the indexer processes a deposit or withdrawal event it resolves the token's mode via `GET /api/tokens/:address/mode` (which proxies the on-chain `tokenMode` view) and stores `token_mode`, `source_event_type`, and `dest_method` on the DB row. The dApp reads `dest_method` from the status API and calls the correct claim function — `ClaimButton` never hard-codes a function name.
 
 ---
 
