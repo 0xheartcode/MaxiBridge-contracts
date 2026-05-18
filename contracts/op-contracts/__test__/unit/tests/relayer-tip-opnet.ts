@@ -312,6 +312,35 @@ await opnet('BridgeDepository — PR β.2.payout-opnet — mint path', async (vm
         }).toThrow();
     });
 
+    await vm.it('#2: tip > 0 — a non-recipient relayer can claim; mint to recipient, tip to relayer', async () => {
+        // 200 bps cap; tip 9_950 / 995_000 = 100 bps. Voucher recipient is
+        // alice but the tx is submitted by `deployer` (the relayer) —
+        // only possible because relayerTip > 0 relaxes the sender binding.
+        await registerFlow(setup, { tipCapBps: 200n });
+        const { depository, wusdc, signerWallet } = setup;
+        const fields = { ...defaultFields(setup, alice), relayerTip: 9_950n };
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(deployer);
+        await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        // Recipient (alice) gets netAmount - tip; relayer (deployer) the tip.
+        Assert.expect(await wusdc.balanceOf(alice)).toEqual(fields.netAmount - 9_950n);
+        Assert.expect(await wusdc.balanceOf(deployer)).toEqual(9_950n);
+        Assert.expect(await wusdc.totalSupply()).toEqual(fields.netAmount);
+    });
+
+    await vm.it('#2: tip = 0 — a non-recipient cannot claim (DIY binding preserved)', async () => {
+        // No tip → the recipient==tx.sender binding still applies, so a
+        // tip-less voucher signed for alice is un-claimable by deployer.
+        await registerFlow(setup, { tipCapBps: 200n });
+        const { depository, signerWallet } = setup;
+        const fields = { ...defaultFields(setup, alice), relayerTip: 0n };
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        }).toThrow();
+    });
+
     await vm.it('claim with tip on paused flow reverts', async () => {
         const flowId = await registerFlow(setup, { tipCapBps: 200n });
         setSender(deployer);

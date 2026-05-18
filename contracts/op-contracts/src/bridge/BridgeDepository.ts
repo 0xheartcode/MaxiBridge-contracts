@@ -2191,11 +2191,21 @@ export class BridgeDepository extends ReentrancyGuard {
         }
 
         // ── Step 4: recipient binding (front-run safe) ──
-        // Contract rebuilds this check against tx.sender, so a voucher
-        // signed for alice cannot be claimed by bob.
-        const sender: Address = Blockchain.tx.sender;
-        if (!parsed.recipient.equals(sender)) {
-            throw new Revert('BridgeDepository: wrong recipient');
+        // #2 — the sender==recipient binding is enforced ONLY for DIY
+        // claims (relayerTip == 0): a tip-less voucher signed for alice
+        // cannot be claimed by bob. When the user signed a non-zero
+        // relayerTip they explicitly opted into the relayer path — any
+        // tx.sender may submit, the mint still goes to parsed.recipient
+        // (Step 11) and tx.sender collects the signed tip (Step 10). The
+        // voucher's ML-DSA signature already binds `recipient`, so funds
+        // are never redirected — a stolen tip-bearing voucher only lets a
+        // thief waste gas. The security relaxation is itself opt-in, per
+        // voucher; tip-less vouchers keep the full theft-proof binding.
+        if (parsed.relayerTip.isZero()) {
+            const sender: Address = Blockchain.tx.sender;
+            if (!parsed.recipient.equals(sender)) {
+                throw new Revert('BridgeDepository: wrong recipient');
+            }
         }
 
         // ── Step 5: wrappedToken must be allowlisted ──
