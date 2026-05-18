@@ -438,8 +438,12 @@ Server MUST pack via `packOpnetMofN`. Frontend passes the blob through unchanged
 | `cancelVoucher` | `cancelVoucher(uint256)` | `0xdf78268e` |
 | `confirmBurn` (PR γ.2b) | `confirmBurn(uint256,bytes,bytes)` | `0x9cffeea6` |
 | `migrateSignerSet` (PR γ.2b) | `migrateSignerSet(bytes)` | `0x22f63062` |
-| `governorProvisionFlowInventory` (PR γ.2b) | `governorProvisionFlowInventory(uint256,uint256)` | `0x83734911` |
+| `provisionInventoryOpNet` (#44 — flow-scoped) | `provisionInventoryOpNet(uint256,address,uint256)` — (flowId, token, amount) | regenerated on rebuild |
+| `drainInventoryOpNet` (#44 — flow-scoped) | `drainInventoryOpNet(uint256,address,uint256,address)` — (flowId, token, amount, recipient) | regenerated on rebuild |
+| `lockForBridge` (#44 — flow-scoped) | `lockForBridge(uint256,address,uint256,bytes32,uint32)` — (flowId, canonicalToken, amount, evmRecipient, destChainId) | regenerated on rebuild |
 | `isBurnConfirmed` (view, PR γ.2b; widened by #45) | `isBurnConfirmed(uint256,uint256,uint256,uint256)` — (flowId, depositId, evmTxHash, evmLogIndex) | regenerated on rebuild |
+
+> **#44 — flow-scoped OPNet inventory.** `provisionInventoryOpNet` / `drainInventoryOpNet` now take an explicit `flowId` and move `_flowInventory` atomically with the token transfer (verify → effect → interaction). `lockForBridge` takes the `flowId` it locks into and is the **sole mode-1 (INVERSE_WRAPPED) inventory producer** (`_flowInventory += received`); mode-3 locks are source-side only and do not credit OPNet inventory. The pre-#44 `governorProvisionFlowInventory(uint256,uint256)` accounting-without-tokens hatch (selector `0x83734911`) is **deleted**.
 
 **BurnAttestation preimage (PR γ.2b — 252 bytes):**
 ```
@@ -456,7 +460,7 @@ Server MUST pack via `packOpnetMofN`. Frontend passes the blob through unchanged
 236  16   relayerTip (parsed; not paid in v1 — accounted for future tip treasury)
                    = 252
 ```
-Inventory effects: mode 1 → flow.inventory++ (provisions OPNet pool from EVM-side burn so future mode-1 release vouchers can pay out). mode 3/4 → flow.inventory-- (release-side ack — closes a prior lock against pre-funded pool). Tip is recorded but NOT paid; mirrors EVM relayer model and lands once an on-chain tip-treasury exists.
+Inventory effects (#44 — single-count invariant): **mode 1 → no inventory mutation** — `confirmBurn` is a pure replay-guarded attestation; the mode-1 ledger is produced by `lockForBridge` and consumed by `claimReleaseWithVoucher`. mode 3 → flow.inventory-- (release-side ack — closes a prior lock against the pre-funded OPNet pool provisioned via `provisionInventoryOpNet`). Tip is recorded but NOT paid; mirrors EVM relayer model and lands once an on-chain tip-treasury exists.
 
 `BridgeDepository` registers `UpdatablePlugin(1008)` (Phase 2.2; was 144 pre-redesign) which adds standard upgrade selectors: `submitUpdate(address)`, `applyUpdate(address,bytes)`, `cancelUpdate()`, `pendingUpdate()`, `updateDelay()`. Governor-only. `WrappedOP20` is **NON-UPGRADEABLE** and exposes none of those selectors — wUSDC/wUSDT are canonical immutable tokens (see §5).
 
