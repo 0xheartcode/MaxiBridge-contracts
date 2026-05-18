@@ -564,7 +564,7 @@ export class BridgeDepository extends ContractRuntime {
         return out;
     }
 
-    // ─── PR γ.2b — confirmBurn / migrateSignerSet / governorProvisionFlowInventory ─
+    // ─── confirmBurn / migrateSignerSet / flow inventory + lock ─
 
     private readonly confirmBurnSelector: number = encodeSelectorWithParams(
         'confirmBurn',
@@ -579,12 +579,29 @@ export class BridgeDepository extends ContractRuntime {
         'migrateSignerSet',
         ABIDataTypes.BYTES,
     );
-    private readonly governorProvisionFlowInventorySelector: number =
+    private readonly provisionInventoryOpNetSelector: number =
         encodeSelectorWithParams(
-            'governorProvisionFlowInventory',
+            'provisionInventoryOpNet',
             ABIDataTypes.UINT256,
+            ABIDataTypes.ADDRESS,
             ABIDataTypes.UINT256,
         );
+    private readonly drainInventoryOpNetSelector: number =
+        encodeSelectorWithParams(
+            'drainInventoryOpNet',
+            ABIDataTypes.UINT256,
+            ABIDataTypes.ADDRESS,
+            ABIDataTypes.UINT256,
+            ABIDataTypes.ADDRESS,
+        );
+    private readonly lockForBridgeSelector: number = encodeSelectorWithParams(
+        'lockForBridge',
+        ABIDataTypes.UINT256,
+        ABIDataTypes.ADDRESS,
+        ABIDataTypes.UINT256,
+        ABIDataTypes.BYTES32,
+        ABIDataTypes.UINT32,
+    );
     private readonly setTokenModeSelector: number = encodeSelectorWithParams(
         'setTokenMode',
         ABIDataTypes.ADDRESS,
@@ -633,15 +650,50 @@ export class BridgeDepository extends ContractRuntime {
         await this.getResponse(w.getBuffer());
     }
 
-    public async governorProvisionFlowInventory(
+    public async provisionInventoryOpNet(
         flowId: bigint,
+        token: Address,
         amount: bigint,
     ): Promise<void> {
         const w = new BinaryWriter();
-        w.writeSelector(this.governorProvisionFlowInventorySelector);
+        w.writeSelector(this.provisionInventoryOpNetSelector);
         w.writeU256(flowId);
+        w.writeAddress(token);
         w.writeU256(amount);
         await this.getResponse(w.getBuffer());
+    }
+
+    public async drainInventoryOpNet(
+        flowId: bigint,
+        token: Address,
+        amount: bigint,
+        recipient: Address,
+    ): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.drainInventoryOpNetSelector);
+        w.writeU256(flowId);
+        w.writeAddress(token);
+        w.writeU256(amount);
+        w.writeAddress(recipient);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async lockForBridge(
+        flowId: bigint,
+        canonicalToken: Address,
+        amount: bigint,
+        evmRecipient: Uint8Array,
+        destChainId: number,
+    ): Promise<bigint> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.lockForBridgeSelector);
+        w.writeU256(flowId);
+        w.writeAddress(canonicalToken);
+        w.writeU256(amount);
+        w.writeBytes(evmRecipient);
+        w.writeU32(destChainId);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readU256();
     }
 
     public async setTokenMode(

@@ -9,9 +9,9 @@
  *   - dailyLimit (rolling 24h window keyed off Blockchain.block.medianTimestamp)
  *   - inventory (mint path increments; release path checks ≥ grossDst)
  *
- * Mode-1 release happy paths require non-zero starting inventory, which is
- * γ.2 territory (burn-side / governor bootstrap). γ.1 tests cover the
- * insufficient-inventory revert for mode-1 release.
+ * The #44 section at the foot of this file covers the flow-scoped OPNet
+ * inventory lifecycle end-to-end: provision / drain (mode 3) and the
+ * lockForBridge → claimReleaseWithVoucher round trip (mode 1).
  *
  * Run: cd contracts/op-contracts && npm run build &&
  *      npx tsx __test__/unit/tests/flow-consumption.ts
@@ -480,3 +480,213 @@ await opnet('BridgeDepository — PR γ.1 — flow consumption (release path)', 
         }).toThrow();
     });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// #44 — flow-scoped OPNet inventory.
+//
+// Regression cover for the OPNet half of audit issue #44. The inventory
+// ledger MUST move atomically with token custody:
+//   - provisionInventoryOpNet / drainInventoryOpNet (mode 3, POOLED) are
+//     flow-scoped and credit / debit `_flowInventory` in the same call as
+//     the token transfer.
+//   - lockForBridge is the SOLE mode-1 (INVERSE_WRAPPED) inventory
+//     producer; claimReleaseWithVoucher consumes it. confirmBurn no longer
+//     increments mode-1 inventory (that double-count is removed).
+// ════════════════════════════════════════════════════════════════════════════
+
+const MODE1_EVM_COUNTERPART: bigint =
+    0xc0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0fen;
+
+function releaseSelector(): number {
+    const enc = new TextEncoder();
+    const b = sha256(enc.encode('claimReleaseWithVoucher(bytes,bytes)'));
+    return ((b[0]! << 24) | (b[1]! << 16) | (b[2]! << 8) | b[3]!) >>> 0;
+}
+
+await opnet('BridgeDepository — #44 — provision / drain inventory (mode 3 POOLED)',
+    async (vm: OPNetUnit) => {
+        let setup: BridgeSetup;
+
+        vm.beforeEach(async () => {
+            Blockchain.dispose();
+            Blockchain.clearContracts();
+            Blockchain.medianTimestamp = 1_000_000n;
+            await Blockchain.init();
+            setSender(deployer);
+            setup = await setupContracts();
+        });
+
+        vm.afterEach(() => disposeSetup(setup));
+
+        await vm.it('provision moves tokens AND inventory atomically; drain reverses it', async () => {
+            const flowId = await registerFlow(setup, { mode: 3n, cap: 10_000_000n });
+            const { depository, wusdc, wusdcAddress, depositoryAddress } = setup;
+
+            // Fund the governor with canonical wUSDC + approve the depository.
+            setSender(depositoryAddress);
+            await wusdc.mintTo(deployer, 5_000_000n);
+            await wusdc.increaseAllowance(deployer, depositoryAddress, 5_000_000n);
+
+            // Provision 3_000_000 — ledger + custody move together.
+            setSender(deployer);
+            await depository.provisionInventoryOpNet(flowId, wusdcAddress, 3_000_000n);
+            let flow = await depository.getFlow(flowId);
+            Assert.expect(flow[16]!).toEqual(3_000_000n); // index 16 = inventory
+            Assert.expect(await wusdc.balanceOf(depositoryAddress)).toEqual(3_000_000n);
+
+            // Drain 1_000_000 back out — requires the bridge paused.
+            await depository.setPaused(true);
+            await depository.drainInventoryOpNet(flowId, wusdcAddress, 1_000_000n, deployer);
+            flow = await depository.getFlow(flowId);
+            Assert.expect(flow[16]!).toEqual(2_000_000n);
+            Assert.expect(await wusdc.balanceOf(depositoryAddress)).toEqual(2_000_000n);
+        });
+
+        await vm.it('provision past cap reverts', async () => {
+            const flowId = await registerFlow(setup, { mode: 3n, cap: 2_000_000n });
+            const { depository, wusdc, wusdcAddress, depositoryAddress } = setup;
+            setSender(depositoryAddress);
+            await wusdc.mintTo(deployer, 5_000_000n);
+            await wusdc.increaseAllowance(deployer, depositoryAddress, 5_000_000n);
+            setSender(deployer);
+            await Assert.expect(async () => {
+                await depository.provisionInventoryOpNet(flowId, wusdcAddress, 3_000_000n);
+            }).toThrow();
+        });
+
+        await vm.it('drain past recorded inventory reverts', async () => {
+            const flowId = await registerFlow(setup, { mode: 3n, cap: 10_000_000n });
+            const { depository, wusdc, wusdcAddress, depositoryAddress } = setup;
+            setSender(depositoryAddress);
+            await wusdc.mintTo(deployer, 5_000_000n);
+            await wusdc.increaseAllowance(deployer, depositoryAddress, 5_000_000n);
+            setSender(deployer);
+            await depository.provisionInventoryOpNet(flowId, wusdcAddress, 1_000_000n);
+            await depository.setPaused(true);
+            await Assert.expect(async () => {
+                await depository.drainInventoryOpNet(flowId, wusdcAddress, 2_000_000n, deployer);
+            }).toThrow();
+        });
+
+        await vm.it('provision rejects unknown flow / non-provisionable mode / wrong token', async () => {
+            const { depository, wusdc, wusdcAddress, depositoryAddress } = setup;
+            setSender(depositoryAddress);
+            await wusdc.mintTo(deployer, 5_000_000n);
+            await wusdc.increaseAllowance(deployer, depositoryAddress, 5_000_000n);
+            setSender(deployer);
+
+            // Unknown flowId.
+            await Assert.expect(async () => {
+                await depository.provisionInventoryOpNet(0xdeadn, wusdcAddress, 1n);
+            }).toThrow();
+
+            // Mode-0 (WRAPPED) flow has no OPNet pool — not provisionable.
+            const mode0 = await registerFlow(setup, { mode: 0n });
+            await Assert.expect(async () => {
+                await depository.provisionInventoryOpNet(mode0, wusdcAddress, 1n);
+            }).toThrow();
+
+            // Wrong token (not the flow's registered canonical OPNet token).
+            const mode3 = await registerFlow(setup, {
+                mode: 3n,
+                sourceBridgeAddr: Blockchain.generateRandomAddress(),
+                sourceTokenAddr: Blockchain.generateRandomAddress(),
+            });
+            const notCanonical = Blockchain.generateRandomAddress();
+            await Assert.expect(async () => {
+                await depository.provisionInventoryOpNet(mode3, notCanonical, 1n);
+            }).toThrow();
+        });
+    });
+
+await opnet('BridgeDepository — #44 — lockForBridge → claimReleaseWithVoucher (mode 1)',
+    async (vm: OPNetUnit) => {
+        let setup: BridgeSetup;
+
+        vm.beforeEach(async () => {
+            Blockchain.dispose();
+            Blockchain.clearContracts();
+            Blockchain.medianTimestamp = 1_000_000n;
+            await Blockchain.init();
+            setSender(deployer);
+            setup = await setupContracts();
+        });
+
+        vm.afterEach(() => disposeSetup(setup));
+
+        await vm.it('lock credits inventory; release draws it down; over-release reverts', async () => {
+            const { depository, wusdc, wusdcAddress, depositoryAddress, signerWallet } = setup;
+            const releaseSrcBridge = Blockchain.generateRandomAddress();
+            const releaseSrcToken = Blockchain.generateRandomAddress();
+
+            // Flip the canonical OPNet token to INVERSE_WRAPPED (mode 1).
+            await depository.setTokenMode(wusdcAddress, 1n, MODE1_EVM_COUNTERPART);
+            const flowId = await registerFlow(setup, {
+                mode: 1n,
+                sourceBridgeAddr: releaseSrcBridge,
+                sourceTokenAddr: releaseSrcToken,
+            });
+
+            // Give alice a canonical balance + approve the depository.
+            setSender(depositoryAddress);
+            await wusdc.mintTo(alice, 4_000_000n);
+            await wusdc.increaseAllowance(alice, depositoryAddress, 4_000_000n);
+
+            // lockForBridge — the SOLE mode-1 inventory producer. evmRecipient
+            // is a left-padded EVM address (upper 12 bytes zero).
+            const evmRecipient = new Uint8Array(32);
+            for (let i = 12; i < 32; i++) evmRecipient[i] = 0xab;
+            setSender(alice);
+            await depository.lockForBridge(flowId, wusdcAddress, 3_000_000n, evmRecipient, 1);
+
+            let flow = await depository.getFlow(flowId);
+            Assert.expect(flow[16]!).toEqual(3_000_000n); // inventory == locked
+
+            // claimReleaseWithVoucher draws the ledger down by grossAmount.
+            const buildRelease = (salt: bigint, gross: bigint, fee: bigint, net: bigint) =>
+                buildVoucher({
+                    contractSelf: depositoryAddress,
+                    selector: releaseSelector(),
+                    recipient: alice,
+                    sourceBridgeAddr: releaseSrcBridge,
+                    sourceTokenAddr: releaseSrcToken,
+                    sourceTxHash: salt,
+                    sourceLogIndex: Number(salt & 0xffffn),
+                    wrappedToken: wusdcAddress,
+                    grossAmount: gross,
+                    feeAmount: fee,
+                    netAmount: net,
+                    voucherId: salt,
+                });
+
+            const r1 = buildRelease(0x7001n, 1_000_000n, 5_000n, 995_000n);
+            await depository.claimReleaseWithVoucher(r1.preimage, signVoucher(signerWallet, r1.hash));
+            flow = await depository.getFlow(flowId);
+            Assert.expect(flow[16]!).toEqual(2_000_000n);
+
+            // Over-release — grossAmount 2_500_000 > remaining inventory 2_000_000.
+            const r2 = buildRelease(0x7002n, 2_500_000n, 12_500n, 2_487_500n);
+            await Assert.expect(async () => {
+                await depository.claimReleaseWithVoucher(
+                    r2.preimage, signVoucher(signerWallet, r2.hash),
+                );
+            }).toThrow();
+        });
+
+        await vm.it('lockForBridge rejects an unknown flowId before any token moves', async () => {
+            const { depository, wusdc, wusdcAddress, depositoryAddress } = setup;
+            await depository.setTokenMode(wusdcAddress, 1n, MODE1_EVM_COUNTERPART);
+            await registerFlow(setup, { mode: 1n });
+            setSender(depositoryAddress);
+            await wusdc.mintTo(alice, 4_000_000n);
+            await wusdc.increaseAllowance(alice, depositoryAddress, 4_000_000n);
+            const evmRecipient = new Uint8Array(32);
+            for (let i = 12; i < 32; i++) evmRecipient[i] = 0xab;
+            setSender(alice);
+            await Assert.expect(async () => {
+                await depository.lockForBridge(
+                    0xbadf100dn, wusdcAddress, 1_000_000n, evmRecipient, 1,
+                );
+            }).toThrow();
+        });
+    });

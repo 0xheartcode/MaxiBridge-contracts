@@ -2,16 +2,18 @@
  * BridgeDepository.confirmBurn — M-of-N attestation tests (PR γ.2b).
  *
  * Coverage:
- *   ✓ confirmBurn happy path with valid M-of-N sigs increments mode-1
- *     inventory by releasedAmount
+ *   ✓ confirmBurn mode-1 happy path is a pure attestation — valid M-of-N
+ *     sigs set the replay guard but do NOT mutate flow inventory (#44 —
+ *     the mode-1 ledger is owned by lockForBridge / claimReleaseWithVoucher)
  *   ✓ confirmBurn replay reverts (same depositId twice)
  *   ✓ confirmBurn with stale signerEpoch reverts
  *   ✓ confirmBurn with bad attestation length (≠ 252) reverts
  *   ✓ confirmBurn unknown flowId reverts
  *   ✓ confirmBurn on draining flow allowed (mode 1 — exit path)
  *   ✓ confirmBurn on inactive (paused) flow reverts
- *   ✓ confirmBurn → claimReleaseWithVoucher round trip succeeds end-to-end
- *     for mode 1
+ *
+ * The mode-1 lockForBridge → claimReleaseWithVoucher round trip lives in
+ * flow-consumption.ts (confirmBurn no longer provisions mode-1 inventory).
  *
  * Note: tests use M=N=1 envelopes. Multi-signer envelopes are exercised in
  * the existing `bridge.ts` claimMintWithVoucher tests via packSigBlobMulti;
@@ -312,7 +314,12 @@ await opnet('BridgeDepository.confirmBurn — happy path + replay + epoch + leng
 
         vm.afterEach(() => dispose(setup));
 
-        await vm.it('mode-1 happy path increments inventory by releasedAmount', async () => {
+        await vm.it('mode-1 happy path is attestation-only — inventory unchanged', async () => {
+            // #44 — confirmBurn for a mode-1 flow is a pure, replay-guarded
+            // attestation. It MUST NOT touch flow inventory: the mode-1
+            // ledger is produced by lockForBridge and consumed by
+            // claimReleaseWithVoucher. A pre-#44 revision incremented here,
+            // double-counting against lockForBridge.
             const flowId = await registerFlow(setup, {
                 mode: 1n,
                 sourceBridgeAddr: releaseSrcBridge,
@@ -331,13 +338,11 @@ await opnet('BridgeDepository.confirmBurn — happy path + replay + epoch + leng
             setSender(alice);
             await setup.depository.confirmBurn(depositId, preimage, sig);
 
-            // Flow inventory should now equal releasedAmount.
+            // Flow inventory must remain ZERO — confirmBurn mode-1 is
+            // attestation-only. Layout index 16 = inventory.
             const flow = await setup.depository.getFlow(flowId);
-            // Layout: [mode, status, chainId, evmBridge, evmToken, evmDecimals,
-            //  opnetBridge, opnetToken, opnetDecimals, feeBps, minFee,
-            //  minAmount, cap, dailyLimit, mintedToday, lastWindowStart,
-            //  inventory, tipCapBps]
-            Assert.expect(flow[16]!).toEqual(releasedAmount);
+            Assert.expect(flow[16]!).toEqual(0n);
+            // The replay guard is still armed.
             Assert.expect(await setup.depository.isBurnConfirmed(flowId, depositId, 0n, 0n)).toEqual(true);
         });
 
@@ -528,132 +533,5 @@ await opnet('BridgeDepository.confirmBurn — flow status: draining + paused',
             await Assert.expect(async () => {
                 await setup.depository.confirmBurn(depositId, preimage, sig);
             }).toThrow();
-        });
-    });
-
-await opnet('BridgeDepository.confirmBurn → claimReleaseWithVoucher round trip (mode-1)',
-    async (vm: OPNetUnit) => {
-        let setup: Setup;
-        let releaseSrcBridge: Address;
-        let releaseSrcToken: Address;
-        let mintSrcBridge: Address;
-        let mintSrcToken: Address;
-
-        vm.beforeEach(async () => {
-            Blockchain.dispose();
-            Blockchain.clearContracts();
-            await Blockchain.init();
-            setSender(deployer);
-            setup = await setupContracts();
-            releaseSrcBridge = Blockchain.generateRandomAddress();
-            releaseSrcToken = Blockchain.generateRandomAddress();
-            mintSrcBridge = Blockchain.generateRandomAddress();
-            mintSrcToken = Blockchain.generateRandomAddress();
-        });
-
-        vm.afterEach(() => dispose(setup));
-
-        await vm.it('confirmBurn provisions inventory; release then pays out', async () => {
-            // Step 1: pre-fund depository with wUSDC balance via a mode-0
-            // mint voucher addressed to depository itself. Mode-0 flow.
-            const mintFlowId = await setup.depository.addFlow({
-                mode: 0n,
-                chainId: ETH_CHAIN_ID,
-                evmBridge: evmAddrRightPadToBigInt(mintSrcBridge),
-                evmToken: evmAddrRightPadToBigInt(mintSrcToken),
-                evmDecimals: 6n,
-                opnetBridge: opnetAddrToBigInt(setup.depositoryAddress),
-                opnetToken: opnetAddrToBigInt(setup.wusdcAddress),
-                opnetDecimals: 6n,
-                feeBps: 0n,
-                minFee: 0n,
-                minAmount: 0n,
-                cap: 100_000_000_000n,
-                dailyLimit: 50_000_000_000n,
-                tipCapBps: 0n,
-            });
-            void mintFlowId; // assertion not needed, just ensures registration.
-
-            const preFundAmount = 5_000_000n;
-            const mintFields: VoucherFields = {
-                contractSelf: setup.depositoryAddress,
-                recipient: setup.depositoryAddress,
-                sourceBridgeAddr: mintSrcBridge,
-                sourceTokenAddr: mintSrcToken,
-                sourceTxHash: 0xa11ce11n,
-                sourceLogIndex: 0,
-                wrappedToken: setup.wusdcAddress,
-                grossAmount: preFundAmount,
-                feeAmount: 0n,
-                netAmount: preFundAmount,
-                voucherId: 0xa01n,
-            };
-            const mv = buildVoucher(mintFields);
-            setSender(setup.depositoryAddress);
-            await setup.depository.claimMintWithVoucher(
-                mv.preimage,
-                signVoucher(setup.signerWallet, mv.hash),
-            );
-
-            // Step 2: flip wusdc → mode 1 (INVERSE_WRAPPED).
-            setSender(deployer);
-            await setup.depository.setTokenMode(
-                setup.wusdcAddress,
-                1n,
-                0xc0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0fen,
-            );
-
-            // Step 3: register a mode-1 release flow.
-            const releaseFlowId = await registerFlow(setup, {
-                mode: 1n,
-                sourceBridgeAddr: releaseSrcBridge,
-                sourceTokenAddr: releaseSrcToken,
-            });
-
-            // Step 4: confirmBurn provisions inventory.
-            const depositId = 0xc01n;
-            const releasedAmount = 2_000_000n;
-            const att = buildAttestation({
-                contractSelf: setup.depositoryAddress,
-                flowId: releaseFlowId,
-                depositId,
-                releasedAmount,
-            });
-            setSender(alice);
-            await setup.depository.confirmBurn(
-                depositId,
-                att.preimage,
-                signAttestation(setup.signerWallet, att.hash),
-            );
-
-            const flowAfter = await setup.depository.getFlow(releaseFlowId);
-            Assert.expect(flowAfter[16]!).toEqual(releasedAmount);
-
-            // Step 5: claim the release with a voucher whose grossAmount
-            // ≤ inventory.
-            const releaseFields: VoucherFields = {
-                contractSelf: setup.depositoryAddress,
-                selector: CLAIM_RELEASE_WITH_VOUCHER_SELECTOR,
-                recipient: alice,
-                sourceBridgeAddr: releaseSrcBridge,
-                sourceTokenAddr: releaseSrcToken,
-                sourceTxHash: 0xfeed02n,
-                sourceLogIndex: 0,
-                wrappedToken: setup.wusdcAddress,
-                grossAmount: 1_000_000n,
-                feeAmount: 5_000n,
-                netAmount: 995_000n,
-                voucherId: 0xc11n,
-            };
-            const rv = buildVoucher(releaseFields);
-            setSender(alice);
-            await setup.depository.claimReleaseWithVoucher(
-                rv.preimage,
-                signVoucher(setup.signerWallet, rv.hash),
-            );
-
-            // Inventory should have decreased by grossAmount.
-            const flowFinal = await setup.depository.getFlow(releaseFlowId);
-            Assert.expect(flowFinal[16]!).toEqual(releasedAmount - 1_000_000n);
         });
     });
