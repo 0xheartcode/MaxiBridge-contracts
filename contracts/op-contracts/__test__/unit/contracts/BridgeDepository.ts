@@ -610,10 +610,18 @@ export class BridgeDepository extends ContractRuntime {
         await this.getResponse(w.getBuffer());
     }
 
-    public async isBurnConfirmed(depositId: bigint): Promise<boolean> {
+    public async isBurnConfirmed(
+        flowId: bigint,
+        depositId: bigint,
+        evmTxHash: bigint,
+        evmLogIndex: bigint,
+    ): Promise<boolean> {
         const w = new BinaryWriter();
         w.writeSelector(this.isBurnConfirmedSelector);
+        w.writeU256(flowId);
         w.writeU256(depositId);
+        w.writeU256(evmTxHash);
+        w.writeU256(evmLogIndex);
         const r = await this.getResponse(w.getBuffer());
         return r.readBoolean();
     }

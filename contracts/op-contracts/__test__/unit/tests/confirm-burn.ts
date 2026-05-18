@@ -338,7 +338,7 @@ await opnet('BridgeDepository.confirmBurn — happy path + replay + epoch + leng
             //  minAmount, cap, dailyLimit, mintedToday, lastWindowStart,
             //  inventory, tipCapBps]
             Assert.expect(flow[16]!).toEqual(releasedAmount);
-            Assert.expect(await setup.depository.isBurnConfirmed(depositId)).toEqual(true);
+            Assert.expect(await setup.depository.isBurnConfirmed(flowId, depositId, 0n, 0n)).toEqual(true);
         });
 
         await vm.it('replay reverts (same depositId twice)', async () => {
@@ -362,6 +362,47 @@ await opnet('BridgeDepository.confirmBurn — happy path + replay + epoch + leng
             await Assert.expect(async () => {
                 await setup.depository.confirmBurn(depositId, preimage, sig);
             }).toThrow();
+        });
+
+        await vm.it('#45: same depositId across different flows does NOT collide', async () => {
+            // MED-002 regression — the replay guard keys on the full
+            // source-event identity, so two legitimate burns that share a
+            // local depositId but come from different flows both confirm.
+            const flowA = await registerFlow(setup, {
+                mode: 1n,
+                sourceBridgeAddr: releaseSrcBridge,
+                sourceTokenAddr: releaseSrcToken,
+            });
+            const flowB = await registerFlow(setup, {
+                mode: 1n,
+                sourceBridgeAddr: Blockchain.generateRandomAddress(),
+                sourceTokenAddr: Blockchain.generateRandomAddress(),
+            });
+            const depositId = 0xb09n;
+
+            const a = buildAttestation({
+                contractSelf: setup.depositoryAddress,
+                flowId: flowA,
+                depositId,
+                releasedAmount: 1_000_000n,
+            });
+            const b = buildAttestation({
+                contractSelf: setup.depositoryAddress,
+                flowId: flowB,
+                depositId,
+                releasedAmount: 1_000_000n,
+            });
+            setSender(alice);
+            await setup.depository.confirmBurn(
+                depositId, a.preimage, signAttestation(setup.signerWallet, a.hash),
+            );
+            // Same depositId, different flow — must NOT be blocked.
+            await setup.depository.confirmBurn(
+                depositId, b.preimage, signAttestation(setup.signerWallet, b.hash),
+            );
+
+            Assert.expect(await setup.depository.isBurnConfirmed(flowA, depositId, 0n, 0n)).toEqual(true);
+            Assert.expect(await setup.depository.isBurnConfirmed(flowB, depositId, 0n, 0n)).toEqual(true);
         });
 
         await vm.it('stale signerEpoch reverts', async () => {
@@ -463,7 +504,7 @@ await opnet('BridgeDepository.confirmBurn — flow status: draining + paused',
             setSender(alice);
             await setup.depository.confirmBurn(depositId, preimage, sig);
 
-            Assert.expect(await setup.depository.isBurnConfirmed(depositId)).toEqual(true);
+            Assert.expect(await setup.depository.isBurnConfirmed(flowId, depositId, 0n, 0n)).toEqual(true);
         });
 
         await vm.it('on inactive (paused) flow reverts', async () => {

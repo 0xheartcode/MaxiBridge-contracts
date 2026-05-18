@@ -1336,6 +1336,18 @@ export class BridgeDepository extends ReentrancyGuard {
             }
         }
 
+        // #46 — balance-delta accounting. The EVM side (BridgeEscrow.lock)
+        // measures what the bridge actually received; mirror it here so a
+        // non-standard OP20 (fee-on-transfer / rebasing) whitelisted in a
+        // future pooled flow cannot make the bridge over-account. We
+        // emit/sign the received delta, never the user-supplied `amount`.
+        const balOfSelector: u32 = encodeSelector('balanceOf(address)');
+
+        const balBeforeW = new BytesWriter(4 + ADDRESS_BYTE_LENGTH);
+        balBeforeW.writeSelector(balOfSelector);
+        balBeforeW.writeAddress(this.address);
+        const balBefore: u256 = Blockchain.call(canonical, balBeforeW).data.readU256();
+
         // Pull `amount` of canonical OP20 from the user via OP20.transferFrom.
         // The caller (user) must have approved the BridgeDepository first.
         const transferFromSelector: u32 = encodeSelector('transferFrom(address,address,uint256)');
@@ -1346,6 +1358,15 @@ export class BridgeDepository extends ReentrancyGuard {
         tfWriter.writeU256(amount);
         Blockchain.call(canonical, tfWriter);
 
+        const balAfterW = new BytesWriter(4 + ADDRESS_BYTE_LENGTH);
+        balAfterW.writeSelector(balOfSelector);
+        balAfterW.writeAddress(this.address);
+        const balAfter: u256 = Blockchain.call(canonical, balAfterW).data.readU256();
+
+        // SafeMath.sub reverts if the balance somehow decreased.
+        const received: u256 = SafeMath.sub(balAfter, balBefore);
+        if (received.isZero()) throw new Revert('BridgeDepository: nothing received');
+
         const nextNonce: u256 = SafeMath.add(this._lockNonce.value, u256.One);
         this._lockNonce.value = nextNonce;
 
@@ -1355,7 +1376,7 @@ export class BridgeDepository extends ReentrancyGuard {
         this.emitEvent(new LockedForBridge(
             canonical,
             Blockchain.tx.sender,
-            amount,
+            received,
             evmRecipU256,
             destChainId,
             nextNonce,
@@ -1893,7 +1914,10 @@ export class BridgeDepository extends ReentrancyGuard {
         if (!u256.eq(parsedDepositId, depositId)) {
             throw new Revert('BridgeDepository: depositId mismatch');
         }
-        // evmTxHash @ 132, evmLogIndex @ 164 — opaque audit fields.
+        // #45 — evmTxHash @ 132 + evmLogIndex @ 164 are now folded into the
+        // replay key (full source-event identity), not just audit fields.
+        const evmTxHash: u256 = readU256BE(attestation, 132);
+        const evmLogIndex: u32 = readU32BE(attestation, 164);
         const releasedAmount: u256 = readU256BE(attestation, 168);
         if (releasedAmount.isZero()) {
             throw new Revert('BridgeDepository: zero releasedAmount');
@@ -1905,8 +1929,11 @@ export class BridgeDepository extends ReentrancyGuard {
         }
         // relayerTip @ 236 — parsed but not paid in v1.
 
-        // Replay guard.
-        if (!this._confirmedBurns.get(depositId).isZero()) {
+        // Replay guard — MED-002 / #45: keyed by the full source-event
+        // identity, not depositId alone, so two legitimate burns from
+        // different flows or future bridges cannot collide.
+        const replayKey: u256 = buildBurnReplayKey(flowId, depositId, evmTxHash, evmLogIndex);
+        if (!this._confirmedBurns.get(replayKey).isZero()) {
             throw new Revert('BridgeDepository: burn already confirmed');
         }
 
@@ -1944,7 +1971,7 @@ export class BridgeDepository extends ReentrancyGuard {
         }
 
         // CEI — mark replay before any further work (no external call here).
-        this._confirmedBurns.set(depositId, u256.One);
+        this._confirmedBurns.set(replayKey, u256.One);
 
         this.emitEvent(new BurnConfirmed(flowId, depositId, releasedAmount, Blockchain.tx.sender));
         return new BytesWriter(0);
@@ -1953,9 +1980,16 @@ export class BridgeDepository extends ReentrancyGuard {
     @view
     @returns({ name: 'confirmed', type: ABIDataTypes.BOOL })
     public isBurnConfirmed(calldata: Calldata): BytesWriter {
+        // #45 — the replay guard is keyed by the full source-event
+        // identity, so the view takes the same tuple. evmLogIndex is
+        // passed as a u256 on the wire and narrowed.
+        const flowId: u256 = calldata.readU256();
         const depositId: u256 = calldata.readU256();
+        const evmTxHash: u256 = calldata.readU256();
+        const evmLogIndex: u32 = calldata.readU256().toU32();
+        const key: u256 = buildBurnReplayKey(flowId, depositId, evmTxHash, evmLogIndex);
         const r = new BytesWriter(1);
-        r.writeBoolean(!this._confirmedBurns.get(depositId).isZero());
+        r.writeBoolean(!this._confirmedBurns.get(key).isZero());
         return r;
     }
 
@@ -2123,6 +2157,7 @@ export class BridgeDepository extends ReentrancyGuard {
         { name: 'mldsaSig', type: ABIDataTypes.BYTES },
     )
     @emit('MintedFromVoucher', 'RelayerTipPaid')
+    @nonReentrant
     public claimMintWithVoucher(calldata: Calldata): BytesWriter {
         this.requireNotPaused();
 
@@ -2584,6 +2619,33 @@ function buildSourceEventKey(
     buf.writeAddress(sourceTokenAddr);
     buf.writeU256(sourceTxHash);
     buf.writeU32(sourceLogIndex);
+    return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
+}
+
+/**
+ * Composite-key hash for the confirmBurn replay guard.
+ *
+ * MED-002 / #45 — `_confirmedBurns` was keyed by `depositId` alone, which
+ * is only globally unique while there is a single EVM bridge with one
+ * nonce counter. A second EVM bridge instance, or per-flow counters, would
+ * let two legitimate burns collide on `depositId` and the first
+ * confirmation would permanently block the second. Keying by the full
+ * source-event identity (flowId, depositId, evmTxHash, evmLogIndex) is
+ * collision-proof. Mirrors `buildSourceEventKey`.
+ *
+ * Layout fed to sha256: 32 + 32 + 32 + 4 = 100 bytes.
+ */
+function buildBurnReplayKey(
+    flowId: u256,
+    depositId: u256,
+    evmTxHash: u256,
+    evmLogIndex: u32,
+): u256 {
+    const buf = new BytesWriter(32 + 32 + 32 + 4);
+    buf.writeU256(flowId);
+    buf.writeU256(depositId);
+    buf.writeU256(evmTxHash);
+    buf.writeU32(evmLogIndex);
     return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
 }
 
