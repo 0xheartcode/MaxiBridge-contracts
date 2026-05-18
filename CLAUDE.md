@@ -242,7 +242,7 @@ npm run integration:drills             # security drills (replay, rotation, reor
 8. **`emergencyWithdraw` on `BridgeEscrow`** — Phase 1 hardened. Signature is now `(address token, uint256 amount)`; gated `onlyGuardian + whenPaused + nonReentrant`; drains exclusively to the set-once `treasury` slot. Owner cannot drain unilaterally; the pauser path must be exercised first.
 9. **M-of-N signer set on `BridgeEscrow`** (Phase 1.4). `mapping(address => bool) isSigner` + `signerCount` + `signerThreshold`. `claim()` (and `claimMintWrapped()`) require a **length-prefixed M-of-N signature blob** `[uint8 numSigs][sig_0(65)][sig_1(65)]…` — there is **NO legacy bare-65-byte path**. The deployed `BridgeEscrow` is *v2 — no legacy*: an unwrapped 65-byte sig reverts `InvalidSigBlob()`. A 1-of-1 deploy uses `numSigs=1` → a **66-byte blob**. The server wraps every ECDSA signature through `toClaimSigBlob()` (`server/src/voucher/evm-message.ts`) before it is stored as `ecdsa_signature` / sent to the contract. Distinct-signer enforced; `cancelledVouchers[opnetNonce]` blocks Tier-3 cancelled vouchers. Set-once `treasury` and `guardian` complete the role lattice.
 10. **Voucher cancellation on `BridgeDepository`** (Phase 1.6). `cancelVoucher(uint256)` (governor-only, idempotent) + `_cancelledVouchers` map; `claimMintWithVoucher` rejects cancelled vouchers before the standard replay guard. Mirrors EVM `BridgeEscrow.cancelVoucher(bytes32)`.
-11. **Deterministic CREATE2 deploy** (Phase 2.1). `scripts/src/deploy/evm-deploy-create2.ts` deploys the ERC1967 proxy via the canonical Arachnid factory `0x4e59b44847b379578588920cA78FbF26c0B4956C` with salt `keccak256("opnet-bridge-escrow-v1")`. Same proxy address on every EVM chain.
+11. **Deterministic CREATE2 deploy** (Phase 2.1). `scripts/src/deploy/evm-deploy-create2.ts` deploys **both** the implementation and the ERC1967 proxy via the canonical Arachnid factory `0x4e59b44847b379578588920cA78FbF26c0B4956C` (proxy salt `keccak256("opnet-bridge-escrow-v1")`, impl salt `keccak256("opnet-bridge-escrow-impl-v1")`). The impl has no constructor args so its address is chain-stable — required because the impl address is embedded in the proxy initcode. **Caveat:** the proxy's `initData` calls `initialize(...)` whose args include the per-chain USDC/USDT addresses, so the proxy address is identical only across chains with matching `initialize` args; full cross-chain parity needs the token list moved out of `initialize` (tracked with multi-chain work, #33).
 12. **Independent watchdog** (Phase 2.3). `bridge-watchdog/` is a separate Node service that polls EVM escrow balances + OPNet wrapped totalSupply directly, raises Slack/Telegram alerts, and can fire `/api/admin/pause` on critical divergence. Hard-clamps crit-bps to `[10, 500]` so a hostile config cannot disable detection.
 
 ---
@@ -317,7 +317,7 @@ on-chain bricks every voucher:
 | Role | Env vars | What it signs | Authority |
 |------|---------|---------------|-----------|
 | **Deployer / Governor** | `OPNET_DEPLOYER_WIF` / `OPNET_DEPLOYER_MLDSA` | The Bitcoin tx that carries OPNet calldata (deploy, wire, rotateSigner, pause/unpause). Its identity is `msg.sender` inside the contract, which `onlyGovernor` methods check against. | `BridgeDepository._governor` |
-| **Voucher signer** | `MLDSA_SIGNER_WIF` / `MLDSA_SIGNER_KEY` | 460-byte ML-DSA voucher preimages (off-chain). Its **pubkey hash** is stored at `BridgeDepository._bridgeSigners[epoch]`. The contract verifies every claim's ML-DSA blob against this hash. | Registered at epoch via `setInitialSigner` / `rotateSigner` |
+| **Voucher signer** | `MLDSA_SIGNER_WIF` / `MLDSA_SIGNER_KEY` | 508-byte ML-DSA voucher preimages (off-chain). Its **pubkey hash** is stored at `BridgeDepository._bridgeSigners[epoch]`. The contract verifies every claim's ML-DSA blob against this hash. | Registered at epoch via `setInitialSigner` / `rotateSigner` |
 
 ### The failure mode we already hit on mainnet
 
@@ -372,26 +372,33 @@ Rotating the signer off a compromised or lost key:
 
 ---
 
-## 7. ML-DSA signature blob format (CRITICAL)
+## 7. ML-DSA M-of-N signature blob format (CRITICAL)
 
-The `mldsaSig` arg passed to `claimMintWithVoucher(voucher, mldsaSig)` is **NOT** a raw ML-DSA signature. It is a prefix-packed blob so the contract can recover which signer pubkey produced the sig and verify the pubkey is the currently-allowed signer for the voucher's epoch:
+The `mldsaSig` arg passed to `claimMintWithVoucher(voucher, mldsaSig)` is **NOT** a raw ML-DSA signature. It is an **M-of-N array blob** — `_verifyMofN` recovers each signer pubkey, checks each is an authorized signer at the voucher's epoch, and counts distinct valid sigs against the threshold:
 
 ```
-[pubLen : u32 big-endian (4B)] [signerPubKey : bytes] [raw ML-DSA sig : bytes]
+[u32 BE numSigs]
+repeat numSigs times:
+  [u32 BE pubLen] [signerPubKey : pubLen bytes] [u32 BE sigLen] [raw ML-DSA sig : sigLen bytes]
 ```
 
-For ML-DSA LEVEL2: pubKey = 1312 bytes, sig = 2420 bytes, pubLen prefix = 4 bytes → **total blob = 3736 bytes**.
+For ML-DSA LEVEL2: pubKey = 1312 bytes, sig = 2420 bytes. A single-sig (1-of-1) blob is `4 + (4 + 1312 + 4 + 2420)` = **3744 bytes**. At numSigs=3 ≈ 11.2 KB.
 
-Contract verification flow:
-1. Assert `sig.length == 3736`
-2. Read `pubLen` from first 4 bytes; assert `pubLen == 1312`
-3. Extract `signerPubKey = blob[4 : 4+pubLen]`
-4. Compute `pubKeyHash = sha256(signerPubKey)`
-5. Look up `_bridgeSigners[voucher.signerEpoch]` and verify == `pubKeyHash` (else reject)
-6. Extract `rawSig = blob[4+pubLen : end]`
-7. Verify `Blockchain.verifyMLDSASignature(LEVEL2, signerPubKey, rawSig, sha256(voucher))`
+> **Legacy format removed.** The pre-M-of-N fixed 3736-byte blob
+> `[u32 pubLen][pubKey][rawSig]` is **NOT accepted** by the deployed
+> contract — its first 4 bytes parse as `numSigs` and the contract
+> reverts `too many sigs`. Server packers MUST use the M-of-N encoder
+> (`server/src/voucher/m-of-n.ts:packOpnetMofN`); a stale local packer
+> bricking pending vouchers was audit finding HIGH-003.
 
-Server MUST pack in exactly this order. Frontend passes the blob through unchanged. Reference: `bridge/contracts/op-contracts/__test__/unit/tests/bridge.ts:packSigBlob`.
+Contract verification flow (`_verifyMofN`), per signer entry:
+1. Read `pubLen`; extract `signerPubKey`; read `sigLen`; extract `rawSig`.
+2. Compute `pubKeyHash = sha256(signerPubKey)`.
+3. Verify `pubKeyHash` is in the authorized signer set at `voucher.signerEpoch` (else reject).
+4. Verify the ML-DSA sig over `sha256(voucher)`; reject duplicate signers.
+5. After all entries: assert distinct-valid count `>= requiredSignatures`.
+
+Server MUST pack via `packOpnetMofN`. Frontend passes the blob through unchanged. Reference: `server/src/voucher/m-of-n.ts` + `contracts/op-contracts/__test__/unit/tests/bridge.ts`.
 
 ---
 
@@ -432,7 +439,7 @@ Server MUST pack in exactly this order. Frontend passes the blob through unchang
 | `confirmBurn` (PR γ.2b) | `confirmBurn(uint256,bytes,bytes)` | `0x9cffeea6` |
 | `migrateSignerSet` (PR γ.2b) | `migrateSignerSet(bytes)` | `0x22f63062` |
 | `governorProvisionFlowInventory` (PR γ.2b) | `governorProvisionFlowInventory(uint256,uint256)` | `0x83734911` |
-| `isBurnConfirmed` (view, PR γ.2b) | `isBurnConfirmed(uint256)` | `0xc4282d4c` |
+| `isBurnConfirmed` (view, PR γ.2b; widened by #45) | `isBurnConfirmed(uint256,uint256,uint256,uint256)` — (flowId, depositId, evmTxHash, evmLogIndex) | regenerated on rebuild |
 
 **BurnAttestation preimage (PR γ.2b — 252 bytes):**
 ```
@@ -459,7 +466,7 @@ Inventory effects: mode 1 → flow.inventory++ (provisions OPNet pool from EVM-s
 
 **`burnForRelease.ethRecipient` uses LEFT-PAD (LOW 20 bytes).** `ethRecipient` is a fixed 32-byte `bytes32`. For EVM destinations (chainId 1 / 11155111), the contract enforces upper 12 bytes are zero + lower 20 = ETH address. Callers left-pad: `padStart(64, '0')`. **Never `padEnd`** — puts the address in bytes 0..19 and reverts.
 
-**Voucher preimage `sourceBridgeAddr` / `sourceTokenAddr` use RIGHT-PAD (HIGH 20 bytes).** Inside the 460-byte preimage, EVM bridge + token addresses are encoded as `ethAddr20 ++ zeroPad12` (address in bytes 0..19, zeros in bytes 20..31). OPPOSITE convention from `ethRecipient` — intentional because these are opaque binding fields the contract never needs to recover the 20-byte EVM address from. To extract an EVM address from a preimage field, slice `[0..20]`, NOT `[12..32]`.
+**Voucher preimage `sourceBridgeAddr` / `sourceTokenAddr` use RIGHT-PAD (HIGH 20 bytes).** Inside the 508-byte preimage, EVM bridge + token addresses are encoded as `ethAddr20 ++ zeroPad12` (address in bytes 0..19, zeros in bytes 20..31). OPPOSITE convention from `ethRecipient` — intentional because these are opaque binding fields the contract never needs to recover the 20-byte EVM address from. To extract an EVM address from a preimage field, slice `[0..20]`, NOT `[12..32]`.
 
 ### `BurnedForRelease` event data layout (132 bytes total)
 
@@ -549,7 +556,7 @@ Server scanner parses `netAmount` at offset 196, `voucherId` at offset 228. **Of
 - No `while` loops, no map-key iteration
 - **Never import** `@method`/`@view`/`ABIDataTypes` — compile-time globals
 - Address comparisons: `.equals()` / `.isZero()` NEVER `===` / `!==` / `=== Address.zero()` — JS reference equality does not work for Address objects
-- ML-DSA blob length check BEFORE slicing: `if (sig.length != 3736) revert`, `if (pubLen != 1312) revert`
+- ML-DSA M-of-N blob: bounds-check `numSigs` (reject over the cap) and each `pubLen` / `sigLen` BEFORE slicing — never assert a fixed total length (the blob is variable-size, see §7)
 
 ### EVM contracts
 - `SafeERC20` for every token call (USDT doesn't return `bool`)
@@ -609,7 +616,7 @@ Server scanner parses `netAmount` at offset 196, `voucherId` at offset 228. **Of
 | Key | Purpose | v1 dev | Production (Phase 3) |
 |-----|---------|--------|---------------------|
 | EVM ECDSA signer | Signs EIP-712 `ReleaseIntent` for `BridgeEscrow.claim` | Hot wallet from `cast wallet new` (or deployer), private key in root `.env` | AWS KMS, revocable in seconds |
-| OPNet ML-DSA signer | Signs 460-byte voucher preimage for `claimMintWithVoucher` | `Wallet.fromWif + MLDSA`, keys in root `.env` | Vault transit / custom KMS sign service |
+| OPNet ML-DSA signer | Signs 508-byte voucher preimage for `claimMintWithVoucher` | `Wallet.fromWif + MLDSA`, keys in root `.env` | Vault transit / custom KMS sign service |
 
 Signer modules behind interfaces (`EcdsaSigner.sign(digest)`, `MldsaSigner.sign(preimage)`) — drop-in swap for KMS in Phase 3.
 
