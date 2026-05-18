@@ -8,6 +8,7 @@ import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Pau
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {EIP712Upgradeable} from "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
@@ -529,6 +530,7 @@ contract BridgeEscrow is
     error DailyLimitExceeded();
     error InsufficientFlowInventory();
     error AmountExceedsGross();         // MED-001 — claim() intent.amount > grossSrcAmount
+    error PermitFailed();               // lockWithPermit — permit reverted and allowance still short
 
     // ─── PR γ.2c — refund lifecycle errors ─────────────────────────────
     error LockNotFound();
@@ -597,7 +599,7 @@ contract BridgeEscrow is
         bytes32 opnetRecipient,
         bytes32 flowId
     )
-        external
+        public
         whenNotPaused
         nonReentrant
         returns (uint256 depositNonce_, uint256 amountReceived_)
@@ -643,6 +645,40 @@ contract BridgeEscrow is
 
         emit Locked(token, msg.sender, amount, amountReceived_, opnetRecipient, depositNonce_);
         emit LockedToFlow(flowId, msg.sender, token, amountReceived_);
+    }
+
+    /// @notice EIP-2612 one-transaction bridging: consume an off-chain
+    ///         `permit` signature to grant the allowance, then `lock` in
+    ///         the same tx. For permit-capable tokens (USDC) this collapses
+    ///         the usual `approve` + `lock` into a single transaction.
+    ///         USDT has no EIP-2612 — callers keep the plain `lock` path.
+    /// @dev    Pause / reentrancy / flow gating are all delegated to
+    ///         `lock` (now `public`, so this internal call preserves
+    ///         `msg.sender` = the depositor for the balance-delta pull).
+    ///         `permit` is wrapped in try/catch: the signature is public
+    ///         calldata and can be front-run, which would consume the
+    ///         nonce and revert a naive `permit`. If that happens we still
+    ///         proceed as long as the allowance is already sufficient.
+    function lockWithPermit(
+        address token,
+        uint256 amount,
+        bytes32 opnetRecipient,
+        bytes32 flowId,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external returns (uint256 depositNonce_, uint256 amountReceived_) {
+        try IERC20Permit(token).permit(msg.sender, address(this), amount, deadline, v, r, s) {
+            // permit applied
+        } catch {
+            // Front-run or already-applied permit — tolerate it as long as
+            // the resulting allowance covers the lock.
+            if (IERC20(token).allowance(msg.sender, address(this)) < amount) {
+                revert PermitFailed();
+            }
+        }
+        return lock(token, amount, opnetRecipient, flowId);
     }
 
     // ---------------------------------------------------------------------
