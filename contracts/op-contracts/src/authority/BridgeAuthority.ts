@@ -8,7 +8,6 @@ import {
 import { ReentrancyGuard } from '@btc-vision/btc-runtime/runtime/contracts/ReentrancyGuard';
 import { StoredAddress } from '@btc-vision/btc-runtime/runtime/storage/StoredAddress';
 import { StoredU256 } from '@btc-vision/btc-runtime/runtime/storage/StoredU256';
-import { StoredBoolean } from '@btc-vision/btc-runtime/runtime/storage/StoredBoolean';
 import { ADDRESS_BYTE_LENGTH } from '@btc-vision/btc-runtime/runtime/utils';
 import { EMPTY_POINTER } from '@btc-vision/btc-runtime/runtime/math/bytes';
 import { Revert } from '@btc-vision/btc-runtime/runtime/types/Revert';
@@ -39,10 +38,12 @@ import {
  * fire-and-forget at the return-value level but propagate reverts — if any
  * dependent rejects the call the whole transaction reverts.
  *
- * Bootstrap-skip pattern: the FIRST call to `pushGovernor` / `pushGuardian`
- * succeeds without onlyGovernor (the slot is zero so no one to gate on).
- * Subsequent calls require `tx.sender == _governor` — write-once flags
- * enforce that the bootstrap window is single-shot.
+ * Governor bootstrap: `onDeployment` seeds `_governor = tx.sender`, so the
+ * deployer is the first governor from block zero. `pushGovernor` /
+ * `pushGuardian` are therefore ALWAYS `onlyGovernor` — there is no
+ * unauthenticated bootstrap window (an open first call would let anyone
+ * front-run the deploy ceremony and seize the trust root). Handoff to a
+ * multi-key wallet happens via `pushGovernor`, signed by the deployer.
  *
  * STORAGE IS APPEND-ONLY. `_storageVersion` is declared FIRST so its slot id
  * is pinned across upgrades. Every subsequent field may never be reordered,
@@ -60,10 +61,6 @@ export class BridgeAuthority extends ReentrancyGuard {
     // ─── Roles ───────────────────────────────────────────────────────────
     private _governor: StoredAddress = new StoredAddress(Blockchain.nextPointer);
     private _guardian: StoredAddress = new StoredAddress(Blockchain.nextPointer);
-
-    // ─── Bootstrap-skip flags (write-once) ───────────────────────────────
-    private _governorSetOnce: StoredBoolean = new StoredBoolean(Blockchain.nextPointer, false);
-    private _guardianSetOnce: StoredBoolean = new StoredBoolean(Blockchain.nextPointer, false);
 
     // ─── Managed contract addresses (push targets) ───────────────────────
     private _depository: StoredAddress = new StoredAddress(Blockchain.nextPointer);
@@ -153,26 +150,20 @@ export class BridgeAuthority extends ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * Set the governor. The FIRST call (when `_governorSetOnce == false`)
-     * succeeds without onlyGovernor — this is the bootstrap window so a
-     * deploy script can wire the governor in one tx without first owning
-     * the slot. After the first call the flag flips to true and every
-     * subsequent call is `onlyGovernor`.
+     * Set the governor. Always `onlyGovernor` — the deployer is seeded as
+     * governor in `onDeployment`, so there is no unauthenticated bootstrap
+     * call. Handoff to a multi-key wallet is signed by the current governor.
      */
     @method({ name: 'newGovernor', type: ABIDataTypes.ADDRESS })
     @emit('AuthorityGovernorUpdated')
     @nonReentrant
     public pushGovernor(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
         const newGovernor: Address = calldata.readAddress();
         if (newGovernor.isZero()) throw new Revert('BridgeAuthority: zero governor');
 
-        if (this._governorSetOnce.value) {
-            this.onlyGovernor();
-        }
-
         const old: Address = this._governor.value;
         this._governor.value = newGovernor;
-        this._governorSetOnce.value = true;
 
         // Push the new governor to the depository so its local `_governor`
         // slot stays in sync. The depository accepts the cascade via
@@ -193,25 +184,21 @@ export class BridgeAuthority extends ReentrancyGuard {
     }
 
     /**
-     * Set the guardian. Same bootstrap-skip pattern as pushGovernor: first
-     * call open, subsequent calls onlyGovernor. The guardian role is local
-     * to this contract — guardian membership doesn't need to push down to
-     * dependents (it's a check inside `pauseAll` / `unpauseAll`).
+     * Set the guardian. Always `onlyGovernor` — the governor (seeded at
+     * deployment) appoints the guardian. The guardian role is local to this
+     * contract — guardian membership doesn't need to push down to dependents
+     * (it's a check inside `pauseAll` / `unpauseAll`).
      */
     @method({ name: 'newGuardian', type: ABIDataTypes.ADDRESS })
     @emit('AuthorityGuardianUpdated')
     @nonReentrant
     public pushGuardian(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
         const newGuardian: Address = calldata.readAddress();
         if (newGuardian.isZero()) throw new Revert('BridgeAuthority: zero guardian');
 
-        if (this._guardianSetOnce.value) {
-            this.onlyGovernor();
-        }
-
         const old: Address = this._guardian.value;
         this._guardian.value = newGuardian;
-        this._guardianSetOnce.value = true;
         this.emitEvent(new AuthorityGuardianUpdated(old, newGuardian));
         return new BytesWriter(0);
     }

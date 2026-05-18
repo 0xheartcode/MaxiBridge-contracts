@@ -4,8 +4,8 @@
  * Covers:
  *   ✓ onDeployment seeds deployer as governor
  *   ✓ setManagedContracts / view chain
- *   ✓ pushGovernor bootstrap-skip → onlyGovernor flip
- *   ✓ pushGuardian bootstrap-skip → onlyGovernor flip
+ *   ✓ pushGovernor is governor-gated (no bootstrap front-run window)
+ *   ✓ pushGuardian is governor-gated (no bootstrap front-run window)
  *   ✓ pauseAll cascades pause to depository + wUSDC + wUSDT
  *   ✓ unpauseAll cascades unpause to all three
  *   ✓ unpauseAll is governor-only (guardian cannot unpause)
@@ -167,7 +167,7 @@ await opnet('BridgeAuthority — onDeployment seeds deployer as governor', async
 // 2. pushGovernor bootstrap-skip
 // ════════════════════════════════════════════════════════════════════════════
 
-await opnet('BridgeAuthority — pushGovernor bootstrap-skip + cascade', async (vm: OPNetUnit) => {
+await opnet('BridgeAuthority — pushGovernor is governor-gated + cascade', async (vm: OPNetUnit) => {
     let setup: AuthSetup;
 
     vm.beforeEach(async () => {
@@ -196,6 +196,18 @@ await opnet('BridgeAuthority — pushGovernor bootstrap-skip + cascade', async (
         // deploy wiring). See BridgeAuthority.pushGovernor for the rationale.
         Assert.expect((await setup.wusdc.governor()).equals(setup.authorityAddress)).toEqual(true);
         Assert.expect((await setup.wusdt.governor()).equals(setup.authorityAddress)).toEqual(true);
+    });
+
+    await vm.it('a non-governor cannot seize the role on the first call (no bootstrap front-run)', async () => {
+        // HIGH-004 regression: onDeployment seeds the deployer as governor,
+        // so there is NO open bootstrap window. bob is not the governor —
+        // the very first pushGovernor he attempts must revert.
+        setSender(bob);
+        await Assert.expect(async () => {
+            await setup.authority.pushGovernor(bob);
+        }).toThrow();
+        // Governor slot untouched — still the deployer.
+        Assert.expect((await setup.authority.governor()).equals(deployer)).toEqual(true);
     });
 
     await vm.it('second call enforces onlyGovernor', async () => {
@@ -230,7 +242,7 @@ await opnet('BridgeAuthority — pushGovernor bootstrap-skip + cascade', async (
 // 3. pushGuardian bootstrap-skip
 // ════════════════════════════════════════════════════════════════════════════
 
-await opnet('BridgeAuthority — pushGuardian bootstrap-skip', async (vm: OPNetUnit) => {
+await opnet('BridgeAuthority — pushGuardian is governor-gated', async (vm: OPNetUnit) => {
     let setup: AuthSetup;
 
     vm.beforeEach(async () => {
@@ -243,10 +255,21 @@ await opnet('BridgeAuthority — pushGuardian bootstrap-skip', async (vm: OPNetU
 
     vm.afterEach(() => dispose(setup));
 
-    await vm.it('first call sets guardian without onlyGovernor', async () => {
+    await vm.it('governor sets the initial guardian', async () => {
         setSender(deployer);
         await setup.authority.pushGuardian(alice);
         Assert.expect((await setup.authority.guardian()).equals(alice)).toEqual(true);
+    });
+
+    await vm.it('a non-governor cannot set the first guardian (no bootstrap front-run)', async () => {
+        // HIGH-004 regression: pushGuardian is always onlyGovernor. bob is
+        // neither governor nor guardian — his first attempt must revert.
+        setSender(bob);
+        await Assert.expect(async () => {
+            await setup.authority.pushGuardian(bob);
+        }).toThrow();
+        // bob did NOT seize the guardian slot.
+        Assert.expect((await setup.authority.guardian()).equals(bob)).toEqual(false);
     });
 
     await vm.it('second call requires onlyGovernor (alice cannot self-promote)', async () => {
