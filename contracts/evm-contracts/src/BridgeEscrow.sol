@@ -95,6 +95,25 @@ contract BridgeEscrow is
             "MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,bytes32 flowId)"
         );
 
+    /// @notice EIP-712 type for the M-of-N refund attestation. Authorizes
+    ///         `refundLockedDeposit` for ONE specific `depositNonce`. The
+    ///         bridge authority signs this only after confirming the OPNet
+    ///         voucher for that deposit was cancelled on `BridgeDepository`
+    ///         and can never mint.
+    /// @dev    CRIT-001 fix: a refund must be gated by a positive no-mint
+    ///         attestation, never by the mere absence of a refunded flag.
+    struct RefundAuthorization {
+        uint256 depositNonce;
+        bytes32 flowId;
+        uint32 signerEpoch;
+    }
+
+    /// @dev keccak256("RefundAuthorization(uint256 depositNonce,bytes32 flowId,uint32 signerEpoch)")
+    bytes32 public constant REFUND_AUTHORIZATION_TYPEHASH =
+        keccak256(
+            "RefundAuthorization(uint256 depositNonce,bytes32 flowId,uint32 signerEpoch)"
+        );
+
     /// @notice Token bridging mode — set per token at registration time.
     ///         Once set, can never be changed for that token (set-once).
     ///
@@ -162,14 +181,6 @@ contract BridgeEscrow is
     ///         Hard-coded so a hostile governor cannot disable rate
     ///         limiting by setting it absurdly long.
     uint64 public constant FLOW_WINDOW_DURATION = 86400;
-
-    /// @notice PR γ.2c — minimum elapsed time between a `lock` and the
-    ///         permissionless `refundLockedDeposit` escape hatch. 7 days.
-    ///         Hard-coded (not governor-settable) so a hostile governor
-    ///         cannot extend the window indefinitely and brick user
-    ///         refunds, and cannot shrink it to enable a refund + claim
-    ///         double-spend race against an in-flight voucher.
-    uint64 public constant REFUND_TIMEOUT = 7 days;
 
     /// @notice First-class object representing a single bridging route.
     ///         All fields except status / cap / dailyLimit / minAmount /
@@ -302,25 +313,42 @@ contract BridgeEscrow is
     ///         tag for cross-chain admin tooling.
     mapping(uint64 => bytes32[]) public flowsByEvmChain;
 
-    // ─── PR γ.2c — permissionless refund storage ────────────────────────
+    // ─── PR γ.2c — refund lifecycle storage ──────────────────────────────
+
+    /// @notice Lifecycle of a locked deposit. A refund is only possible
+    ///         from `Refundable`, which is reached EXCLUSIVELY via
+    ///         `markDepositRefundable` (an M-of-N no-mint attestation).
+    ///         `Locked` deposits are never refundable — that is what closes
+    ///         the CRIT-001 double-spend.
+    ///
+    ///         None       — slot never written (no such depositNonce)
+    ///         Locked     — lock() succeeded; NOT refundable
+    ///         Refundable — M-of-N attested the OPNet voucher was cancelled
+    ///         Refunded   — terminal; tokens returned to the depositor
+    enum DepositStatus {
+        None,
+        Locked,
+        Refundable,
+        Refunded
+    }
 
     /// @notice On-chain record of every successful `lock` call. Indexed by
-    ///         the per-deposit nonce returned by `lock`. Allows the
-    ///         original depositor to call `refundLockedDeposit` after
-    ///         `REFUND_TIMEOUT` has elapsed if the OPNet side never
-    ///         minted (signer offline, voucher invalidated by signer
-    ///         rotation, M-of-N never reached, etc.).
-    /// @dev    Layout: `user (160) + lockedAt (64) + refunded (8) = 232 bits`
-    ///         packs into one slot; `amount (uint128)` in the second slot
-    ///         alongside `flowId (bytes32)` in the third slot. Slot count
-    ///         in the top-level layout: 1 (the mapping itself).
+    ///         the per-deposit nonce returned by `lock`. A deposit becomes
+    ///         refundable only when the M-of-N signer set attests, via
+    ///         `markDepositRefundable`, that the OPNet voucher was cancelled
+    ///         and can never mint (signer offline forever, voucher
+    ///         invalidated, coordination permanently failed, etc.).
+    /// @dev    Layout: `user (160) + lockedAt (64) + status (8) = 232 bits`
+    ///         packs into one slot; `amount (uint128)` in the second slot,
+    ///         `token (address)` in the third, `flowId (bytes32)` in the
+    ///         fourth. Top-level layout cost: 1 slot (the mapping itself).
     struct LockRecord {
-        address user;       // original depositor — refund destination
-        uint64  lockedAt;   // block.timestamp at lock time
-        bool    refunded;   // idempotency guard
-        uint128 amount;     // post-balance-delta received amount (refund value)
-        address token;      // ERC-20 to send back
-        bytes32 flowId;     // for inventory decrement on refund
+        address user;          // original depositor — refund destination
+        uint64  lockedAt;      // block.timestamp at lock time
+        DepositStatus status;  // lifecycle state (uint8 under the hood)
+        uint128 amount;        // post-balance-delta received amount (refund value)
+        address token;         // ERC-20 to send back
+        bytes32 flowId;        // for inventory decrement on refund
     }
 
     /// @notice depositNonce → LockRecord. Set in `lock`, consumed in
@@ -372,6 +400,16 @@ contract BridgeEscrow is
         uint256 amount,
         bytes32 flowId,
         address caller
+    );
+
+    /// @notice CRIT-001 — emitted when the M-of-N signer set attests that a
+    ///         locked deposit's OPNet voucher was cancelled, moving it to
+    ///         `Refundable`. `by` is `msg.sender` (whoever submitted the
+    ///         attestation blob).
+    event DepositMarkedRefundable(
+        uint256 indexed depositNonce,
+        address indexed user,
+        address indexed by
     );
 
     event Claimed(
@@ -431,8 +469,8 @@ contract BridgeEscrow is
         uint256 amount,
         bytes32 indexed opnetNonce
     );
-    event InventoryProvisioned(address indexed token, address indexed by, uint256 amount);
-    event InventoryDrained(address indexed token, address indexed to, uint256 amount, address indexed by);
+    event InventoryProvisioned(bytes32 indexed flowId, address indexed token, address indexed by, uint256 amount);
+    event InventoryDrained(bytes32 indexed flowId, address indexed token, address indexed to, uint256 amount, address by);
 
     /// @notice Emitted on a successful claim that paid a relayer tip
     ///         (PR β.2.payout-evm). `relayer` is `msg.sender` — anyone may
@@ -490,11 +528,13 @@ contract BridgeEscrow is
     error FlowCapExceeded();
     error DailyLimitExceeded();
     error InsufficientFlowInventory();
+    error AmountExceedsGross();         // MED-001 — claim() intent.amount > grossSrcAmount
 
-    // ─── PR γ.2c — permissionless refund errors ────────────────────────
+    // ─── PR γ.2c — refund lifecycle errors ─────────────────────────────
     error LockNotFound();
-    error RefundTimeoutNotElapsed();
     error LockAlreadyRefunded();
+    error RefundNotAuthorized();        // refundLockedDeposit on a non-Refundable deposit
+    error DepositNotInLockedState();    // markDepositRefundable on a non-Locked deposit
 
     // ---------------------------------------------------------------------
     // Init
@@ -595,7 +635,7 @@ contract BridgeEscrow is
         lockedDeposits[depositNonce_] = LockRecord({
             user: msg.sender,
             lockedAt: uint64(block.timestamp),
-            refunded: false,
+            status: DepositStatus.Locked,
             amount: uint128(amountReceived_),
             token: token,
             flowId: flowId
@@ -609,37 +649,33 @@ contract BridgeEscrow is
     // Core — refund (PR γ.2c, permissionless after REFUND_TIMEOUT)
     // ---------------------------------------------------------------------
 
-    /// @notice Permissionless escape hatch for a stuck `lock`. After
-    ///         `REFUND_TIMEOUT` elapsed since the deposit was locked, anyone
-    ///         (typically the original user, but a relayer is fine — the
-    ///         tokens always go to the recorded depositor) can call this
-    ///         to refund the lock and decrement per-flow inventory.
+    /// @notice Refund a stuck `lock` whose destination-side mint was
+    ///         cancelled. Permissionless to *call* — the tokens always go
+    ///         to the recorded depositor — but only proceeds once the
+    ///         deposit has been moved to `Refundable` by
+    ///         `markDepositRefundable`, i.e. the M-of-N signer set has
+    ///         attested the OPNet voucher was cancelled and can never mint.
     ///
-    /// @dev    Time-based, NOT coordinated with the OPNet side. If the
-    ///         OPNet voucher was already minted and claimed, the EVM
-    ///         contract does not know — it cannot, by design, since the
-    ///         two chains are independent. Governance is responsible for
-    ///         calling `cancelVoucher(opnetNonce)` BEFORE the timeout
-    ///         elapses on any voucher it does not want refundable. After
-    ///         REFUND_TIMEOUT the refund proceeds unconditionally; the
-    ///         simultaneous-claim race is bounded by the 7-day window
-    ///         which is far longer than any realistic voucher
-    ///         coordination window.
+    /// @dev    CRIT-001 fix. The previous version was time-gated only:
+    ///         after a 7-day timeout ANY lock was refundable, with no
+    ///         on-chain dependency on whether the OPNet side had already
+    ///         minted. A user could claim wUSDC on OPNet AND refund the EVM
+    ///         lock, breaking 1:1 backing. Refund is now gated by a
+    ///         positive no-mint attestation (`Refundable` state), never by
+    ///         the mere absence of a refunded flag.
     ///
-    ///         CEI: read → mark refunded → mutate inventory → transfer.
-    ///         Reentrancy guarded; refund is idempotent (second call
-    ///         reverts with `LockAlreadyRefunded`).
+    ///         CEI: read → set Refunded → mutate inventory → transfer.
+    ///         Reentrancy guarded; idempotent (a Refunded deposit reverts
+    ///         with `LockAlreadyRefunded`).
     function refundLockedDeposit(uint256 depositNonce_) external nonReentrant {
         LockRecord storage rec = lockedDeposits[depositNonce_];
 
-        // `user == address(0)` means the slot was never written (no such
+        // `status == None` means the slot was never written (no such
         // depositNonce). depositNonce starts at 1, so nonce 0 is also
-        // unmapped — the user check covers it cleanly.
-        if (rec.user == address(0)) revert LockNotFound();
-        if (rec.refunded) revert LockAlreadyRefunded();
-        if (block.timestamp - uint256(rec.lockedAt) < uint256(REFUND_TIMEOUT)) {
-            revert RefundTimeoutNotElapsed();
-        }
+        // unmapped — the None check covers it cleanly.
+        if (rec.status == DepositStatus.None) revert LockNotFound();
+        if (rec.status == DepositStatus.Refunded) revert LockAlreadyRefunded();
+        if (rec.status != DepositStatus.Refundable) revert RefundNotAuthorized();
 
         // Snapshot the fields we need post-mark (storage-pointer stays
         // stable but reads are cheaper from memory).
@@ -649,7 +685,7 @@ contract BridgeEscrow is
         bytes32 flowId = rec.flowId;
 
         // Effects.
-        rec.refunded = true;
+        rec.status = DepositStatus.Refunded;
 
         // Decrement per-flow inventory. `lock` always bumped it so the
         // flow record is guaranteed to exist with at least `amount`
@@ -680,6 +716,35 @@ contract BridgeEscrow is
             flowId,
             msg.sender
         );
+    }
+
+    /// @notice M-of-N attestation that a locked deposit's OPNet voucher was
+    ///         cancelled and will never mint — the ONLY path that makes a
+    ///         deposit refundable. The bridge authority collects the
+    ///         threshold of signatures off-chain (after cancelling the
+    ///         voucher on the OPNet `BridgeDepository`) and submits them
+    ///         here. `sig` is the same `[uint8 numSigs][sig(65)]…` blob
+    ///         format `claim()` consumes.
+    ///
+    /// @dev    Not pause-gated — refunds must stay possible during an
+    ///         incident freeze. The signature is bound to `depositNonce`,
+    ///         the deposit's `flowId`, and the current signer epoch, so a
+    ///         rotation invalidates any un-submitted attestation. Makes no
+    ///         external calls, so no reentrancy guard is needed.
+    function markDepositRefundable(uint256 depositNonce_, bytes calldata sig)
+        external
+    {
+        LockRecord storage rec = lockedDeposits[depositNonce_];
+        if (rec.status == DepositStatus.None) revert LockNotFound();
+        if (rec.status != DepositStatus.Locked) revert DepositNotInLockedState();
+
+        bytes32 digest = _hashTypedDataV4(
+            _hashRefundAuth(depositNonce_, rec.flowId, currentEpoch)
+        );
+        _verifySignatures(digest, sig);
+
+        rec.status = DepositStatus.Refundable;
+        emit DepositMarkedRefundable(depositNonce_, rec.user, msg.sender);
     }
 
     /// @dev PR γ.2a — flow binding + status / minAmount / dailyLimit
@@ -733,6 +798,23 @@ contract BridgeEscrow is
         flow.inventory = uint128(newInventory);
     }
 
+    /// @dev MED-001 — minAmount + rolling-window dailyLimit enforcement for
+    ///      the mint-on-EVM claim path (`claimMintWrapped`). Bounds how much
+    ///      a compromised signer can authorize per 24h window. Keyed on the
+    ///      minted amount — `MintIntent` has no separate gross field.
+    ///      Mirrors the dailyLimit block in `claim()`.
+    function _consumeMintFlowLimits(FlowRecord storage flow, uint256 amount) internal {
+        if (amount < uint256(flow.minAmount)) revert AmountBelowFlowMin();
+        if (amount > type(uint128).max) revert DailyLimitExceeded();
+        if (block.timestamp - uint256(flow.lastWindowStart) > uint256(FLOW_WINDOW_DURATION)) {
+            flow.mintedToday = 0;
+            flow.lastWindowStart = uint64(block.timestamp);
+        }
+        uint256 newMinted = uint256(flow.mintedToday) + amount;
+        if (newMinted > uint256(flow.dailyLimit)) revert DailyLimitExceeded();
+        flow.mintedToday = uint128(newMinted);
+    }
+
     // ---------------------------------------------------------------------
     // Core — claim (M-of-N only)
     // ---------------------------------------------------------------------
@@ -751,10 +833,24 @@ contract BridgeEscrow is
         if (!supportedToken[intent.token]) revert TokenNotSupported();
         if (intent.to == address(0)) revert InvalidRecipient();
         if (intent.amount == 0) revert AmountZero();
+        // MED-001 — bound the amount actually transferred out by the
+        // cap-checked source gross. The flow's minAmount / dailyLimit /
+        // inventory are all enforced against `grossSrcAmount`, but the
+        // token movement is `intent.amount`; without this a compromised
+        // signer could sign a small gross (under the daily cap) and a huge
+        // amount. Honest vouchers always satisfy net <= gross. This holds
+        // while gross and the EVM-side amount share a decimal basis (true
+        // today — all flows are 6/6); decimal-aware AmountPolicy must
+        // revisit every grossSrc-keyed check here, not just this one.
+        if (intent.amount > intent.grossSrcAmount) revert AmountExceedsGross();
         if (intent.srcChainId != expectedOpnetChainId) revert InvalidSrcChainId();
         if (intent.signerEpoch != currentEpoch) revert InvalidSignerEpoch();
-        if (signaturesUsed[intent.opnetNonce]) revert AlreadyClaimed();
+        // #49 — cancellation checked BEFORE replay, matching the OPNet
+        // claimMintWithVoucher order. For a cancelled-then-claimed voucher
+        // this surfaces VoucherCancelled_ instead of masking it as
+        // AlreadyClaimed, which speeds incident triage.
         if (cancelledVouchers[intent.opnetNonce]) revert VoucherCancelled_();
+        if (signaturesUsed[intent.opnetNonce]) revert AlreadyClaimed();
         if (usedSourceEvent[intent.opnetTxHash][intent.opnetEventIndex]) {
             revert SourceEventAlreadyUsed();
         }
@@ -1070,8 +1166,12 @@ contract BridgeEscrow is
         if (intent.amount == 0) revert AmountZero();
         if (intent.srcChainId != expectedOpnetChainId) revert InvalidSrcChainId();
         if (intent.signerEpoch != currentEpoch) revert InvalidSignerEpoch();
-        if (signaturesUsed[intent.opnetNonce]) revert AlreadyClaimed();
+        // #49 — cancellation checked BEFORE replay, matching the OPNet
+        // claimMintWithVoucher order. For a cancelled-then-claimed voucher
+        // this surfaces VoucherCancelled_ instead of masking it as
+        // AlreadyClaimed, which speeds incident triage.
         if (cancelledVouchers[intent.opnetNonce]) revert VoucherCancelled_();
+        if (signaturesUsed[intent.opnetNonce]) revert AlreadyClaimed();
         if (usedSourceEvent[intent.opnetTxHash][intent.opnetEventIndex]) {
             revert SourceEventAlreadyUsed();
         }
@@ -1098,6 +1198,15 @@ contract BridgeEscrow is
             revert FlowNotActive();
         }
 
+        // MED-001 — the mint-on-EVM path previously enforced NO flow
+        // limits, so a compromised signer faced no per-window bound.
+        // Apply minAmount + rolling-window dailyLimit, keyed on the minted
+        // amount. (Per-mode `cap`/`inventory` accounting for mint-on-EVM
+        // flows is deliberately not added here — it is entangled with the
+        // mode-1/2 inventory-semantics question in #44 and is tracked
+        // there; dailyLimit is the substantive bad-signer bound.)
+        _consumeMintFlowLimits(flow, intent.amount);
+
         // Effects BEFORE interaction (CEI).
         signaturesUsed[intent.opnetNonce] = true;
         usedSourceEvent[intent.opnetTxHash][intent.opnetEventIndex] = true;
@@ -1116,52 +1225,73 @@ contract BridgeEscrow is
     // Mode-4 inventory provisioning (POOLED_LOCK_RELEASE)
     // ---------------------------------------------------------------------
 
-    /// @notice Add `amount` of `token` to the bridge's inventory pool.
-    ///         Used for POOLED_LOCK_RELEASE tokens (e.g. MOTO) where the
-    ///         project pre-funds the EVM-side pool so users can claim
-    ///         against OPNet locks before any reverse flow has happened.
-    /// @dev    Caller transfers tokens INTO the bridge — they must
-    ///         `approve(bridge, amount)` first. Uses balance-delta to
-    ///         survive fee-on-transfer / non-canonical ERC20s.
-    ///         Works for any registered token regardless of mode (a
-    ///         WRAPPED token's pool is just the locked-deposit balance,
-    ///         provisioning is harmless additive). The flag is
-    ///         intentional: top-ups for capacity planning, not just
-    ///         mode-4-only.
-    function provisionInventory(address token, uint256 amount) external onlyOwner nonReentrant {
-        if (token == address(0)) revert ZeroAddress();
-        if (!supportedToken[token]) revert TokenNotSupported();
+    /// @notice Add inventory to a specific flow's EVM-side pool. Used for
+    ///         POOLED_LOCK_RELEASE tokens (e.g. MOTO) where the project
+    ///         pre-funds the pool so users can claim against OPNet locks
+    ///         before any reverse flow has happened, and for topping up a
+    ///         WRAPPED flow's release pool.
+    /// @dev    #44 — provisioning is now FLOW-SCOPED and atomic: the
+    ///         transferred tokens AND `flow.inventory` move together, so
+    ///         the balance the bridge holds and the accounting that
+    ///         `claim()` checks can never drift. The previous
+    ///         `provisionInventory(token, amount)` moved tokens but never
+    ///         touched `flow.inventory`, so pooled-flow claims reverted
+    ///         `InsufficientFlowInventory` even though the funds existed.
+    ///         Caller must `approve(bridge, amount)` first; balance-delta
+    ///         survives fee-on-transfer / non-canonical ERC20s. Only
+    ///         release-pool modes (WRAPPED / POOLED_LOCK_RELEASE) have an
+    ///         EVM-side inventory — mint-on-EVM modes are rejected.
+    function provisionInventory(bytes32 flowId, uint256 amount) external onlyOwner nonReentrant {
         if (amount == 0) revert AmountZero();
+        FlowRecord storage flow = flows[flowId];
+        if (flow.evmChainId == 0) revert FlowNotFound();
+        if (flow.mode != uint8(TokenMode.WRAPPED) && flow.mode != uint8(TokenMode.POOLED_LOCK_RELEASE)) {
+            revert WrongMode();
+        }
 
+        address token = flow.evmToken;
         IERC20 erc20 = IERC20(token);
         uint256 balBefore = erc20.balanceOf(address(this));
         erc20.safeTransferFrom(msg.sender, address(this), amount);
-        uint256 balAfter = erc20.balanceOf(address(this));
+        uint256 received;
         unchecked {
-            uint256 received = balAfter - balBefore;
-            if (received == 0) revert NothingReceived();
-            emit InventoryProvisioned(token, msg.sender, received);
+            received = erc20.balanceOf(address(this)) - balBefore;
         }
+        if (received == 0) revert NothingReceived();
+        if (received > type(uint128).max) revert FlowCapExceeded();
+
+        // Atomic: tokens in AND accounting up, in the same call.
+        uint256 newInventory = uint256(flow.inventory) + received;
+        if (newInventory > uint256(flow.cap)) revert FlowCapExceeded();
+        flow.inventory = uint128(newInventory);
+
+        emit InventoryProvisioned(flowId, token, msg.sender, received);
     }
 
-    /// @notice Drain inventory back to the set-once `treasury`. Same
-    ///         destination and pause-gate as `emergencyWithdraw`, but
-    ///         with separate semantics: `drainInventory` is for orderly
-    ///         wind-down of a token's pool (e.g. de-listing a token,
-    ///         migrating to a new bridge), not for incident response.
-    /// @dev    onlyGuardian + whenPaused — same trust model as
-    ///         emergencyWithdraw. Owner alone cannot drain; pause must
-    ///         be exercised first.
-    function drainInventory(address token, uint256 amount)
+    /// @notice Drain a flow's inventory back to the set-once `treasury`.
+    ///         For orderly wind-down of a flow's pool (de-listing, bridge
+    ///         migration) — not incident response (`emergencyWithdraw`).
+    /// @dev    #44 — flow-scoped: decrements `flow.inventory` by the drained
+    ///         amount so accounting tracks the balance. onlyGuardian +
+    ///         whenPaused — same trust model as `emergencyWithdraw`.
+    ///         CEI: checks → inventory effect → token transfer.
+    function drainInventory(bytes32 flowId, uint256 amount)
         external
         nonReentrant
         whenPaused
     {
         if (msg.sender != guardian) revert NotGuardian();
-        if (token == address(0)) revert ZeroAddress();
         if (treasury == address(0)) revert TreasuryNotSet();
         if (amount == 0) revert AmountZero();
-        emit InventoryDrained(token, treasury, amount, msg.sender);
+        FlowRecord storage flow = flows[flowId];
+        if (flow.evmChainId == 0) revert FlowNotFound();
+        if (uint256(flow.inventory) < amount) revert InsufficientFlowInventory();
+
+        address token = flow.evmToken;
+        unchecked {
+            flow.inventory = flow.inventory - uint128(amount);
+        }
+        emit InventoryDrained(flowId, token, treasury, amount, msg.sender);
         IERC20(token).safeTransfer(treasury, amount);
     }
 
@@ -1461,5 +1591,31 @@ contract BridgeEscrow is
     /// @notice EIP-712 digest for a MintIntent — useful off-chain and for tests.
     function hashMintIntent(MintIntent calldata intent) external view returns (bytes32) {
         return _hashTypedDataV4(_hashMintIntent(intent));
+    }
+
+    function _hashRefundAuth(uint256 depositNonce_, bytes32 flowId, uint32 signerEpoch)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return
+            keccak256(
+                abi.encode(
+                    REFUND_AUTHORIZATION_TYPEHASH,
+                    depositNonce_,
+                    flowId,
+                    signerEpoch
+                )
+            );
+    }
+
+    /// @notice EIP-712 digest for a RefundAuthorization — the server signs
+    ///         this to build the M-of-N attestation, and tests verify it.
+    function hashRefundAuthorization(
+        uint256 depositNonce_,
+        bytes32 flowId,
+        uint32 signerEpoch
+    ) external view returns (bytes32) {
+        return _hashTypedDataV4(_hashRefundAuth(depositNonce_, flowId, signerEpoch));
     }
 }

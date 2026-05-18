@@ -606,11 +606,34 @@ contract BridgeEscrowTest is Test {
 
     function test_Claim_WrongAmountFails() public {
         _fundEscrow(address(usdc), 1_000e6);
+
+        // (a) MED-001 — amount inflated ABOVE the signed grossSrcAmount is
+        //     caught by the AmountExceedsGross guard, before sig-verify.
         BridgeEscrow.ReleaseIntent memory intent = _defaultIntent(address(usdc), bob, 100e6);
         bytes memory sig = _sign(signerPk, intent);
+        intent.amount = 101e6; // attacker inflates past the signed gross
+        vm.expectRevert(BridgeEscrow.AmountExceedsGross.selector);
+        escrow.claim(intent, sig);
 
-        intent.amount = 101e6; // attacker inflates
+        // (b) amount tampered but still <= grossSrcAmount — the guard
+        //     passes and the signature check catches the digest mismatch.
+        BridgeEscrow.ReleaseIntent memory intent2 = _defaultIntent(address(usdc), bob, 100e6);
+        bytes memory sig2 = _sign(signerPk, intent2);
+        intent2.amount = 99e6; // tampered down — digest no longer matches
         vm.expectRevert(BridgeEscrow.InvalidSignature.selector);
+        escrow.claim(intent2, sig2);
+    }
+
+    function test_Claim_SignedAmountExceedsGross_Reverts() public {
+        // MED-001 regression — even a VALID signature cannot authorize a
+        // payout larger than the signed grossSrcAmount. Models a
+        // compromised signer that signs an inflated `amount` while keeping
+        // `grossSrcAmount` small to slip under the per-flow daily cap.
+        _fundEscrow(address(usdc), 1_000e6);
+        BridgeEscrow.ReleaseIntent memory intent = _defaultIntent(address(usdc), bob, 100e6);
+        intent.grossSrcAmount = 50e6; // signed, but below `amount`
+        bytes memory sig = _sign(signerPk, intent);
+        vm.expectRevert(BridgeEscrow.AmountExceedsGross.selector);
         escrow.claim(intent, sig);
     }
 
@@ -1330,40 +1353,54 @@ contract BridgeEscrowTest is Test {
         escrow.claim(intent, sig);
     }
 
-    function test_ProvisionInventory_AddsToBalance() public {
+    function test_ProvisionInventory_AddsToBalanceAndInventory() public {
         MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
-        _registerFlow(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
+        bytes32 flowId = _registerFlow(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
 
         moto.mint(owner, 1_000e6);
         uint256 escrowBefore = moto.balanceOf(address(escrow));
 
         vm.startPrank(owner);
         moto.approve(address(escrow), 1_000e6);
-        escrow.provisionInventory(address(moto), 600e6);
+        escrow.provisionInventory(flowId, 600e6);
         vm.stopPrank();
 
         assertEq(moto.balanceOf(address(escrow)), escrowBefore + 600e6);
+        // #44 — provisioning must update flow inventory, not just balance.
+        assertEq(escrow.getFlow(flowId).inventory, 600e6, "flow inventory tracks provision");
     }
 
     function test_ProvisionInventory_OnlyOwner() public {
         MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
-        _registerFlow(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
+        bytes32 flowId = _registerFlow(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
         moto.mint(alice, 100e6);
         vm.startPrank(alice);
         moto.approve(address(escrow), 100e6);
         vm.expectRevert();
-        escrow.provisionInventory(address(moto), 50e6);
+        escrow.provisionInventory(flowId, 50e6);
+        vm.stopPrank();
+    }
+
+    function test_ProvisionInventory_RejectsMintOnEvmModes() public {
+        // #44 — mint-on-EVM flows have no EVM-side pool to provision.
+        MockERC20 w = new MockERC20("W", "W", 6);
+        bytes32 flowId = _registerFlow(address(w), BridgeEscrow.TokenMode.INVERSE_WRAPPED, bytes32(uint256(7)));
+        w.mint(owner, 100e6);
+        vm.startPrank(owner);
+        w.approve(address(escrow), 100e6);
+        vm.expectRevert(BridgeEscrow.WrongMode.selector);
+        escrow.provisionInventory(flowId, 50e6);
         vm.stopPrank();
     }
 
     function test_DrainInventory_GuardianOnlyWhenPaused() public {
         // Set up: register MOTO + provision + set treasury/guardian + pause.
         MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
-        _registerFlow(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
+        bytes32 flowId = _registerFlow(address(moto), BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, bytes32(uint256(1)));
         moto.mint(owner, 1_000e6);
         vm.startPrank(owner);
         moto.approve(address(escrow), 1_000e6);
-        escrow.provisionInventory(address(moto), 1_000e6);
+        escrow.provisionInventory(flowId, 1_000e6);
         escrow.setGuardian(guardian);
         escrow.setTreasury(treasuryAddr);
         escrow.pause();
@@ -1372,12 +1409,14 @@ contract BridgeEscrowTest is Test {
         // Owner can NOT drain (must be guardian).
         vm.prank(owner);
         vm.expectRevert(BridgeEscrow.NotGuardian.selector);
-        escrow.drainInventory(address(moto), 100e6);
+        escrow.drainInventory(flowId, 100e6);
 
         // Guardian can drain to treasury.
         vm.prank(guardian);
-        escrow.drainInventory(address(moto), 100e6);
+        escrow.drainInventory(flowId, 100e6);
         assertEq(moto.balanceOf(treasuryAddr), 100e6);
+        // #44 — drain decrements flow inventory in lockstep.
+        assertEq(escrow.getFlow(flowId).inventory, 900e6, "flow inventory tracks drain");
     }
 
     function test_ClaimMintWrapped_HappyPath_Mode2() public {
