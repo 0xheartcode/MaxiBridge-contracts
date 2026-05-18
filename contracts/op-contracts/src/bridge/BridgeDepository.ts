@@ -1298,6 +1298,7 @@ export class BridgeDepository extends ReentrancyGuard {
      * 20-byte recipient address to 32 bytes (low 20 bytes = address).
      */
     @method(
+        { name: 'flowId', type: ABIDataTypes.UINT256 },
         { name: 'canonicalToken', type: ABIDataTypes.ADDRESS },
         { name: 'amount', type: ABIDataTypes.UINT256 },
         { name: 'evmRecipient', type: ABIDataTypes.BYTES32 },
@@ -1307,6 +1308,7 @@ export class BridgeDepository extends ReentrancyGuard {
     @nonReentrant
     public lockForBridge(calldata: Calldata): BytesWriter {
         this.requireNotPaused();
+        const flowId: u256 = calldata.readU256();
         const canonical: Address = calldata.readAddress();
         const amount: u256 = calldata.readU256();
         const evmRecipient: Uint8Array = calldata.readBytes(32);
@@ -1324,6 +1326,26 @@ export class BridgeDepository extends ReentrancyGuard {
         const isPooled: bool = u256.eq(mode, u256.fromU32(3));
         if (!isInverse && !isPooled) {
             throw new Revert('BridgeDepository: token not in lockable mode');
+        }
+
+        // #44 — explicit flow binding. lockForBridge must name the flow it
+        // locks into so the OPNet-side inventory ledger can be credited
+        // coherently. The flowId is validated against the mode, canonical
+        // token and destChainId the caller supplied; any mismatch reverts.
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        if (this._flowStatus.get(flowId).toU32() != FLOW_STATUS_ACTIVE) {
+            throw new Revert('BridgeDepository: flow not active');
+        }
+        if (!u256.eq(this._flowMode.get(flowId), mode)) {
+            throw new Revert('BridgeDepository: flow mode mismatch');
+        }
+        if (!u256.eq(this._flowOpnetToken.get(flowId), _opnetAddrToU256(canonical))) {
+            throw new Revert('BridgeDepository: flow token mismatch');
+        }
+        if (this._flowChainId.get(flowId).toU64() != <u64>destChainId) {
+            throw new Revert('BridgeDepository: flow chain mismatch');
         }
 
         // EVM destination padding check — for chainId 1 / 11155111, upper
@@ -1366,6 +1388,23 @@ export class BridgeDepository extends ReentrancyGuard {
         // SafeMath.sub reverts if the balance somehow decreased.
         const received: u256 = SafeMath.sub(balAfter, balBefore);
         if (received.isZero()) throw new Revert('BridgeDepository: nothing received');
+
+        // #44 — mode-1 (INVERSE_WRAPPED) inventory production. The canonical
+        // OP20 just entered the bridge; it now backs the EVM-side wrapped
+        // mint and must be releasable back via claimReleaseWithVoucher.
+        // Credit the flow ledger so the reverse leg has inventory to draw
+        // down — this is the SOLE mode-1 inventory producer (confirmBurn no
+        // longer increments). Mode-3 (POOLED) locks are source-side only —
+        // the release pool lives on the EVM counterpart — so they do NOT
+        // credit OPNet inventory (provisioned via provisionInventoryOpNet).
+        if (isInverse) {
+            const invBefore: u256 = this._flowInventory.get(flowId);
+            const invAfter: u256 = SafeMath.add(invBefore, received);
+            if (u256.gt(invAfter, this._flowCap.get(flowId))) {
+                throw new Revert('BridgeDepository: flow cap exceeded');
+            }
+            this._flowInventory.set(flowId, invAfter);
+        }
 
         const nextNonce: u256 = SafeMath.add(this._lockNonce.value, u256.One);
         this._lockNonce.value = nextNonce;
@@ -1587,12 +1626,19 @@ export class BridgeDepository extends ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * Add `amount` of `canonicalToken` to the bridge's inventory pool.
-     * Used for POOLED_LOCK_RELEASE tokens (e.g. MOTO) where the project
-     * pre-funds the OPNet-side pool. Caller must have approved the
-     * BridgeDepository for at least `amount`.
+     * Add `amount` of a flow's canonical OPNet token to that flow's
+     * inventory pool. Used for INVERSE_WRAPPED / POOLED_LOCK_RELEASE flows
+     * where the project pre-funds the OPNet-side release pool. Caller
+     * (governor) must have approved the BridgeDepository for ≥ `amount`.
+     *
+     * #44 — flow-scoped + atomic. The `_flowInventory` ledger moves in the
+     * SAME call as the token transfer (verify → effect → interaction), so
+     * the ledger can never drift from custody. The pre-#44 form took only
+     * `(token, amount)` and never touched `_flowInventory`, leaving the
+     * pool unspendable by `claimReleaseWithVoucher`.
      */
     @method(
+        { name: 'flowId', type: ABIDataTypes.UINT256 },
         { name: 'token', type: ABIDataTypes.ADDRESS },
         { name: 'amount', type: ABIDataTypes.UINT256 },
     )
@@ -1600,10 +1646,34 @@ export class BridgeDepository extends ReentrancyGuard {
     @nonReentrant
     public provisionInventoryOpNet(calldata: Calldata): BytesWriter {
         this.onlyGovernor();
+        const flowId: u256 = calldata.readU256();
         const token: Address = calldata.readAddress();
         const amount: u256 = calldata.readU256();
         if (token.isZero()) throw new Revert('BridgeDepository: zero token');
         if (amount.isZero()) throw new Revert('BridgeDepository: zero amount');
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        // Only INVERSE_WRAPPED (1) / POOLED_LOCK_RELEASE (3) hold an
+        // OPNet-side canonical pool that can be provisioned.
+        const mode: u32 = this._flowMode.get(flowId).toU32();
+        if (mode != 1 && mode != 3) {
+            throw new Revert('BridgeDepository: flow mode not provisionable');
+        }
+        // The passed token MUST be the flow's registered canonical token.
+        if (!u256.eq(this._flowOpnetToken.get(flowId), _opnetAddrToU256(token))) {
+            throw new Revert('BridgeDepository: token not flow canonical');
+        }
+
+        // Verify → effect → interaction (CEI). Cap-check + ledger credit
+        // happen before the external transferFrom; a failed transfer
+        // reverts the whole tx, so the ledger can never lead custody.
+        const before: u256 = this._flowInventory.get(flowId);
+        const after: u256 = SafeMath.add(before, amount);
+        if (u256.gt(after, this._flowCap.get(flowId))) {
+            throw new Revert('BridgeDepository: flow cap exceeded');
+        }
+        this._flowInventory.set(flowId, after);
 
         const transferFromSelector: u32 = encodeSelector('transferFrom(address,address,uint256)');
         const w = new BytesWriter(4 + ADDRESS_BYTE_LENGTH * 2 + 32);
@@ -1613,16 +1683,23 @@ export class BridgeDepository extends ReentrancyGuard {
         w.writeU256(amount);
         Blockchain.call(token, w);
 
-        this.emitEvent(new InventoryProvisionedOpNet(token, Blockchain.tx.sender, amount));
+        this.emitEvent(
+            new InventoryProvisionedOpNet(flowId, token, Blockchain.tx.sender, amount),
+        );
         return new BytesWriter(0);
     }
 
     /**
-     * Drain canonical OP20 inventory back to the governor. Governor-only,
-     * requires the bridge to be paused (matches EVM emergencyWithdraw
-     * semantics). Used for orderly wind-down of a token's pool.
+     * Drain `amount` of a flow's canonical OP20 inventory back to a
+     * recipient. Governor-only, requires the bridge to be paused (matches
+     * EVM emergencyWithdraw semantics). Used for orderly wind-down.
+     *
+     * #44 — flow-scoped + atomic. The `_flowInventory` ledger is debited
+     * BEFORE the external transfer (verify → effect → interaction), and a
+     * drain beyond the flow's recorded inventory reverts.
      */
     @method(
+        { name: 'flowId', type: ABIDataTypes.UINT256 },
         { name: 'token', type: ABIDataTypes.ADDRESS },
         { name: 'amount', type: ABIDataTypes.UINT256 },
         { name: 'recipient', type: ABIDataTypes.ADDRESS },
@@ -1634,11 +1711,26 @@ export class BridgeDepository extends ReentrancyGuard {
         if (!this._paused.value) {
             throw new Revert('BridgeDepository: must pause before drain');
         }
+        const flowId: u256 = calldata.readU256();
         const token: Address = calldata.readAddress();
         const amount: u256 = calldata.readU256();
         const recipient: Address = calldata.readAddress();
         if (token.isZero() || recipient.isZero()) throw new Revert('BridgeDepository: zero addr');
         if (amount.isZero()) throw new Revert('BridgeDepository: zero amount');
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        if (!u256.eq(this._flowOpnetToken.get(flowId), _opnetAddrToU256(token))) {
+            throw new Revert('BridgeDepository: token not flow canonical');
+        }
+
+        // Verify → effect → interaction (CEI). Ledger debit precedes the
+        // external transfer; an over-drain reverts before any token moves.
+        const before: u256 = this._flowInventory.get(flowId);
+        if (u256.lt(before, amount)) {
+            throw new Revert('BridgeDepository: insufficient flow inventory');
+        }
+        this._flowInventory.set(flowId, SafeMath.sub(before, amount));
 
         const transferSelector: u32 = encodeSelector('transfer(address,uint256)');
         const w = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
@@ -1647,7 +1739,9 @@ export class BridgeDepository extends ReentrancyGuard {
         w.writeU256(amount);
         Blockchain.call(token, w);
 
-        this.emitEvent(new InventoryDrainedOpNet(token, recipient, Blockchain.tx.sender, amount));
+        this.emitEvent(
+            new InventoryDrainedOpNet(flowId, token, recipient, Blockchain.tx.sender, amount),
+        );
         return new BytesWriter(0);
     }
 
@@ -1813,48 +1907,19 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    //  PR γ.2b — governor inventory provisioning hatch (TEMPORARY)
+    //  PR γ.2b — confirmBurn (OPNet-side attestation of an EVM burn)
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * Manual flow-inventory bump. Governor-only emergency hatch for cases
-     * where a pooled flow has drained and needs to be topped up before
-     * `confirmBurn` can carry the load. TEMPORARY — will be restricted /
-     * removed once `confirmBurn` is the universal inventory producer.
-     */
-    @method(
-        { name: 'flowId', type: ABIDataTypes.UINT256 },
-        { name: 'amount', type: ABIDataTypes.UINT256 },
-    )
-    public governorProvisionFlowInventory(calldata: Calldata): BytesWriter {
-        this.onlyGovernor();
-        const flowId: u256 = calldata.readU256();
-        const amount: u256 = calldata.readU256();
-        if (this._flowExists.get(flowId).isZero()) {
-            throw new Revert('BridgeDepository: flow not found');
-        }
-        if (amount.isZero()) throw new Revert('BridgeDepository: zero amount');
-        const cap: u256 = this._flowCap.get(flowId);
-        const before: u256 = this._flowInventory.get(flowId);
-        const after: u256 = SafeMath.add(before, amount);
-        if (u256.gt(after, cap)) {
-            throw new Revert('BridgeDepository: flow cap exceeded');
-        }
-        this._flowInventory.set(flowId, after);
-        return new BytesWriter(0);
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    //  PR γ.2b — confirmBurn (mode-1 / mode-4 OPNet→EVM proof)
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /**
-     * Confirm an EVM-side burn against an M-of-N attestation. Two roles:
-     *   - mode 4 (POOLED_LOCK_RELEASE OPNet→EVM): the OPNet inventory was
-     *     held against an EVM lock that has now been burned ⇒ inventory --.
-     *   - mode 1 (INVERSE_WRAPPED OPNet→EVM via wUSDC burn): provisions
-     *     OPNet-side inventory so future mode-1 release vouchers can pay
-     *     out ⇒ inventory ++.
+     * Confirm an EVM-side burn against an M-of-N attestation. Inventory
+     * roles by mode (#44 — single-count invariant):
+     *   - mode 3 (POOLED_LOCK_RELEASE): the OPNet inventory was held
+     *     against an EVM lock that has now been burned ⇒ inventory --.
+     *   - mode 1 (INVERSE_WRAPPED): NO inventory mutation. The mode-1
+     *     ledger is produced exclusively by `lockForBridge` and consumed
+     *     exclusively by `claimReleaseWithVoucher`; confirmBurn is a pure,
+     *     replay-guarded attestation here. A pre-#44 revision incremented
+     *     inventory on mode 1, double-counting against `lockForBridge`.
      *
      * BurnAttestation preimage layout (252 bytes total — see CLAUDE.md §8):
      *   networkId         u256     32   (0)
@@ -1950,23 +2015,20 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: flow not active');
         }
 
-        // Inventory effect: mode 4 = decrement (release-side ack);
-        //                  mode 1 = increment (provisions OPNet inventory).
+        // Inventory effect by mode (#44 — single-count invariant):
+        //   mode 3 = decrement (release-side ack against the pooled OPNet
+        //            inventory provisioned via provisionInventoryOpNet).
+        //   mode 1 = NO inventory mutation. lockForBridge produces and
+        //            claimReleaseWithVoucher consumes the mode-1 ledger;
+        //            confirmBurn is attestation-only here.
         const mode: u32 = this._flowMode.get(flowId).toU32();
-        const inv: u256 = this._flowInventory.get(flowId);
-        if (mode == 4 || mode == 3) {
+        if (mode == 3) {
+            const inv: u256 = this._flowInventory.get(flowId);
             if (u256.lt(inv, releasedAmount)) {
                 throw new Revert('BridgeDepository: insufficient flow inventory');
             }
             this._flowInventory.set(flowId, SafeMath.sub(inv, releasedAmount));
-        } else if (mode == 1) {
-            const cap: u256 = this._flowCap.get(flowId);
-            const after: u256 = SafeMath.add(inv, releasedAmount);
-            if (u256.gt(after, cap)) {
-                throw new Revert('BridgeDepository: flow cap exceeded');
-            }
-            this._flowInventory.set(flowId, after);
-        } else {
+        } else if (mode != 1) {
             throw new Revert('BridgeDepository: confirmBurn unsupported mode');
         }
 

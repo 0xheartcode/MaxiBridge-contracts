@@ -165,8 +165,9 @@ export class ReleasedFromVoucher extends NetEvent {
 }
 
 export class InventoryProvisionedOpNet extends NetEvent {
-    constructor(token: Address, by: Address, amount: u256) {
-        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32);
+    constructor(flowId: u256, token: Address, by: Address, amount: u256) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32 * 2);
+        data.writeU256(flowId);
         data.writeAddress(token);
         data.writeAddress(by);
         data.writeU256(amount);
@@ -175,8 +176,9 @@ export class InventoryProvisionedOpNet extends NetEvent {
 }
 
 export class InventoryDrainedOpNet extends NetEvent {
-    constructor(token: Address, to: Address, by: Address, amount: u256) {
-        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 3 + 32);
+    constructor(flowId: u256, token: Address, to: Address, by: Address, amount: u256) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 3 + 32 * 2);
+        data.writeU256(flowId);
         data.writeAddress(token);
         data.writeAddress(to);
         data.writeAddress(by);

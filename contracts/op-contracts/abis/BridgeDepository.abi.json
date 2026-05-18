@@ -544,6 +544,10 @@
             "onlyOwner": false,
             "inputs": [
                 {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
                     "name": "canonicalToken",
                     "type": "ADDRESS"
                 },
@@ -586,6 +590,10 @@
             "onlyOwner": false,
             "inputs": [
                 {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
                     "name": "token",
                     "type": "ADDRESS"
                 },
@@ -602,6 +610,10 @@
             "payable": false,
             "onlyOwner": false,
             "inputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
                 {
                     "name": "token",
                     "type": "ADDRESS"
@@ -665,23 +677,6 @@
                 {
                     "name": "payload",
                     "type": "BYTES"
-                }
-            ],
-            "outputs": []
-        },
-        {
-            "name": "governorProvisionFlowInventory",
-            "type": "Function",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [
-                {
-                    "name": "flowId",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "amount",
-                    "type": "UINT256"
                 }
             ],
             "outputs": []
@@ -1215,6 +1210,10 @@
             "name": "InventoryProvisionedOpNet",
             "values": [
                 {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
                     "name": "token",
                     "type": "ADDRESS"
                 },
@@ -1232,6 +1231,10 @@
         {
             "name": "InventoryDrainedOpNet",
             "values": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
                 {
                     "name": "token",
                     "type": "ADDRESS"

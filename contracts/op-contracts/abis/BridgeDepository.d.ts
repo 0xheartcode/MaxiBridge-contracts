@@ -84,11 +84,13 @@ export type RelayerTipPaidEvent = {
     readonly tip: bigint;
 };
 export type InventoryProvisionedOpNetEvent = {
+    readonly flowId: bigint;
     readonly token: Address;
     readonly by: Address;
     readonly amount: bigint;
 };
 export type InventoryDrainedOpNetEvent = {
+    readonly flowId: bigint;
     readonly token: Address;
     readonly to: Address;
     readonly by: Address;
@@ -394,11 +396,6 @@ export type SetRequiredSignatures = CallResult<{}, OPNetEvent<SignerRotatedEvent
 export type MigrateSignerSet = CallResult<{}, OPNetEvent<SignerRotatedEvent>[]>;
 
 /**
- * @description Represents the result of the governorProvisionFlowInventory function call.
- */
-export type GovernorProvisionFlowInventory = CallResult<{}, OPNetEvent<never>[]>;
-
-/**
  * @description Represents the result of the confirmBurn function call.
  */
 export type ConfirmBurn = CallResult<{}, OPNetEvent<BurnConfirmedEvent>[]>;
@@ -608,19 +605,24 @@ export interface IBridgeDepository extends IOP_NETContract {
     flowCount(): Promise<FlowCount>;
     getFlow(): Promise<GetFlow>;
     lockForBridge(
+        flowId: bigint,
         canonicalToken: Address,
         amount: bigint,
         evmRecipient: Uint8Array,
         destChainId: number,
     ): Promise<LockForBridge>;
     claimReleaseWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<ClaimReleaseWithVoucher>;
-    provisionInventoryOpNet(token: Address, amount: bigint): Promise<ProvisionInventoryOpNet>;
-    drainInventoryOpNet(token: Address, amount: bigint, recipient: Address): Promise<DrainInventoryOpNet>;
+    provisionInventoryOpNet(flowId: bigint, token: Address, amount: bigint): Promise<ProvisionInventoryOpNet>;
+    drainInventoryOpNet(
+        flowId: bigint,
+        token: Address,
+        amount: bigint,
+        recipient: Address,
+    ): Promise<DrainInventoryOpNet>;
     addSignerToSet(pubKeyHash: bigint): Promise<AddSignerToSet>;
     removeSignerFromSet(pubKeyHash: bigint): Promise<RemoveSignerFromSet>;
     setRequiredSignatures(threshold: bigint): Promise<SetRequiredSignatures>;
     migrateSignerSet(payload: Uint8Array): Promise<MigrateSignerSet>;
-    governorProvisionFlowInventory(flowId: bigint, amount: bigint): Promise<GovernorProvisionFlowInventory>;
     confirmBurn(depositId: bigint, attestation: Uint8Array, mldsaSig: Uint8Array): Promise<ConfirmBurn>;
     isBurnConfirmed(): Promise<IsBurnConfirmed>;
     authorityAddress(): Promise<AuthorityAddress>;

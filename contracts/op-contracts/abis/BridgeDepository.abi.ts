@@ -135,6 +135,7 @@ export const BridgeDepositoryEvents = [
     {
         name: 'InventoryProvisionedOpNet',
         values: [
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
             { name: 'token', type: ABIDataTypes.ADDRESS },
             { name: 'by', type: ABIDataTypes.ADDRESS },
             { name: 'amount', type: ABIDataTypes.UINT256 },
@@ -144,6 +145,7 @@ export const BridgeDepositoryEvents = [
     {
         name: 'InventoryDrainedOpNet',
         values: [
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
             { name: 'token', type: ABIDataTypes.ADDRESS },
             { name: 'to', type: ABIDataTypes.ADDRESS },
             { name: 'by', type: ABIDataTypes.ADDRESS },
@@ -455,6 +457,7 @@ export const BridgeDepositoryAbi = [
     {
         name: 'lockForBridge',
         inputs: [
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
             { name: 'canonicalToken', type: ABIDataTypes.ADDRESS },
             { name: 'amount', type: ABIDataTypes.UINT256 },
             { name: 'evmRecipient', type: ABIDataTypes.BYTES32 },
@@ -475,6 +478,7 @@ export const BridgeDepositoryAbi = [
     {
         name: 'provisionInventoryOpNet',
         inputs: [
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
             { name: 'token', type: ABIDataTypes.ADDRESS },
             { name: 'amount', type: ABIDataTypes.UINT256 },
         ],
@@ -484,6 +488,7 @@ export const BridgeDepositoryAbi = [
     {
         name: 'drainInventoryOpNet',
         inputs: [
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
             { name: 'token', type: ABIDataTypes.ADDRESS },
             { name: 'amount', type: ABIDataTypes.UINT256 },
             { name: 'recipient', type: ABIDataTypes.ADDRESS },
@@ -512,15 +517,6 @@ export const BridgeDepositoryAbi = [
     {
         name: 'migrateSignerSet',
         inputs: [{ name: 'payload', type: ABIDataTypes.BYTES }],
-        outputs: [],
-        type: BitcoinAbiTypes.Function,
-    },
-    {
-        name: 'governorProvisionFlowInventory',
-        inputs: [
-            { name: 'flowId', type: ABIDataTypes.UINT256 },
-            { name: 'amount', type: ABIDataTypes.UINT256 },
-        ],
         outputs: [],
         type: BitcoinAbiTypes.Function,
     },
