@@ -231,9 +231,13 @@ await opnet('BridgeAuthority — pushGovernor is governor-gated + cascade', asyn
     });
 
     await vm.it('rejects zero address governor', async () => {
+        // Address.dead() is the all-zero address — exercises the
+        // contract's `newGovernor.isZero()` guard for real. (The prior
+        // Address.zero() is not a function; the test passed only because
+        // toThrow() caught that TypeError, never the contract revert.)
         setSender(deployer);
         await Assert.expect(async () => {
-            await setup.authority.pushGovernor(Address.zero());
+            await setup.authority.pushGovernor(Address.dead());
         }).toThrow();
     });
 });
