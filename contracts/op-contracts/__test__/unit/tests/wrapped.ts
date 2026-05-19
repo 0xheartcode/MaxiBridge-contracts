@@ -167,6 +167,13 @@ await opnet('WrappedOP20 — burnForRelease', async (vm: OPNetUnit) => {
         token = await makeWrapped();
         await token.setBridgeDepository(bridgeAddr);
 
+        // M-01 — burnForRelease now requires the destChainId to be enabled.
+        // Enable the chains exercised by this suite (mainnet, Sepolia, and
+        // the synthetic non-EVM chain 42).
+        await token.setSupportedDestChain(1, true);
+        await token.setSupportedDestChain(11155111, true);
+        await token.setSupportedDestChain(42, true);
+
         // Pre-mint to alice and bob via the bridge so they have a balance to burn.
         setSender(bridgeAddr);
         await token.mintTo(alice, 1_000n);
@@ -276,6 +283,10 @@ await opnet('WrappedOP20 — Fix #6: burnForRelease pause gate', async (vm: OPNe
         setSender(deployer);
         token = await makeWrapped();
         await token.setBridgeDepository(bridgeAddr);
+
+        // M-01 — enable destChainId 1 so the pause-gate test exercises the
+        // burn path itself rather than tripping the allowlist.
+        await token.setSupportedDestChain(1, true);
 
         setSender(bridgeAddr);
         await token.mintTo(alice, 1_000n);
@@ -526,5 +537,101 @@ await opnet('WrappedOP20 — Phase 1.2 minter role', async (vm: OPNetUnit) => {
         setSender(bob);
         await token.grantMinter(newMinter);
         Assert.expect(await token.isMinter(newMinter)).toEqual(true);
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// M-01 — burnForRelease destChainId allowlist
+//
+// Fix: WrappedOP20 now keeps a governor-managed `_supportedDestChains` set.
+// `burnForRelease` reverts 'WrappedOP20: unsupported destChainId' for any
+// destChainId not enabled. Fail-closed — a fresh deploy services no chain.
+// A burn to an unsupported chain would otherwise destroy tokens with no
+// release voucher and no refund path.
+// ════════════════════════════════════════════════════════════════════════════
+
+await opnet('WrappedOP20 — M-01: burnForRelease destChainId allowlist', async (vm: OPNetUnit) => {
+    let token: WrappedOP20;
+
+    vm.beforeEach(async () => {
+        Blockchain.dispose();
+        Blockchain.clearContracts();
+        await Blockchain.init();
+        setSender(deployer);
+        token = await makeWrapped();
+        await token.setBridgeDepository(bridgeAddr);
+
+        setSender(bridgeAddr);
+        await token.mintTo(alice, 10_000n);
+    });
+
+    vm.afterEach(() => {
+        token.dispose();
+        Blockchain.dispose();
+    });
+
+    await vm.it('fresh deploy: no destChainId is supported (fail-closed)', async () => {
+        Assert.expect(await token.isSupportedDestChain(1)).toEqual(false);
+        Assert.expect(await token.isSupportedDestChain(11155111)).toEqual(false);
+        Assert.expect(await token.isSupportedDestChain(42)).toEqual(false);
+    });
+
+    await vm.it('burn to an un-enabled destChainId reverts', async () => {
+        setSender(alice);
+        await Assert.expect(async () => {
+            await token.burnForRelease(ethRecipient32(), 100n, 1);
+        }).toThrow();
+        // Tokens were NOT destroyed — the revert rolled the burn back.
+        Assert.expect(await token.balanceOf(alice)).toEqual(10_000n);
+    });
+
+    await vm.it('after setSupportedDestChain(id, true) the burn succeeds', async () => {
+        setSender(deployer);
+        await token.setSupportedDestChain(1, true);
+        Assert.expect(await token.isSupportedDestChain(1)).toEqual(true);
+
+        setSender(alice);
+        const nonce = await token.burnForRelease(ethRecipient32(), 300n, 1);
+        Assert.expect(nonce).toEqual(1n);
+        Assert.expect(await token.balanceOf(alice)).toEqual(9_700n);
+    });
+
+    await vm.it('isSupportedDestChain reflects enable then disable state', async () => {
+        setSender(deployer);
+        await token.setSupportedDestChain(42, true);
+        Assert.expect(await token.isSupportedDestChain(42)).toEqual(true);
+
+        await token.setSupportedDestChain(42, false);
+        Assert.expect(await token.isSupportedDestChain(42)).toEqual(false);
+
+        // A burn to a now-disabled chain reverts again.
+        setSender(alice);
+        const nonEvm = new Uint8Array(32);
+        for (let i = 0; i < 32; i++) nonEvm[i] = i + 1;
+        await Assert.expect(async () => {
+            await token.burnForRelease(nonEvm, 100n, 42);
+        }).toThrow();
+    });
+
+    await vm.it('setSupportedDestChain by a non-governor reverts', async () => {
+        setSender(alice);
+        await Assert.expect(async () => {
+            await token.setSupportedDestChain(1, true);
+        }).toThrow();
+        // State unchanged — alice's call had no effect.
+        Assert.expect(await token.isSupportedDestChain(1)).toEqual(false);
+    });
+
+    await vm.it('enabling one chain does not enable others', async () => {
+        setSender(deployer);
+        await token.setSupportedDestChain(1, true);
+        Assert.expect(await token.isSupportedDestChain(1)).toEqual(true);
+        Assert.expect(await token.isSupportedDestChain(11155111)).toEqual(false);
+
+        // Burn to the still-unsupported Sepolia chain reverts.
+        setSender(alice);
+        await Assert.expect(async () => {
+            await token.burnForRelease(ethRecipient32(), 100n, 11155111);
+        }).toThrow();
     });
 });

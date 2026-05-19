@@ -50,6 +50,14 @@ export class WrappedOP20 extends OP20 {
     );
     private readonly isMinterSelector: number = encodeNumericSelector('isMinter()');
     private readonly authorityAddressSelector: number = encodeNumericSelector('authorityAddress()');
+    private readonly setSupportedDestChainSelector: number = encodeSelectorWithParams(
+        'setSupportedDestChain',
+        ABIDataTypes.UINT32,
+        ABIDataTypes.BOOL,
+    );
+    private readonly isSupportedDestChainSelector: number = encodeNumericSelector(
+        'isSupportedDestChain()',
+    );
 
     // ─── OP20S (peg oracle) selectors ───────────────────────────────────────
     // Note: base-class methods are declared with @method() (no inputs) so the
@@ -204,6 +212,24 @@ export class WrappedOP20 extends OP20 {
         w.writeSelector(this.authorityAddressSelector);
         const r = await this.getResponse(w.getBuffer());
         return r.readAddress();
+    }
+
+    // ─── M-01: supported destination chains ─────────────────────────────────
+
+    public async setSupportedDestChain(destChainId: number, enabled: boolean): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setSupportedDestChainSelector);
+        w.writeU32(destChainId);
+        w.writeBoolean(enabled);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async isSupportedDestChain(destChainId: number): Promise<boolean> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.isSupportedDestChainSelector);
+        w.writeU32(destChainId);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readBoolean();
     }
 
     // ─── OP20S peg methods ──────────────────────────────────────────────────

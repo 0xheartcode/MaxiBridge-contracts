@@ -90,3 +90,18 @@ export class AuthorityAddressSet extends NetEvent {
         super('AuthorityAddressSet', data);
     }
 }
+
+// ─── M-01 — supported burn destinations ─────────────────────────────────
+
+/**
+ * Emitted when the governor enables/disables a burn destination chain.
+ * burnForRelease rejects any destChainId not enabled here.
+ */
+export class SupportedDestChainSet extends NetEvent {
+    constructor(destChainId: u32, enabled: bool) {
+        const data = new BytesWriter(4 + 1);
+        data.writeU32(destChainId);
+        data.writeBoolean(enabled);
+        super('SupportedDestChainSet', data);
+    }
+}

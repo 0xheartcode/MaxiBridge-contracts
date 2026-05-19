@@ -25,6 +25,7 @@ import {
     BurnedForRelease,
     Paused,
     Unpaused,
+    SupportedDestChainSet,
 } from './events';
 
 /**
@@ -89,6 +90,14 @@ export class WrappedOP20 extends OP20S {
     // BridgeAuthority address allowed to grant/revoke minters in addition
     // to the governor. Set via `setAuthorityAddress`. Zero by default.
     private _authorityAddress: StoredAddress = new StoredAddress(Blockchain.nextPointer);
+
+    // M-01 — supported burn destinations. `burnForRelease(destChainId)` is
+    // permissionless; without this allowlist a user could burn to a chain
+    // the bridge does not service, destroying tokens with no release voucher
+    // and no refund path. Keyed by destChainId (u256), value u256.One when
+    // enabled. Governor-set; fail-closed — empty until the deploy ceremony
+    // calls `setSupportedDestChain` for each serviced chain.
+    private _supportedDestChains: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
     public constructor() {
         super();
@@ -337,6 +346,44 @@ export class WrappedOP20 extends OP20S {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    //  Governor: supported burn destinations (M-01)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Enable or disable a burn destination chain. `burnForRelease` rejects
+     * any destChainId not enabled here. Fail-closed: a fresh deploy has no
+     * enabled destinations until the governor adds them.
+     */
+    @method(
+        { name: 'destChainId', type: ABIDataTypes.UINT32 },
+        { name: 'enabled', type: ABIDataTypes.BOOL },
+    )
+    @emit('SupportedDestChainSet')
+    public setSupportedDestChain(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const destChainId: u32 = calldata.readU32();
+        if (destChainId == 0) {
+            throw new Revert('WrappedOP20: zero destChainId');
+        }
+        const enabled: boolean = calldata.readBoolean();
+        this._supportedDestChains.set(
+            u256.fromU32(destChainId),
+            enabled ? u256.One : u256.Zero,
+        );
+        this.emitEvent(new SupportedDestChainSet(destChainId, enabled));
+        return new BytesWriter(0);
+    }
+
+    @view
+    @returns({ name: 'supported', type: ABIDataTypes.BOOL })
+    public isSupportedDestChain(calldata: Calldata): BytesWriter {
+        const destChainId: u32 = calldata.readU32();
+        const r = new BytesWriter(1);
+        r.writeBoolean(!this._supportedDestChains.get(u256.fromU32(destChainId)).isZero());
+        return r;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     //  Mint (bridge-only)
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -411,6 +458,12 @@ export class WrappedOP20 extends OP20S {
         }
         if (destChainId == 0) {
             throw new Revert('WrappedOP20: zero destChainId');
+        }
+        // M-01 — only allow burns to a destination the bridge services.
+        // A burn to an unsupported chain would destroy tokens with no
+        // release voucher ever signed and no on-chain refund path.
+        if (this._supportedDestChains.get(u256.fromU32(destChainId)).isZero()) {
+            throw new Revert('WrappedOP20: unsupported destChainId');
         }
 
         // EVM-family padding check: for Ethereum mainnet (1) and Sepolia

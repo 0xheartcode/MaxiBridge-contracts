@@ -105,6 +105,36 @@
             "outputs": []
         },
         {
+            "name": "setSupportedDestChain",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "destChainId",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "enabled",
+                    "type": "BOOL"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "isSupportedDestChain",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "supported",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
             "name": "mintTo",
             "type": "Function",
             "payable": false,
@@ -275,6 +305,20 @@
         {
             "name": "Unpaused",
             "values": [],
+            "type": "Event"
+        },
+        {
+            "name": "SupportedDestChainSet",
+            "values": [
+                {
+                    "name": "destChainId",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "enabled",
+                    "type": "BOOL"
+                }
+            ],
             "type": "Event"
         },
         {
