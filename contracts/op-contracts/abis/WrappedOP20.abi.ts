@@ -43,6 +43,14 @@ export const WrappedOP20Events = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'SupportedDestChainSet',
+        values: [
+            { name: 'destChainId', type: ABIDataTypes.UINT32 },
+            { name: 'enabled', type: ABIDataTypes.BOOL },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'Minted',
         values: [
             { name: 'to', type: ABIDataTypes.ADDRESS },
@@ -114,6 +122,22 @@ export const WrappedOP20Abi = [
         name: 'setPaused',
         inputs: [{ name: 'paused', type: ABIDataTypes.BOOL }],
         outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setSupportedDestChain',
+        inputs: [
+            { name: 'destChainId', type: ABIDataTypes.UINT32 },
+            { name: 'enabled', type: ABIDataTypes.BOOL },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'isSupportedDestChain',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'supported', type: ABIDataTypes.BOOL }],
         type: BitcoinAbiTypes.Function,
     },
     {

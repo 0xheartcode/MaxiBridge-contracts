@@ -23,6 +23,10 @@ export type MinterRevokedEvent = {
 };
 export type PausedEvent = {};
 export type UnpausedEvent = {};
+export type SupportedDestChainSetEvent = {
+    readonly destChainId: number;
+    readonly enabled: boolean;
+};
 export type MintedEvent = {
     readonly to: Address;
     readonly amount: bigint;
@@ -90,6 +94,21 @@ export type AuthorityAddress = CallResult<
  * @description Represents the result of the setPaused function call.
  */
 export type SetPaused = CallResult<{}, OPNetEvent<PausedEvent | UnpausedEvent>[]>;
+
+/**
+ * @description Represents the result of the setSupportedDestChain function call.
+ */
+export type SetSupportedDestChain = CallResult<{}, OPNetEvent<SupportedDestChainSetEvent>[]>;
+
+/**
+ * @description Represents the result of the isSupportedDestChain function call.
+ */
+export type IsSupportedDestChain = CallResult<
+    {
+        supported: boolean;
+    },
+    OPNetEvent<never>[]
+>;
 
 /**
  * @description Represents the result of the mintTo function call.
@@ -163,6 +182,8 @@ export interface IWrappedOP20 extends IOP_NETContract {
     isMinter(): Promise<IsMinter>;
     authorityAddress(): Promise<AuthorityAddress>;
     setPaused(paused: boolean): Promise<SetPaused>;
+    setSupportedDestChain(destChainId: number, enabled: boolean): Promise<SetSupportedDestChain>;
+    isSupportedDestChain(): Promise<IsSupportedDestChain>;
     mintTo(to: Address, amount: bigint): Promise<MintTo>;
     burnForRelease(ethRecipient: Uint8Array, amount: bigint, destChainId: number): Promise<BurnForRelease>;
     bridgeDepository(): Promise<BridgeDepository>;

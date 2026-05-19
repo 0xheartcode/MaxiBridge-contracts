@@ -272,11 +272,13 @@ await opnet('BridgeDepository — PR γ.1 — flow consumption (mint path)', asy
         Assert.expect(await wusdc.balanceOf(alice)).toEqual(fields.netAmount);
     });
 
-    await vm.it('cap overflow on mint reverts', async () => {
-        // cap = 1_500_000; first mint of 1_000_000 grossDst fits (inventory
-        // becomes 1_000_000), second mint of 1_000_000 would push to
-        // 2_000_000 > cap → revert.
-        await registerFlow(setup, { cap: 1_500_000n });
+    await vm.it('M-02: cap is NOT enforced on the mint path (cumulative > cap succeeds)', async () => {
+        // M-02 removed the per-flow `cap` ceiling on mint-on-OPNet modes
+        // (it acted as a LIFETIME limit that permanently bricked the flow).
+        // cap = 1_500_000 but two 1_000_000-gross mints (cumulative
+        // 2_000_000 > cap) must BOTH succeed — the rolling dailyLimit is
+        // the only mint bound now.
+        await registerFlow(setup, { cap: 1_500_000n, dailyLimit: 1_000_000_000_000n });
         const { depository, signerWallet } = setup;
         const f1 = { ...defaultFields(setup, alice, 0xc1n) };
         const v1 = buildVoucher(f1);
@@ -284,9 +286,8 @@ await opnet('BridgeDepository — PR γ.1 — flow consumption (mint path)', asy
         await depository.claimMintWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
         const f2 = { ...defaultFields(setup, alice, 0xc2n) };
         const v2 = buildVoucher(f2);
-        await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
-        }).toThrow();
+        // Pre-M-02 this reverted 'flow cap exceeded'. Now it must succeed.
+        await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
     });
 
     await vm.it('dailyLimit first claim resets window and consumes', async () => {
@@ -372,12 +373,15 @@ await opnet('BridgeDepository — PR γ.1 — flow consumption (mint path)', asy
         }).toThrow();
     });
 
-    await vm.it('inventory growth tracked across mints (cap-tight invariant)', async () => {
-        // Register a tight cap = 2_000_000 — fits two 1_000_000 grossDst
-        // mints. Cumulative inventory after both is 2_000_000 (== cap).
-        // A third mint of any positive grossDst must revert. This proves
-        // inventory increments by grossDst on every mint.
-        await registerFlow(setup, { cap: 2_000_000n });
+    await vm.it('M-02: mint path does NOT increment _flowInventory (stays 0)', async () => {
+        // M-02 — mint-on-OPNet modes no longer touch `_flowInventory`.
+        // After three mints the flow's inventory ledger (getFlow index 16)
+        // must still read 0 — "not tracked on this side". The cap is set
+        // far below cumulative volume to also prove cap is unenforced.
+        const flowId = await registerFlow(setup, {
+            cap: 2_000_000n,
+            dailyLimit: 1_000_000_000_000n,
+        });
         const { depository, signerWallet } = setup;
         setSender(alice);
         const f1 = { ...defaultFields(setup, alice, 0xf1n) };
@@ -386,12 +390,13 @@ await opnet('BridgeDepository — PR γ.1 — flow consumption (mint path)', asy
         const f2 = { ...defaultFields(setup, alice, 0xf2n) };
         const v2 = buildVoucher(f2);
         await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
-        // Third mint — would push inventory to 3_000_000 > 2_000_000 cap.
         const f3 = { ...defaultFields(setup, alice, 0xf3n) };
         const v3 = buildVoucher(f3);
-        await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(v3.preimage, signVoucher(signerWallet, v3.hash));
-        }).toThrow();
+        // Cumulative gross 3_000_000 > cap 2_000_000 — still succeeds.
+        await depository.claimMintWithVoucher(v3.preimage, signVoucher(signerWallet, v3.hash));
+
+        const flow = await depository.getFlow(flowId);
+        Assert.expect(flow[16]!).toEqual(0n); // index 16 = inventory
     });
 });
 

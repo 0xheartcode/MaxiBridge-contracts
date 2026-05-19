@@ -590,6 +590,22 @@ contract BridgeEscrow is
     }
 
     // ---------------------------------------------------------------------
+    // Access control — incident response (H-01)
+    // ---------------------------------------------------------------------
+
+    /// @notice H-01 — incident-response actions (pause, voucher
+    ///         cancellation, signer removal/rotation) must stay fast even
+    ///         after `owner` is handed to the 7-day TimelockController.
+    ///         The set-once `guardian` may invoke them alongside the owner.
+    ///         Recovery actions (unpause, addSigner, setThreshold, upgrades,
+    ///         flow/treasury config) remain owner-only — the timelock delay
+    ///         IS the safeguard for those.
+    modifier onlyOwnerOrGuardian() {
+        if (msg.sender != owner() && msg.sender != guardian) revert NotGuardian();
+        _;
+    }
+
+    // ---------------------------------------------------------------------
     // Core — lock
     // ---------------------------------------------------------------------
 
@@ -1046,7 +1062,7 @@ contract BridgeEscrow is
         emit SignerAdded(newSigner, signerCount);
     }
 
-    function removeSigner(address oldSigner) external onlyOwner {
+    function removeSigner(address oldSigner) external onlyOwnerOrGuardian {
         if (!isSigner[oldSigner]) revert NotASigner();
         unchecked {
             uint256 newCount = signerCount - 1;
@@ -1086,7 +1102,7 @@ contract BridgeEscrow is
         address[] calldata addList,
         address[] calldata removeList,
         uint256 newThreshold
-    ) external onlyOwner {
+    ) external onlyOwnerOrGuardian {
         uint256 rLen = removeList.length;
         for (uint256 i = 0; i < rLen; ) {
             address s = removeList[i];
@@ -1120,7 +1136,7 @@ contract BridgeEscrow is
         emit SignerSetMigrated(oldEpoch, newEpoch, signerCount, newThreshold);
     }
 
-    function cancelVoucher(bytes32 opnetNonce) external onlyOwner {
+    function cancelVoucher(bytes32 opnetNonce) external onlyOwnerOrGuardian {
         if (cancelledVouchers[opnetNonce]) return;
         cancelledVouchers[opnetNonce] = true;
         emit VoucherCancelled(opnetNonce, msg.sender);
@@ -1136,7 +1152,7 @@ contract BridgeEscrow is
         emit SupportedTokenUpdated(token, enabled);
     }
 
-    function pause() external onlyOwner {
+    function pause() external onlyOwnerOrGuardian {
         _pause();
     }
 

@@ -212,6 +212,8 @@ async function registerFlow(
         sourceTokenAddr?: Address;
         wrappedToken?: Address;
         tipCapBps?: bigint;
+        cap?: bigint;
+        dailyLimit?: bigint;
     } = {},
 ): Promise<bigint> {
     const sourceBridgeAddr = opts.sourceBridgeAddr ?? DEFAULT_SOURCE_BRIDGE;
@@ -229,8 +231,8 @@ async function registerFlow(
         feeBps: 50n,
         minFee: 0n,
         minAmount: 0n,
-        cap: 1_000_000_000_000n,
-        dailyLimit: 100_000_000_000n,
+        cap: opts.cap ?? 1_000_000_000_000n,
+        dailyLimit: opts.dailyLimit ?? 100_000_000_000n,
         tipCapBps: opts.tipCapBps ?? 0n,
     });
 }
@@ -586,5 +588,293 @@ await opnet('BridgeDepository — PR β.2.payout-opnet — release path', async 
                 signVoucher(signerWallet, hash),
             );
         }).toThrow();
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// M-02 — claimMintWithVoucher no longer caps against cumulative _flowInventory
+//
+// Fix: mint-on-OPNet modes (0/2) no longer increment `_flowInventory` and no
+// longer enforce the flow `cap` against it. Pre-M-02, `cap` acted as a
+// LIFETIME ceiling that permanently bricked the mint path once cumulative
+// volume reached it. The rolling `dailyLimit` is still the mint bound.
+// ════════════════════════════════════════════════════════════════════════════
+
+await opnet('BridgeDepository — M-02: mint path cap/inventory removed', async (vm: OPNetUnit) => {
+    let setup: BridgeSetup;
+
+    vm.beforeEach(async () => {
+        Blockchain.dispose();
+        Blockchain.clearContracts();
+        await Blockchain.init();
+        setSender(deployer);
+        setup = await setupContracts();
+    });
+
+    vm.afterEach(() => disposeSetup(setup));
+
+    // Mint flowId — mirrors `_flowIdFromVoucher(mode 0, chainId, evmBridge,
+    // evmToken, depository, wrappedToken)`.
+    async function mintFlowId(): Promise<bigint> {
+        return await setup.depository.computeFlowId(
+            0n,
+            ETH_CHAIN_ID,
+            evmAddrRightPadToBigInt(DEFAULT_SOURCE_BRIDGE),
+            evmAddrRightPadToBigInt(DEFAULT_SOURCE_TOKEN),
+            opnetAddrToBigInt(setup.depositoryAddress),
+            opnetAddrToBigInt(setup.wusdcAddress),
+        );
+    }
+
+    await vm.it('cumulative mints exceeding the flow cap still succeed', async () => {
+        // cap = 1_500_000 — below the sum of three 995_000-net claims
+        // (2_985_000). dailyLimit kept high so it is not the binding limit.
+        await registerFlow(setup, {
+            cap: 1_500_000n,
+            dailyLimit: 1_000_000_000_000n,
+        });
+        const { depository, wusdc, signerWallet } = setup;
+
+        // Three claims, distinct voucherId + sourceLogIndex so each is a
+        // unique source event. Total net minted = 2_985_000 >> cap.
+        for (let i = 0; i < 3; i++) {
+            const fields = {
+                ...defaultFields(setup, alice),
+                voucherId: 0x1000n + BigInt(i),
+                sourceLogIndex: 10 + i,
+                relayerTip: 0n,
+            };
+            const { preimage, hash } = buildVoucher(fields);
+            setSender(alice);
+            // Pre-M-02 the 2nd claim would revert 'flow cap exceeded'.
+            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        }
+
+        Assert.expect(await wusdc.balanceOf(alice)).toEqual(2_985_000n);
+        Assert.expect(await wusdc.totalSupply()).toEqual(2_985_000n);
+    });
+
+    await vm.it('_flowInventory stays 0 for a mint flow after claims', async () => {
+        await registerFlow(setup, {
+            cap: 1_500_000n,
+            dailyLimit: 1_000_000_000_000n,
+        });
+        const { depository, signerWallet } = setup;
+
+        for (let i = 0; i < 2; i++) {
+            const fields = {
+                ...defaultFields(setup, alice),
+                voucherId: 0x2000n + BigInt(i),
+                sourceLogIndex: 20 + i,
+                relayerTip: 0n,
+            };
+            const { preimage, hash } = buildVoucher(fields);
+            setSender(alice);
+            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        }
+
+        // getFlow tuple index 16 = inventory (see BridgeDepository wrapper).
+        const flow = await depository.getFlow(await mintFlowId());
+        Assert.expect(flow[16]).toEqual(0n);
+    });
+
+    await vm.it('dailyLimit revert still fires when a window total exceeds it', async () => {
+        // dailyLimit = 1_500_000 on the source-side gross. Each claim's
+        // gross = 1_000_000. First claim consumes 1_000_000; the second
+        // would push the window total to 2_000_000 > 1_500_000 → revert.
+        await registerFlow(setup, {
+            cap: 1_000_000_000_000n,
+            dailyLimit: 1_500_000n,
+        });
+        const { depository, signerWallet } = setup;
+
+        const f1 = {
+            ...defaultFields(setup, alice),
+            voucherId: 0x3000n,
+            sourceLogIndex: 30,
+            relayerTip: 0n,
+        };
+        const v1 = buildVoucher(f1);
+        setSender(alice);
+        await depository.claimMintWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
+
+        const f2 = {
+            ...defaultFields(setup, alice),
+            voucherId: 0x3001n,
+            sourceLogIndex: 31,
+            relayerTip: 0n,
+        };
+        const v2 = buildVoucher(f2);
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
+        }).toThrow();
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// L-07 — claimReleaseWithVoucher recipient==sender binding relaxed when tipped
+//
+// Fix: the `recipient == tx.sender` binding on the release path is enforced
+// ONLY when `relayerTip == 0`. A non-zero tip means the user opted into
+// permissionless submission — any sender may relay; funds still go to the
+// voucher's recipient. Without this the relayer-tip release path is
+// unreachable (only the recipient could ever submit).
+// ════════════════════════════════════════════════════════════════════════════
+
+await opnet('BridgeDepository — L-07: release recipient binding gated by tip', async (vm: OPNetUnit) => {
+    let setup: BridgeSetup;
+
+    vm.beforeEach(async () => {
+        Blockchain.dispose();
+        Blockchain.clearContracts();
+        await Blockchain.init();
+        setSender(deployer);
+        setup = await setupContracts();
+    });
+
+    vm.afterEach(() => disposeSetup(setup));
+
+    // Mint balance into the depository via a mode-0 voucher, then flip the
+    // wrapped token to mode-1 (INVERSE_WRAPPED) so the release path is live.
+    async function preFundAndFlipMode1(amount: bigint): Promise<void> {
+        await registerFlow(setup, { tipCapBps: 0n });
+        const { depository, signerWallet, depositoryAddress } = setup;
+        const f0 = {
+            ...defaultFields(setup, depositoryAddress),
+            voucherId: 0x7999n,
+            sourceLogIndex: 700,
+            grossAmount: amount,
+            feeAmount: 0n,
+            netAmount: amount,
+            relayerTip: 0n,
+        };
+        const v0 = buildVoucher(f0);
+        setSender(depositoryAddress);
+        await depository.claimMintWithVoucher(v0.preimage, signVoucher(signerWallet, v0.hash));
+
+        const { ABIDataTypes } = await import('@btc-vision/transaction');
+        const { encodeSelectorWithParams } = await import('../contracts/utils.js');
+        const setTokenModeSel = encodeSelectorWithParams(
+            'setTokenMode',
+            ABIDataTypes.ADDRESS,
+            ABIDataTypes.UINT256,
+            ABIDataTypes.UINT256,
+        );
+        const w = new BinaryWriter();
+        w.writeSelector(setTokenModeSel);
+        w.writeAddress(setup.wusdcAddress);
+        w.writeU256(1n);
+        w.writeU256(0xc0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0fen);
+        setSender(deployer);
+        await (depository as unknown as {
+            execute: (a: { calldata: Uint8Array }) => Promise<{ error?: Error }>;
+        }).execute({ calldata: w.getBuffer() }).then((r) => {
+            if (r.error) throw r.error;
+        });
+    }
+
+    async function callClaimReleaseWithVoucher(
+        depository: BridgeDepository,
+        voucher: Uint8Array,
+        sigBlob: Uint8Array,
+    ): Promise<void> {
+        const { ABIDataTypes } = await import('@btc-vision/transaction');
+        const { encodeSelectorWithParams } = await import('../contracts/utils.js');
+        const sel = encodeSelectorWithParams(
+            'claimReleaseWithVoucher',
+            ABIDataTypes.BYTES,
+            ABIDataTypes.BYTES,
+        );
+        const w = new BinaryWriter();
+        w.writeSelector(sel);
+        w.writeBytesWithLength(voucher);
+        w.writeBytesWithLength(sigBlob);
+        const r = await (depository as unknown as {
+            execute: (a: { calldata: Uint8Array }) => Promise<{ error?: Error }>;
+        }).execute({ calldata: w.getBuffer() });
+        if (r.error) throw r.error;
+    }
+
+    function releaseFields(recipient: Address, tip: bigint, srcBridge: Address, srcToken: Address): VoucherFields {
+        return {
+            contractSelf: setup.depositoryAddress,
+            selector: CLAIM_RELEASE_WITH_VOUCHER_SELECTOR,
+            recipient,
+            sourceBridgeAddr: srcBridge,
+            sourceTokenAddr: srcToken,
+            sourceTxHash: 0xfeed7n,
+            sourceLogIndex: 770,
+            wrappedToken: setup.wusdcAddress,
+            grossAmount: 1_000_000n,
+            feeAmount: 5_000n,
+            netAmount: 995_000n,
+            relayerTip: tip,
+            voucherId: 0xb77n,
+        };
+    }
+
+    await vm.it('tip-zero release submitted by a non-recipient reverts wrong recipient', async () => {
+        await preFundAndFlipMode1(2_000_000n);
+        const srcBridge = Blockchain.generateRandomAddress();
+        const srcToken = Blockchain.generateRandomAddress();
+        await registerFlow(setup, {
+            mode: 1n,
+            sourceBridgeAddr: srcBridge,
+            sourceTokenAddr: srcToken,
+            tipCapBps: 200n,
+        });
+        const { depository, signerWallet } = setup;
+        // recipient = alice, tip = 0 → binding enforced.
+        const { preimage, hash } = buildVoucher(releaseFields(alice, 0n, srcBridge, srcToken));
+        // Submitted by bob (NOT the recipient) → 'wrong recipient'.
+        setSender(bob);
+        await Assert.expect(async () => {
+            await callClaimReleaseWithVoucher(depository, preimage, signVoucher(signerWallet, hash));
+        }).toThrow();
+    });
+
+    await vm.it('tipped release submitted by a non-recipient does NOT revert on the recipient check', async () => {
+        // A tipped (relayerTip > 0) release voucher relaxes the
+        // recipient==sender binding. We prove the recipient check is no
+        // longer the blocker by submitting from a non-recipient (bob) and
+        // asserting the call gets PAST the L-07 check.
+        //
+        // Mode-1 release also enforces `_flowInventory >= grossDst`. This
+        // unit-test harness pre-funds the depository's token *balance* but
+        // not the flow *inventory ledger* (that ledger is produced by
+        // `lockForBridge` — exercised end-to-end in flow-consumption.ts).
+        // So the tipped call reverts with 'insufficient flow inventory'
+        // — NOT 'wrong recipient'. That distinct revert message is the
+        // proof: a tip-zero voucher from a non-recipient dies at the
+        // recipient gate; the tipped one sails past it and only stops at
+        // the later inventory check.
+        await preFundAndFlipMode1(2_000_000n);
+        const srcBridge = Blockchain.generateRandomAddress();
+        const srcToken = Blockchain.generateRandomAddress();
+        await registerFlow(setup, {
+            mode: 1n,
+            sourceBridgeAddr: srcBridge,
+            sourceTokenAddr: srcToken,
+            tipCapBps: 200n,
+        });
+        const { depository, signerWallet } = setup;
+        // recipient = alice, tip = 9_950 (100 bps, under the 200 bps cap).
+        const { preimage, hash } = buildVoucher(releaseFields(alice, 9_950n, srcBridge, srcToken));
+        setSender(bob); // bob is NOT the voucher recipient.
+
+        let caught: Error | undefined;
+        try {
+            await callClaimReleaseWithVoucher(depository, preimage, signVoucher(signerWallet, hash));
+        } catch (e) {
+            caught = e as Error;
+        }
+        // It still reverts — but on the LATER inventory check, never on the
+        // L-07 recipient gate. If the binding still applied, the message
+        // would be 'wrong recipient'.
+        Assert.expect(caught !== undefined).toEqual(true);
+        const msg = caught!.message;
+        Assert.expect(msg.includes('wrong recipient')).toEqual(false);
+        Assert.expect(msg.includes('insufficient flow inventory')).toEqual(true);
     });
 });
