@@ -148,11 +148,8 @@ Bridge-Monorepo/
 │   ├── TERMS.md              # DRAFT T&C for frontend modal (legal review required)
 │   ├── TESTNET-SMOKE-TEST.md # 12-section end-to-end walkthrough — START HERE for testnet runs
 │   ├── PHASE-1-OPNET-IMPLEMENTATION.md  # Phase 1 OPNet design notes
-│   ├── BRIDGE_REDESIGN_PLAN.md / PLAN-canonical-op20-bridge.md  # canonical multi-flow plan
 │   ├── DEFERRED-WORK.md      # known follow-ups indexed to GitHub issues
 │   ├── EXTERNAL_AUDITOR_BRIEFING.md  # hand-off doc for the audit
-│   ├── NEXT-STEPS-2026-05-12.md     # latest session handoff
-│   ├── PLAN-AUDIT-2026-05-12.md     # plan-vs-actual audit
 │   └── runbooks/
 │       ├── mainnet-deploy.md       # FIRST mainnet deploy ceremony (gate: audit sign-off)
 │       └── watchdog-railway-deploy.md  # bridge-watchdog on Railway
