@@ -1483,9 +1483,18 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: wrong signerEpoch');
         }
 
-        const sender: Address = Blockchain.tx.sender;
-        if (!parsed.recipient.equals(sender)) {
-            throw new Revert('BridgeDepository: wrong recipient');
+        // L-07 — mirror claimMintWithVoucher: enforce the recipient==sender
+        // binding only for DIY claims (relayerTip == 0). A non-zero
+        // relayerTip means the user opted into permissionless submission —
+        // any tx.sender may relay; funds still go to the ML-DSA-bound
+        // `parsed.recipient` (the release transfer below) and the relayer
+        // collects the signed tip. Without this the relayer-tip path on the
+        // release leg is unreachable (only the recipient could ever submit).
+        if (parsed.relayerTip.isZero()) {
+            const sender: Address = Blockchain.tx.sender;
+            if (!parsed.recipient.equals(sender)) {
+                throw new Revert('BridgeDepository: wrong recipient');
+            }
         }
 
         const sum: u256 = SafeMath.add(parsed.feeAmount, parsed.netAmount);
@@ -2394,18 +2403,15 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: amount below flow min');
         }
 
-        // PR γ.1 — cap (mode-2 mint ceiling, also applied for mode-0
-        // wrapped). Mint path INCREASES inventory; assert pre-add fits in
-        // cap. Use SafeMath.add to avoid u256 overflow on hostile inputs.
-        const flowCapMint: u256 = this._flowCap.get(flowIdMint);
-        const inventoryMintBefore: u256 = this._flowInventory.get(flowIdMint);
-        const inventoryMintAfter: u256 = SafeMath.add(
-            inventoryMintBefore,
-            parsed.grossAmount,
-        );
-        if (u256.gt(inventoryMintAfter, flowCapMint)) {
-            throw new Revert('BridgeDepository: flow cap exceeded');
-        }
+        // M-02 — mode-0/2 (mint-on-OPNet) flows have NO inventory-decrement
+        // path on the OPNet side: burns happen on WrappedOP20, off the flow
+        // ledger. The pre-M-02 code incremented `_flowInventory` on every
+        // mint and capped against it, so `cap` acted as a LIFETIME ceiling
+        // that permanently bricked the mint path once cumulative volume
+        // reached it. `_flowInventory` is therefore left untouched for these
+        // modes (stays 0 — unambiguous: "not tracked on this side"); the
+        // rolling `dailyLimit` below is the mint bound, and the wrapped
+        // token's own `maxSupply` is the hard supply ceiling.
 
         // PR γ.1 — rolling 24h dailyLimit. Reset bucket if older than
         // FLOW_WINDOW_DURATION (86400s); then assert and consume.
@@ -2423,8 +2429,8 @@ export class BridgeDepository extends ReentrancyGuard {
         }
         this._flowMintedToday.set(flowIdMint, newMintedMint);
 
-        // PR γ.1 — inventory ↑ (mint path).
-        this._flowInventory.set(flowIdMint, inventoryMintAfter);
+        // M-02 — no `_flowInventory` mutation for mint-on-OPNet modes
+        // (see the note above the dailyLimit block).
 
         let recipientNetAmountMint: u256 = parsed.netAmount;
         if (!parsed.relayerTip.isZero()) {
