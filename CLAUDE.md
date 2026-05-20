@@ -81,7 +81,9 @@ Bridge-Monorepo/
 │
 ├── contracts/evm-contracts/            # Solidity + Foundry (UUPS BridgeEscrow)
 │   ├── src/BridgeEscrow.sol
-│   ├── test/                 # 82/82 passing — BridgeEscrow + Create2Deploy + fork-tests-behind-SEPOLIA_RPC_URL
+│   ├── src/IVestingVault.sol  # Mode 4 interface (depositFor / clawback / previewClaimable)
+│   ├── src/VestingVault.sol   # Mode 4 destination vault — linear block-based release
+│   ├── test/                 # 271/271 passing — BridgeEscrow + VestingVault + Mode4 + Create2Deploy + fork-tests-behind-SEPOLIA_RPC_URL
 │   ├── script/Deploy.s.sol
 │   ├── script/check-storage-layout.sh
 │   ├── storage-layout.json   # COMMITTED snapshot — CI diff gate for upgrades
@@ -225,6 +227,13 @@ npm run integration:drills             # security drills (replay, rotation, reor
 
 1. **Chains v1:** Ethereum mainnet + OPNet testnet. Hybrid: real USDC/USDT locked on-chain, wrapped tokens on OPNet testnet for safety during initial testing.
 2. **Wrapped tokens:** unified — one `wUSDC`, one `wUSDT` on OPNet, 1:1 backed, 6 decimals (matches USDC/USDT). Future multi-chain expansion means same wUSDC is backed by all chains' USDC combined (fungibility risk to re-audit when adding BSC/Arb/Base). **Decimal convention for new flows:** stable pairs ship as 6/6 (matching the EVM-source decimals). Higher-precision assets (wDAI = 18, wWETH = 18, etc.) make a per-flow choice at `addFlow` time via `evmDecimals` / `opnetDecimals` in `FlowAddParams` — `AmountPolicy.quote` is decimal-aware so source and destination decimals can differ.
+
+   **Flow modes (`TokenMode`):**
+   - `0` WRAPPED — EVM lock → OPNet wrapped mint (USDC/USDT today).
+   - `1` INVERSE_WRAPPED — OPNet lock → EVM wrapped mint.
+   - `2` NATIVE_BURN_MINT — symmetric mint/burn, used for native tokens with bridge mint authority on both sides.
+   - `3` POOLED_LOCK_RELEASE — pre-funded reserve pool on both sides, no minting (canonical MOTO-style).
+   - `4` POOLED_LOCK_VEST — identical to mode 3 on the source/lock side, but the EVM `claim` deposits into a per-flow **`VestingVault`** that linearly drips to the beneficiary over a fixed block window (~7 days at 12s/block). Used when a client wants destination-side release to trickle instead of paying all at once. **Two-step setup:** governor calls `addFlow(mode=4)` then `setFlowVestingVault(flowId, vault)` — `lock` / `claim` / `provisionInventory` all defensively reject mode-4 flows whose vault is still zero, so a half-set-up flow can't strand tokens. `setFlowVestingVault` additionally requires `vault.token() == flow.evmToken` (closes governance-misconfiguration class — a vault holding the wrong asset can never be wired). Each bridge claim opens an independent schedule keyed by the voucher `opnetNonce` (no top-up — each lock = its own 7d vest). Bridge can `clawback(beneficiary, opnetNonce)` the unvested portion if the source voucher is reorged out (C-01 follow-through for Mode 4). 42 tests under `test/VestingVault.t.sol` + `test/BridgeEscrowMode4.t.sol`. Operator surface: deploy via `npm run deploy:evm:vesting-vault` (`scripts/src/deploy/evm-deploy-vesting-vault.ts`, env: `VESTING_VAULT_TOKEN` / `VESTING_VAULT_BRIDGE` / optional `VESTING_VAULT_BLOCKS`); wire + faucet from the admin panel `/admin/mode4` tab (calldata-export pattern, no admin-side signer). **Reorg + Mode 4 = TWO ops calls:** `BridgeEscrow.cancelVoucher(opnetNonce)` then `VestingVault.clawback(beneficiary, opnetNonce)` — the second one returns the unvested portion to the bridge while the vested-so-far stays with the beneficiary.
 3. **Upgradeability split:**
    - **EVM `BridgeEscrow`:** OZ UUPS proxy with full hardening (`_disableInitializers` in impl ctor, `initializer` gated init, `_authorizeUpgrade` onlyOwner, no `selfdestruct`, no arbitrary `delegatecall`, `uint256[42] __gap`; storage-layout CI diff gate is `astId`-insensitive). **Owner is `TimelockController(604800s)` (7 days), not the deployer EOA** — every upgrade goes through `schedule(...) → wait 7d → execute(...)`. Mirrors OPNet's `UpdatablePlugin(1008 blocks)` so users have a full week to exit on either chain. Deploy the timelock with `npm run deploy:evm:timelock` (script: `scripts/src/deploy/evm-deploy-timelock.ts`); transfer ownership with `npm run deploy:evm:transfer-ownership` (`scripts/src/deploy/evm-transfer-ownership-to-timelock.ts`). Proposer = governance Safe (`EVM_GOVERNANCE_SAFE`); executors = `address(0)` (open-execute, the 7-day delay IS the safeguard); admin = `address(0)` (burned at construction). Test scaffold: `contracts/evm-contracts/test/TimelockUpgrade.t.sol`. Ceremony walk-through: `docs/RUNBOOK.md` §0.
    - **OPNet `BridgeDepository`:** `UpdatablePlugin(1008 blocks)` (~7 days at 10min/block) registered in the ctor — Phase 2.2 raised this from 144 (~24h) to give users a full week to exit before any upgrade lands. `onUpdate()` runs migrations gated by `_storageVersion: StoredU256`; storage APPEND-ONLY per workspace "Five Upgrade Commandments". **Governance-gated upgrade authority (PR #43, closes Bug #16b):** in addition to the plugin's `onlyDeployer` gate, every applyUpdate requires governance pre-authorization. Governor (or registered BridgeAuthority) wires `setUpgradeAuthority(addr)`; from then on each upgrade needs `proposeUpgrade()` to land — `onUpdate` consumes the one-shot flag and reverts (rolling back the apply) if it isn't armed. Veto path: `cancelProposedUpgrade()` (governor / authority / upgradeAuthority). Legacy deployer-only path stays open while `_upgradeAuthority` is unset (v1 bootstrap window). Net effect: a compromised deployer hot key alone cannot push a malicious upgrade.
@@ -432,6 +441,16 @@ Server MUST pack via `packOpnetMofN`. Frontend passes the blob through unchanged
 | `setThreshold` | `setThreshold(uint256)` | `0x960bfe04` |
 | `migrateSignerSet` | `migrateSignerSet(address[],address[],uint256)` | `0x3332b1ff` |
 | `migrateToMofN` | `migrateToMofN()` | `0x709ea1d3` |
+| `setFlowVestingVault` (Mode 4) | `setFlowVestingVault(bytes32,address)` | `0xc0f832a6` |
+
+**Mode 4 — VestingVault (`src/VestingVault.sol`, keccak256 selectors):**
+
+| Method | Signature | Selector |
+|--------|-----------|----------|
+| `depositFor` (bridge-only) | `depositFor(address,uint256,bytes32)` | `0x001cb6ad` |
+| `claim` (beneficiary) | `claim(bytes32)` | `0xbd66528a` |
+| `clawback` (bridge-only) | `clawback(address,bytes32)` | `0xc3d9f267` |
+| `previewClaimable` (view) | `previewClaimable(address,bytes32)` | `0x68674d8f` |
 
 **Phase 1 additions — OPNet `BridgeDepository` (sha256 selectors):**
 

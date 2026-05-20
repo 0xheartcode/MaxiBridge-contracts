@@ -12,6 +12,8 @@ import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC2
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
+import {IVestingVault} from "./IVestingVault.sol";
+
 /// @notice Minimal interface for the bridge-issued WrappedERC20 (modes
 ///         INVERSE_WRAPPED + NATIVE_BURN_MINT). Defined here so the
 ///         escrow doesn't need to import the concrete contract.
@@ -145,7 +147,14 @@ contract BridgeEscrow is
         WRAPPED,
         INVERSE_WRAPPED,
         NATIVE_BURN_MINT,
-        POOLED_LOCK_RELEASE
+        POOLED_LOCK_RELEASE,
+        // Mode 4 — same source/lock semantics as POOLED_LOCK_RELEASE, but on
+        // the EVM `claim` path the release is deposited into a per-flow
+        // VestingVault that linearly drips to the beneficiary over a fixed
+        // block window (e.g. 7 days). The beneficiary then `claim`s accrued
+        // portions from the vault at their own cadence. OPNet release leg
+        // (for the EVM→OPNet direction) is unchanged from mode 3.
+        POOLED_LOCK_VEST
     }
 
     /// @notice Hard cap on `unwrapFeeBps`. 1000 = 10%. A hostile or
@@ -197,7 +206,7 @@ contract BridgeEscrow is
     ///         and OPNet→EVM legs of the same route share the same flowId.
     struct FlowRecord {
         // Set-once at addFlow:
-        uint8   mode;             // 0=WRAPPED, 1=INVERSE_WRAPPED, 2=NATIVE_BURN_MINT, 3=POOLED_LOCK_RELEASE
+        uint8   mode;             // 0=WRAPPED, 1=INVERSE_WRAPPED, 2=NATIVE_BURN_MINT, 3=POOLED_LOCK_RELEASE, 4=POOLED_LOCK_VEST
         uint8   status;           // see FLOW_STATUS_* above
         uint64  evmChainId;
         address evmBridge;        // BridgeEscrow proxy on the EVM source chain
@@ -210,16 +219,22 @@ contract BridgeEscrow is
         uint16  feeBps;           // 0..MAX_FEE_BPS
         uint128 minFee;           // dst-side base units
         uint128 minAmount;        // src-side base units
-        uint128 cap;              // total inventory ceiling (mode 0/3) or mint ceiling (mode 2)
+        uint128 cap;              // total inventory ceiling (mode 0/3/4) or mint ceiling (mode 2)
         uint128 dailyLimit;       // per-flow rolling window
         // Hot fields written by claim/release in PR γ:
         uint128 mintedToday;
         uint64  lastWindowStart;
-        uint128 inventory;        // mode 0/3: locked tokens; mode 2: synthetic supply
+        uint128 inventory;        // mode 0/3/4: locked tokens; mode 2: synthetic supply
         // PR β.2 — per-flow permissionless relayer tip cap.
         // 0 = tipping disabled (default); cap is per-flow,
         // ≤ MAX_TIP_BPS = 200 (2%); governor-set.
         uint16  tipCapBps;
+        // Mode 4 (POOLED_LOCK_VEST) destination vault. Required iff
+        // `mode == POOLED_LOCK_VEST`; address(0) for every other mode. On
+        // claim, the bridge approves and calls `depositFor` on this vault
+        // instead of `safeTransfer`ing directly to the recipient. Governor-
+        // repointable via `setFlowVestingVault` (restricted to mode 4).
+        address vestingVault;
     }
 
     // ---------------------------------------------------------------------
@@ -456,6 +471,7 @@ contract BridgeEscrow is
     event FlowMinAmountChanged(bytes32 indexed flowId, uint128 oldMin, uint128 newMin);
     event FlowFeeChanged(bytes32 indexed flowId, uint16 oldBps, uint16 newBps, uint128 oldMinFee, uint128 newMinFee);
     event FlowTipCapUpdated(bytes32 indexed flowId, uint16 oldBps, uint16 newBps);
+    event FlowVestingVaultChanged(bytes32 indexed flowId, address oldVault, address newVault);
     event SignerSetMigrated(
         uint32 indexed oldEpoch,
         uint32 indexed newEpoch,
@@ -509,6 +525,10 @@ contract BridgeEscrow is
     error InsufficientSignatures();
     error DuplicateSigner();
     error VoucherCancelled_();
+    error VestingVaultRequired();
+    error VestingVaultNotPermitted();
+    error VestingVaultNotSet();
+    error VestingVaultTokenMismatch();
 
     // ─── Flow Registry errors ──────────────────────────────────────────
     error FlowAlreadyExists();
@@ -816,8 +836,18 @@ contract BridgeEscrow is
         // accumulating) and POOLED_LOCK_RELEASE (project tokens like MOTO
         // where users top up the inventory pool). Modes 1/2 (mint-on-EVM)
         // use WrappedERC20.burnForRelease on the wrapped contract directly.
-        if (flow.mode != uint8(TokenMode.WRAPPED) && flow.mode != uint8(TokenMode.POOLED_LOCK_RELEASE)) {
+        if (
+            flow.mode != uint8(TokenMode.WRAPPED)
+            && flow.mode != uint8(TokenMode.POOLED_LOCK_RELEASE)
+            && flow.mode != uint8(TokenMode.POOLED_LOCK_VEST)
+        ) {
             revert WrongMode();
+        }
+        // Mode 4 — block locks on a flow whose VestingVault hasn't been
+        // wired yet. Otherwise a user deposit would have no on-chain
+        // destination for its later claim, stranding tokens.
+        if (flow.mode == uint8(TokenMode.POOLED_LOCK_VEST) && flow.vestingVault == address(0)) {
+            revert VestingVaultNotSet();
         }
 
         // 1. status: lock is a forward (inbound) path. Allowed only on
@@ -925,7 +955,11 @@ contract BridgeEscrow is
         // `claimMintWrapped`. Bind the intent's `token` to `flow.evmToken`
         // so a release sig can't be replayed against a different token's
         // pool.
-        if (flow.mode != uint8(TokenMode.WRAPPED) && flow.mode != uint8(TokenMode.POOLED_LOCK_RELEASE)) {
+        if (
+            flow.mode != uint8(TokenMode.WRAPPED)
+            && flow.mode != uint8(TokenMode.POOLED_LOCK_RELEASE)
+            && flow.mode != uint8(TokenMode.POOLED_LOCK_VEST)
+        ) {
             revert WrongMode();
         }
         if (flow.evmToken != intent.token) revert WrongMode();
@@ -998,7 +1032,23 @@ contract BridgeEscrow is
             IERC20(intent.token).safeTransfer(msg.sender, tip);
         }
 
-        IERC20(intent.token).safeTransfer(intent.to, recipientAmount);
+        // Destination dispatch:
+        //   Mode 4 (POOLED_LOCK_VEST) — deposit into the per-flow VestingVault
+        //     for linear release to `intent.to`. Schedule key is the voucher
+        //     opnetNonce (already replay-guarded above), so each claim opens
+        //     an independent vest. Tip carve happened above; only the
+        //     recipient-bound `recipientAmount` enters the vault.
+        //   Default (modes 0 / 3) — direct release to `intent.to`.
+        if (flow.mode == uint8(TokenMode.POOLED_LOCK_VEST)) {
+            address vault = flow.vestingVault;
+            // addFlow + setFlowVestingVault both enforce non-zero for mode 4;
+            // defensive recheck before granting allowance.
+            if (vault == address(0)) revert VestingVaultNotSet();
+            IERC20(intent.token).safeIncreaseAllowance(vault, recipientAmount);
+            IVestingVault(vault).depositFor(intent.to, recipientAmount, intent.opnetNonce);
+        } else {
+            IERC20(intent.token).safeTransfer(intent.to, recipientAmount);
+        }
     }
 
     /// @dev Reverts on any verification failure. Sig format:
@@ -1297,8 +1347,19 @@ contract BridgeEscrow is
         if (amount == 0) revert AmountZero();
         FlowRecord storage flow = flows[flowId];
         if (flow.evmChainId == 0) revert FlowNotFound();
-        if (flow.mode != uint8(TokenMode.WRAPPED) && flow.mode != uint8(TokenMode.POOLED_LOCK_RELEASE)) {
+        if (
+            flow.mode != uint8(TokenMode.WRAPPED)
+            && flow.mode != uint8(TokenMode.POOLED_LOCK_RELEASE)
+            && flow.mode != uint8(TokenMode.POOLED_LOCK_VEST)
+        ) {
             revert WrongMode();
+        }
+        // Mode 4 — prevent provisioning a flow whose VestingVault hasn't
+        // been wired yet. Symmetric to the lock-side guard; closes the
+        // last path that could otherwise sit inventory on a half-set-up
+        // flow.
+        if (flow.mode == uint8(TokenMode.POOLED_LOCK_VEST) && flow.vestingVault == address(0)) {
+            revert VestingVaultNotSet();
         }
 
         address token = flow.evmToken;
@@ -1417,7 +1478,7 @@ contract BridgeEscrow is
     ///         dailyLimit / minAmount / fee values; bps is hard-capped at
     ///         MAX_FEE_BPS (10%).
     function addFlow(FlowAddParams calldata p) external onlyOwner returns (bytes32 flowId) {
-        if (p.mode > uint8(TokenMode.POOLED_LOCK_RELEASE)) revert FlowInvalidMode();
+        if (p.mode > uint8(TokenMode.POOLED_LOCK_VEST)) revert FlowInvalidMode();
         if (p.evmChainId == 0) revert FlowZeroChainId();
         if (p.evmBridge == address(0) || p.evmToken == address(0)) revert ZeroAddress();
         if (p.opnetBridge == bytes32(0) || p.opnetToken == bytes32(0)) revert ZeroAddress();
@@ -1425,6 +1486,11 @@ contract BridgeEscrow is
         if (p.opnetDecimals == 0 || p.opnetDecimals > 30) revert FlowInvalidDecimals();
         if (p.feeBps > MAX_FEE_BPS) revert FeeBpsTooHigh();
         if (p.tipCapBps > MAX_TIP_BPS) revert TipCapTooHigh();
+        // Mode 4 (POOLED_LOCK_VEST) is two-step: addFlow registers the route,
+        // `setFlowVestingVault` then wires the destination VestingVault before
+        // any user-facing path becomes safe. The lock and claim paths both
+        // defensively check `vestingVault != 0` for mode 4, so a half-set-up
+        // flow rejects locks/claims rather than silently stranding tokens.
 
         flowId = computeFlowId(
             p.mode, p.evmChainId, p.evmBridge, p.evmToken, p.opnetBridge, p.opnetToken
@@ -1451,6 +1517,8 @@ contract BridgeEscrow is
         f.cap = p.cap;
         f.dailyLimit = p.dailyLimit;
         f.tipCapBps = p.tipCapBps;
+        // f.vestingVault remains address(0); mode 4 flows must call
+        // setFlowVestingVault before users can lock/claim against them.
         // mintedToday, lastWindowStart, inventory remain 0.
 
         allFlowIds.push(flowId);
@@ -1559,6 +1627,32 @@ contract BridgeEscrow is
         if (f.evmChainId == 0) revert FlowNotFound();
         emit FlowTipCapUpdated(flowId, f.tipCapBps, newBps);
         f.tipCapBps = newBps;
+    }
+
+    /// @notice Governor-only — repoint the destination VestingVault for a
+    ///         POOLED_LOCK_VEST flow. Restricted to mode 4 flows so a
+    ///         non-vest flow can't accidentally acquire a vault. The new
+    ///         vault must be non-zero — to disable a mode 4 flow entirely
+    ///         the governor uses pause/drain, not a zero-vault setter.
+    /// @dev    Live re-pointing affects only NEW claims; schedules already
+    ///         opened in the previous vault continue to vest there and the
+    ///         beneficiary keeps claiming from that one. Operational
+    ///         guidance: pause → wait for in-flight vouchers to drain →
+    ///         repoint → unpause.
+    function setFlowVestingVault(bytes32 flowId, address newVault) external onlyOwner {
+        if (newVault == address(0)) revert VestingVaultRequired();
+        FlowRecord storage f = flows[flowId];
+        if (f.evmChainId == 0) revert FlowNotFound();
+        if (f.mode != uint8(TokenMode.POOLED_LOCK_VEST)) revert VestingVaultNotPermitted();
+        // Defense-in-depth — the vault's immutable underlying asset MUST be
+        // this flow's `evmToken`. Without this check, a governor that wires
+        // a vault holding a *different* token would silently let the claim
+        // path approve token-A, while the vault's `depositFor` then pulls
+        // token-B from the bridge — draining a different flow's pool into
+        // the wrong vault. Cheap to enforce, closes the misconfiguration.
+        if (address(IVestingVault(newVault).token()) != f.evmToken) revert VestingVaultTokenMismatch();
+        emit FlowVestingVaultChanged(flowId, f.vestingVault, newVault);
+        f.vestingVault = newVault;
     }
 
     /// @notice Read-only accessor — returns the full FlowRecord. Easier
