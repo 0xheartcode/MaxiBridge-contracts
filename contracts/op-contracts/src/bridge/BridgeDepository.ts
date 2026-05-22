@@ -246,7 +246,7 @@ export class BridgeDepository extends ReentrancyGuard {
     // Default 0.
     private _wrapMinFee: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
-    // ─── Token bridging modes (4-mode dispatch) ────────────────────────
+    // ─── Token bridging modes (5-mode dispatch) ────────────────────────
     // Per-token mode encoded as u256 (matching the EVM-side enum value
     // space):
     //   0 WRAPPED              — canonical on EVM, wrapped on OPNet (USDC/USDT)
@@ -254,6 +254,10 @@ export class BridgeDepository extends ReentrancyGuard {
     //   2 NATIVE_BURN_MINT     — bridge issues both sides, burn-and-mint
     //   3 POOLED_LOCK_RELEASE  — lock+release on both, no minting; project
     //                            funds inventory (e.g. MOTO)
+    //   4 POOLED_LOCK_VEST     — identical to mode 3 on OPNet (lock/release/
+    //                            provision/inventory); differs only on the EVM
+    //                            destination, where claim deposits into a
+    //                            VestingVault that drips over a block window.
     // Set-once per token via `setTokenMode`. Default 0 (WRAPPED) so existing
     // wUSDC/wUSDT keep working.
     private _tokenMode: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
@@ -837,7 +841,9 @@ export class BridgeDepository extends ReentrancyGuard {
         const token: Address = calldata.readAddress();
         if (token.isZero()) throw new Revert('BridgeDepository: zero token');
         const mode: u256 = calldata.readU256();
-        if (u256.gt(mode, u256.fromU32(3))) {
+        // 0..4 — POOLED_LOCK_VEST (4) shares OPNet semantics with
+        // POOLED_LOCK_RELEASE (3); it only differs on the EVM destination.
+        if (u256.gt(mode, u256.fromU32(4))) {
             throw new Revert('BridgeDepository: invalid token mode');
         }
         const evmCounterpart: u256 = calldata.readU256();
@@ -982,7 +988,9 @@ export class BridgeDepository extends ReentrancyGuard {
         const dailyLimit: u256 = calldata.readU256();
         const tipCapBps: u32 = calldata.readU256().toU32();
 
-        if (mode > 3) throw new Revert('BridgeDepository: invalid flow mode');
+        // 0..4 — mode 4 (POOLED_LOCK_VEST) is accepted here so its flowId
+        // (which hashes `mode`) matches the EVM mode-4 flow end-to-end.
+        if (mode > 4) throw new Revert('BridgeDepository: invalid flow mode');
         if (chainId == 0) throw new Revert('BridgeDepository: zero chainId');
         if (evmBridge.isZero() || evmToken.isZero()) {
             throw new Revert('BridgeDepository: zero EVM addr');
@@ -1319,11 +1327,14 @@ export class BridgeDepository extends ReentrancyGuard {
         if (evmRecipient.length != 32) {
             throw new Revert('BridgeDepository: ethRecipient must be 32 bytes');
         }
-        // Mode dispatch — only INVERSE_WRAPPED (1) or POOLED_LOCK_RELEASE (3)
-        // accept lockForBridge.
+        // Mode dispatch — only INVERSE_WRAPPED (1), POOLED_LOCK_RELEASE (3),
+        // or POOLED_LOCK_VEST (4) accept lockForBridge. Modes 3 and 4 share
+        // identical OPNet lock semantics; 4 only differs on the EVM
+        // destination (deposits into a VestingVault there).
         const mode: u256 = this._tokenMode.get(_addrKey(canonical));
         const isInverse: bool = u256.eq(mode, u256.fromU32(1));
-        const isPooled: bool = u256.eq(mode, u256.fromU32(3));
+        const isPooled: bool =
+            u256.eq(mode, u256.fromU32(3)) || u256.eq(mode, u256.fromU32(4));
         if (!isInverse && !isPooled) {
             throw new Revert('BridgeDepository: token not in lockable mode');
         }
@@ -1468,12 +1479,14 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: wrong selector');
         }
 
-        // Mode dispatch — release path only valid for INVERSE_WRAPPED (1)
-        // or POOLED_LOCK_RELEASE (3). The `wrappedToken` field is the
-        // canonical OP20 to release.
+        // Mode dispatch — release path valid for INVERSE_WRAPPED (1),
+        // POOLED_LOCK_RELEASE (3), or POOLED_LOCK_VEST (4). The `wrappedToken`
+        // field is the canonical OP20 to release. Modes 3 and 4 release
+        // identically from the OPNet pool (the vest is EVM-side only).
         const releaseMode: u256 = this._tokenMode.get(_addrKey(parsed.wrappedToken));
         const isInverse2: bool = u256.eq(releaseMode, u256.fromU32(1));
-        const isPooled2: bool = u256.eq(releaseMode, u256.fromU32(3));
+        const isPooled2: bool =
+            u256.eq(releaseMode, u256.fromU32(3)) || u256.eq(releaseMode, u256.fromU32(4));
         if (!isInverse2 && !isPooled2) {
             throw new Revert('BridgeDepository: token not in releasable mode');
         }
@@ -1663,10 +1676,11 @@ export class BridgeDepository extends ReentrancyGuard {
         if (this._flowExists.get(flowId).isZero()) {
             throw new Revert('BridgeDepository: flow not found');
         }
-        // Only INVERSE_WRAPPED (1) / POOLED_LOCK_RELEASE (3) hold an
-        // OPNet-side canonical pool that can be provisioned.
+        // Only INVERSE_WRAPPED (1) / POOLED_LOCK_RELEASE (3) /
+        // POOLED_LOCK_VEST (4) hold an OPNet-side canonical pool that can be
+        // provisioned. Mode 4 pools exactly like mode 3 on OPNet.
         const mode: u32 = this._flowMode.get(flowId).toU32();
-        if (mode != 1 && mode != 3) {
+        if (mode != 1 && mode != 3 && mode != 4) {
             throw new Revert('BridgeDepository: flow mode not provisionable');
         }
         // The passed token MUST be the flow's registered canonical token.
@@ -2025,13 +2039,14 @@ export class BridgeDepository extends ReentrancyGuard {
         }
 
         // Inventory effect by mode (#44 — single-count invariant):
-        //   mode 3 = decrement (release-side ack against the pooled OPNet
+        //   mode 3 / 4 = decrement (release-side ack against the pooled OPNet
         //            inventory provisioned via provisionInventoryOpNet).
+        //            POOLED_LOCK_VEST (4) pools identically to mode 3 here.
         //   mode 1 = NO inventory mutation. lockForBridge produces and
         //            claimReleaseWithVoucher consumes the mode-1 ledger;
         //            confirmBurn is attestation-only here.
         const mode: u32 = this._flowMode.get(flowId).toU32();
-        if (mode == 3) {
+        if (mode == 3 || mode == 4) {
             const inv: u256 = this._flowInventory.get(flowId);
             if (u256.lt(inv, releasedAmount)) {
                 throw new Revert('BridgeDepository: insufficient flow inventory');
