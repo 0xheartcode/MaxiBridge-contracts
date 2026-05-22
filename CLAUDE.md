@@ -83,7 +83,7 @@ Bridge-Monorepo/
 │   ├── src/BridgeEscrow.sol
 │   ├── src/IVestingVault.sol  # Mode 4 interface (depositFor / clawback / previewClaimable)
 │   ├── src/VestingVault.sol   # Mode 4 destination vault — linear block-based release
-│   ├── test/                 # 271/271 passing — BridgeEscrow + VestingVault + Mode4 + Create2Deploy + fork-tests-behind-SEPOLIA_RPC_URL
+│   ├── test/                 # 275/275 passing — BridgeEscrow + VestingVault + Mode4 + Create2Deploy + fork-tests-behind-SEPOLIA_RPC_URL
 │   ├── script/Deploy.s.sol
 │   ├── script/check-storage-layout.sh
 │   ├── storage-layout.json   # COMMITTED snapshot — CI diff gate for upgrades
@@ -111,7 +111,7 @@ Bridge-Monorepo/
 │   │   ├── voucher/          # opnet-voucher.ts (ML-DSA) + evm-message.ts (EIP-712)
 │   │   ├── signers/          # EcdsaSigner / MldsaSigner interfaces — hot-wallet v1; KMS swap-in later
 │   │   └── monitoring/       # TVL, indexer lag, signer health, queue age, reorg counters
-│   └── package.json          # 30/30 tests + 15 monitoring = 45 passing
+│   └── package.json          # 220/220 passing (bridge + auth + m-of-n + monitoring + refunds + flows)
 │
 ├── frontend/                 # React 19 + Vite 6 + Tailwind v4 (public dApp)
 │   ├── vite.config.ts        # envDir: '../', node polyfills, stream-browserify alias
@@ -122,7 +122,7 @@ Bridge-Monorepo/
 │   │   ├── pages/            # Bridge.tsx, History.tsx, Claim.tsx
 │   │   ├── components/       # TermsModal, AddressConfirm, BridgeForm, ClaimButton, ...
 │   │   └── lib/              # utils.ts — evmAddressToBytes32 uses padStart!
-│   └── package.json          # 6/6 smoke tests passing
+│   └── package.json          # 10/10 smoke tests passing
 │
 ├── admin-panel/              # React 19 + Vite (separate ops UI on port 5174)
 │   ├── vite.config.ts        # base: '/admin/', envDir: '../'
@@ -144,14 +144,14 @@ Bridge-Monorepo/
 │   └── package.json
 │
 ├── docs/
-│   ├── ARCHITECTURE.md       # one-page technical overview
+│   ├── ARCHITECTURE.md       # one-page technical overview (flow modes, voucher format, indexer, monitoring)
 │   ├── RUNBOOK.md            # signer compromise, pause, reorg, stuck-deposit recovery
 │   ├── REFERENCE.md          # extended ref (deploy/upgrade procedures, gotchas, audit status)
 │   ├── TERMS.md              # DRAFT T&C for frontend modal (legal review required)
 │   ├── TESTNET-SMOKE-TEST.md # 12-section end-to-end walkthrough — START HERE for testnet runs
 │   ├── SECURITY-AUDIT-2026-05-19.md  # full-codebase security audit + remediation status
-│   ├── DEFERRED-WORK.md      # known follow-ups indexed to GitHub issues
-│   ├── EXTERNAL_AUDITOR_BRIEFING.md  # hand-off doc for the audit
+│   ├── DEFERRED-WORK.md      # genuinely-open follow-ups (GitHub issues #32–#39)
+│   ├── FUTURE-UX-IMPROVEMENTS.md  # elective, additive UX/capability backlog
 │   └── runbooks/
 │       ├── mainnet-deploy.md       # FIRST mainnet deploy ceremony (gate: audit sign-off)
 │       └── watchdog-railway-deploy.md  # bridge-watchdog on Railway
@@ -183,7 +183,7 @@ npm run build:frontend        # vite build
 npm run build:admin           # vite build (base=/admin/)
 
 # Run entire test suite
-npm run test:all              # forge 201/201 + server 205/205 + opnet 52+/52+ + frontend 6/6
+npm run test:all              # forge 275/275 + server 220/220 + opnet 52/52 + frontend 10/10
                               # (TESTNET-SMOKE-TEST.md §0 is authoritative on minimum greens)
 
 # Individual test suites
@@ -233,7 +233,7 @@ npm run integration:drills             # security drills (replay, rotation, reor
    - `1` INVERSE_WRAPPED — OPNet lock → EVM wrapped mint.
    - `2` NATIVE_BURN_MINT — symmetric mint/burn, used for native tokens with bridge mint authority on both sides.
    - `3` POOLED_LOCK_RELEASE — pre-funded reserve pool on both sides, no minting (canonical MOTO-style).
-   - `4` POOLED_LOCK_VEST — identical to mode 3 on the source/lock side, but the EVM `claim` deposits into a per-flow **`VestingVault`** that linearly drips to the beneficiary over a fixed block window (~7 days at 12s/block). Used when a client wants destination-side release to trickle instead of paying all at once. **Two-step setup:** governor calls `addFlow(mode=4)` then `setFlowVestingVault(flowId, vault)` — `lock` / `claim` / `provisionInventory` all defensively reject mode-4 flows whose vault is still zero, so a half-set-up flow can't strand tokens. `setFlowVestingVault` additionally requires `vault.token() == flow.evmToken` (closes governance-misconfiguration class — a vault holding the wrong asset can never be wired). Each bridge claim opens an independent schedule keyed by the voucher `opnetNonce` (no top-up — each lock = its own 7d vest). Bridge can `clawback(beneficiary, opnetNonce)` the unvested portion if the source voucher is reorged out (C-01 follow-through for Mode 4). 42 tests under `test/VestingVault.t.sol` + `test/BridgeEscrowMode4.t.sol`. Operator surface: deploy via `npm run deploy:evm:vesting-vault` (`scripts/src/deploy/evm-deploy-vesting-vault.ts`, env: `VESTING_VAULT_TOKEN` / `VESTING_VAULT_BRIDGE` / optional `VESTING_VAULT_BLOCKS`); wire + faucet from the admin panel `/admin/mode4` tab (calldata-export pattern, no admin-side signer). **Reorg + Mode 4 = TWO ops calls:** `BridgeEscrow.cancelVoucher(opnetNonce)` then `VestingVault.clawback(beneficiary, opnetNonce)` — the second one returns the unvested portion to the bridge while the vested-so-far stays with the beneficiary.
+   - `4` POOLED_LOCK_VEST — identical to mode 3 on the source/lock side, but the EVM `claim` deposits into a per-flow **`VestingVault`** that linearly drips to the beneficiary over a fixed block window. The window is an **immutable per-vault constructor arg** (`vestingBlocks`), NOT hardcoded — deploy default is `72_000` (~10 days at 12s/block, the agreed testnet launch window); pass `VESTING_VAULT_BLOCKS=50400` for ~7d, etc. Used when a client wants destination-side release to trickle instead of paying all at once. **Two-step setup:** governor calls `addFlow(mode=4)` then `setFlowVestingVault(flowId, vault)` — `lock` / `claim` / `provisionInventory` all defensively reject mode-4 flows whose vault is still zero, so a half-set-up flow can't strand tokens. `setFlowVestingVault` additionally requires `vault.token() == flow.evmToken` (closes governance-misconfiguration class — a vault holding the wrong asset can never be wired). Each bridge claim opens an independent schedule keyed by the voucher `opnetNonce` (no top-up — each lock = its own vest on its own clock). Bridge can `clawback(beneficiary, opnetNonce)` the unvested portion if the source voucher is reorged out (C-01 follow-through for Mode 4). 42 tests under `test/VestingVault.t.sol` + `test/BridgeEscrowMode4.t.sol`. Operator surface: deploy via `npm run deploy:evm:vesting-vault` (`scripts/src/deploy/evm-deploy-vesting-vault.ts`, env: `VESTING_VAULT_TOKEN` / `VESTING_VAULT_BRIDGE` / optional `VESTING_VAULT_BLOCKS`); wire + faucet from the admin panel `/admin/mode4` tab (calldata-export pattern, no admin-side signer). **Reorg + Mode 4 = TWO ops calls:** `BridgeEscrow.cancelVoucher(opnetNonce)` then `VestingVault.clawback(beneficiary, opnetNonce)` — the second one returns the unvested portion to the bridge while the vested-so-far stays with the beneficiary.
 3. **Upgradeability split:**
    - **EVM `BridgeEscrow`:** OZ UUPS proxy with full hardening (`_disableInitializers` in impl ctor, `initializer` gated init, `_authorizeUpgrade` onlyOwner, no `selfdestruct`, no arbitrary `delegatecall`, `uint256[42] __gap`; storage-layout CI diff gate is `astId`-insensitive). **Owner is `TimelockController(604800s)` (7 days), not the deployer EOA** — every upgrade goes through `schedule(...) → wait 7d → execute(...)`. Mirrors OPNet's `UpdatablePlugin(1008 blocks)` so users have a full week to exit on either chain. Deploy the timelock with `npm run deploy:evm:timelock` (script: `scripts/src/deploy/evm-deploy-timelock.ts`); transfer ownership with `npm run deploy:evm:transfer-ownership` (`scripts/src/deploy/evm-transfer-ownership-to-timelock.ts`). Proposer = governance Safe (`EVM_GOVERNANCE_SAFE`); executors = `address(0)` (open-execute, the 7-day delay IS the safeguard); admin = `address(0)` (burned at construction). Test scaffold: `contracts/evm-contracts/test/TimelockUpgrade.t.sol`. Ceremony walk-through: `docs/RUNBOOK.md` §0.
    - **OPNet `BridgeDepository`:** `UpdatablePlugin(1008 blocks)` (~7 days at 10min/block) registered in the ctor — Phase 2.2 raised this from 144 (~24h) to give users a full week to exit before any upgrade lands. `onUpdate()` runs migrations gated by `_storageVersion: StoredU256`; storage APPEND-ONLY per workspace "Five Upgrade Commandments". **Governance-gated upgrade authority (PR #43, closes Bug #16b):** in addition to the plugin's `onlyDeployer` gate, every applyUpdate requires governance pre-authorization. Governor (or registered BridgeAuthority) wires `setUpgradeAuthority(addr)`; from then on each upgrade needs `proposeUpgrade()` to land — `onUpdate` consumes the one-shot flag and reverts (rolling back the apply) if it isn't armed. Veto path: `cancelProposedUpgrade()` (governor / authority / upgradeAuthority). Legacy deployer-only path stays open while `_upgradeAuthority` is unset (v1 bootstrap window). Net effect: a compromised deployer hot key alone cannot push a malicious upgrade.

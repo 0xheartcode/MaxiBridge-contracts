@@ -1,6 +1,6 @@
 # Bridge Architecture — One-Page Overview
 
-For full design rationale and locked decisions see the master plan at `/Users/dippy/.claude/plans/zesty-sleeping-thacker.md`.
+For load-bearing rules (storage layout, signer model, selectors, non-negotiables) see `CLAUDE.md`.
 
 ---
 
@@ -74,6 +74,9 @@ struct ReleaseIntent {
     uint256 burnNonce;      // monotonic nonce from WrappedOP20
     uint32  signerEpoch;    // must match current EVM contract epoch
     bytes32 opnetNonce;     // unique server id — EVM replay guard
+    uint256 grossSrcAmount; // PR β.2.format — source-side gross
+    uint128 relayerTip;     // PR β.2 — permissionless tip (paid to msg.sender)
+    bytes32 flowId;         // PR β.2.payout-evm — flow binding + tipCap lookup
 }
 ```
 
@@ -169,7 +172,7 @@ The `bridge_config` SQLite table holds namespaced string keys:
 
 ## Token Mode & Dest-Method Tagging
 
-The bridge supports four token flow modes (on-chain enum on `BridgeEscrow`):
+The bridge supports five token flow modes (on-chain enum on `BridgeEscrow`):
 
 | Mode | Name | EVM → OPNet | OPNet → EVM |
 |------|------|-------------|-------------|
@@ -177,6 +180,12 @@ The bridge supports four token flow modes (on-chain enum on `BridgeEscrow`):
 | 1 | `INVERSE_WRAPPED` | lock → `claimMintWithVoucher` | burn → `claimReleaseWithVoucher` |
 | 2 | `NATIVE_BURN_MINT` | burn → `claimMintWithVoucher` | burn → `claim` |
 | 3 | `POOLED_LOCK_RELEASE` | lock → `claimMintWrapped` | burn → `claim` |
+| 4 | `POOLED_LOCK_VEST` | lock → `claimMintWrapped` | burn → `claim` → deposits into per-flow `VestingVault` (linear drip) |
+
+Mode 4 is identical to mode 3 on the source/lock side; only the EVM destination
+dispatch differs — the released amount lands in a per-flow `VestingVault` that
+drips linearly to the beneficiary over a fixed block window. See `CLAUDE.md` §5
+for the two-step setup and reorg/clawback procedure.
 
 When the indexer processes a deposit or withdrawal event it resolves the token's mode via `GET /api/tokens/:address/mode` (which proxies the on-chain `tokenMode` view) and stores `token_mode`, `source_event_type`, and `dest_method` on the DB row. The dApp reads `dest_method` from the status API and calls the correct claim function — `ClaimButton` never hard-codes a function name.
 
