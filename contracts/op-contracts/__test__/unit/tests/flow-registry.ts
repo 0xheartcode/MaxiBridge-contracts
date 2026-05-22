@@ -162,10 +162,19 @@ await opnet('BridgeDepository — PR α — addFlow', async (vm: OPNetUnit) => {
         await expectRevert(() => depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC)), 'non-gov');
     });
 
-    await vm.it('rejects invalid mode', async () => {
+    await vm.it('accepts mode 4 (POOLED_LOCK_VEST)', async () => {
         const p = defaultParams(EVM_USDC, OPNET_WUSDC);
         p.mode = 4n;
-        await expectRevert(() => depository.addFlow(p), 'mode>3');
+        const flowId = await depository.addFlow(p);
+        Assert.expect(flowId !== 0n).toEqual(true);
+        const f = await depository.getFlow(flowId);
+        Assert.expect(f[0]).toEqual(4n); // mode == POOLED_LOCK_VEST
+    });
+
+    await vm.it('rejects invalid mode', async () => {
+        const p = defaultParams(EVM_USDC, OPNET_WUSDC);
+        p.mode = 5n;
+        await expectRevert(() => depository.addFlow(p), 'mode>4');
     });
 
     await vm.it('rejects zero chainId', async () => {
