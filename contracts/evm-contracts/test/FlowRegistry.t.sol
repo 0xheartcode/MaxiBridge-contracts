@@ -151,7 +151,7 @@ contract FlowRegistryTest is Test {
 
     function test_AddFlow_RejectsInvalidMode() public {
         BridgeEscrow.FlowAddParams memory p = _defaultParams(address(usdc), OPNET_USDC);
-        p.mode = 4; // beyond POOLED_LOCK_RELEASE (3)
+        p.mode = 5; // beyond POOLED_LOCK_VEST (4)
         vm.prank(owner);
         vm.expectRevert(BridgeEscrow.FlowInvalidMode.selector);
         escrow.addFlow(p);
