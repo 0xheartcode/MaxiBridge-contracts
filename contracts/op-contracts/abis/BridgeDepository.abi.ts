@@ -154,6 +154,17 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'FeesWithdrawn',
+        values: [
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'to', type: ABIDataTypes.ADDRESS },
+            { name: 'by', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'BurnConfirmed',
         values: [
             { name: 'flowId', type: ABIDataTypes.UINT256 },
@@ -494,6 +505,23 @@ export const BridgeDepositoryAbi = [
             { name: 'recipient', type: ABIDataTypes.ADDRESS },
         ],
         outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'withdrawFees',
+        inputs: [
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'accruedFees',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'accrued', type: ABIDataTypes.UINT256 }],
         type: BitcoinAbiTypes.Function,
     },
     {

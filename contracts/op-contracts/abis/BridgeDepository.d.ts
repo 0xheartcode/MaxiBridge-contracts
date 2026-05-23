@@ -96,6 +96,13 @@ export type InventoryDrainedOpNetEvent = {
     readonly by: Address;
     readonly amount: bigint;
 };
+export type FeesWithdrawnEvent = {
+    readonly flowId: bigint;
+    readonly token: Address;
+    readonly to: Address;
+    readonly by: Address;
+    readonly amount: bigint;
+};
 export type BurnConfirmedEvent = {
     readonly flowId: bigint;
     readonly depositId: bigint;
@@ -376,6 +383,21 @@ export type ProvisionInventoryOpNet = CallResult<{}, OPNetEvent<InventoryProvisi
 export type DrainInventoryOpNet = CallResult<{}, OPNetEvent<InventoryDrainedOpNetEvent>[]>;
 
 /**
+ * @description Represents the result of the withdrawFees function call.
+ */
+export type WithdrawFees = CallResult<{}, OPNetEvent<FeesWithdrawnEvent>[]>;
+
+/**
+ * @description Represents the result of the accruedFees function call.
+ */
+export type AccruedFees = CallResult<
+    {
+        accrued: bigint;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
  * @description Represents the result of the addSignerToSet function call.
  */
 export type AddSignerToSet = CallResult<{}, OPNetEvent<never>[]>;
@@ -619,6 +641,8 @@ export interface IBridgeDepository extends IOP_NETContract {
         amount: bigint,
         recipient: Address,
     ): Promise<DrainInventoryOpNet>;
+    withdrawFees(flowId: bigint, token: Address, amount: bigint): Promise<WithdrawFees>;
+    accruedFees(): Promise<AccruedFees>;
     addSignerToSet(pubKeyHash: bigint): Promise<AddSignerToSet>;
     removeSignerFromSet(pubKeyHash: bigint): Promise<RemoveSignerFromSet>;
     setRequiredSignatures(threshold: bigint): Promise<SetRequiredSignatures>;

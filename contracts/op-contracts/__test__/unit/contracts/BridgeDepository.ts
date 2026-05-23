@@ -720,6 +720,33 @@ export class BridgeDepository extends ContractRuntime {
         await this.getResponse(w.getBuffer());
     }
 
+    // ─── #62 — per-flow fee accounting + withdrawFees ─────────────────
+
+    private readonly withdrawFeesSelector: number = encodeSelectorWithParams(
+        'withdrawFees',
+        ABIDataTypes.UINT256,
+        ABIDataTypes.ADDRESS,
+        ABIDataTypes.UINT256,
+    );
+    private readonly accruedFeesSelector: number = encodeNumericSelector('accruedFees()');
+
+    public async withdrawFees(flowId: bigint, token: Address, amount: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.withdrawFeesSelector);
+        w.writeU256(flowId);
+        w.writeAddress(token);
+        w.writeU256(amount);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async accruedFees(flowId: bigint): Promise<bigint> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.accruedFeesSelector);
+        w.writeU256(flowId);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readU256();
+    }
+
     public override async init(): Promise<void> {
         this.defineRequiredBytecodes();
         this._bytecode = BytecodeManager.getBytecode(this.address) as Buffer;
