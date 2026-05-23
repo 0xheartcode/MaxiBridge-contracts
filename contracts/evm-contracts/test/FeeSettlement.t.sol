@@ -160,32 +160,41 @@ contract FeeSettlementTest is Test {
         vm.prank(alice);
         (uint256 nonce, ) = escrow.lock(address(usdc), 10_000e6, RECIPIENT, flowA);
 
-        // Move to Refundable via the M-of-N path. Helper omitted here for
-        // brevity — see RefundFlow.t.sol for the sig-blob helper.
-        // _markRefundable(nonce);
+        _markRefundable(nonce, flowA);
 
-        // vm.warp(block.timestamp + escrow.SETTLEMENT_WINDOW() + 1);
-        // vm.expectRevert(BridgeEscrow.LockNotSettleable.selector);
-        // escrow.settleLockedDeposit(nonce);
-
-        // TODO(maxime): port the _markRefundable helper from RefundFlow.t.sol.
-        vm.skip(true);
+        vm.warp(block.timestamp + escrow.SETTLEMENT_WINDOW() + 1);
+        vm.expectRevert(BridgeEscrow.LockNotSettleable.selector);
+        escrow.settleLockedDeposit(nonce);
     }
 
-    /// Refund leaves accruedFees at zero — fee never promoted.
+    /// Refund leaves accruedFees at zero — fee never promoted. After refund,
+    /// withdrawFees with any positive amount must revert.
     function test_Refund_DoesNotLeakFee() public {
-        // TODO(maxime): same _markRefundable helper needed. Once available:
-        //   1. lock
-        //   2. markRefundable
-        //   3. refundLockedDeposit
-        //   4. assert accruedFees == 0
-        //   5. withdrawFees(any positive amount) reverts InsufficientAccruedFees
-        vm.skip(true);
+        uint256 amount = 10_000e6;
+        vm.prank(alice);
+        (uint256 nonce, ) = escrow.lock(address(usdc), amount, RECIPIENT, flowA);
+
+        uint128 invBefore = escrow.getFlow(flowA).inventory;
+        uint256 aliceBefore = usdc.balanceOf(alice);
+
+        _markRefundable(nonce, flowA);
+        escrow.refundLockedDeposit(nonce);
+
+        // Full gross refunded; inventory dropped by gross; fee never promoted.
+        assertEq(usdc.balanceOf(alice) - aliceBefore, amount, "refund != gross");
+        assertEq(uint256(invBefore) - uint256(escrow.getFlow(flowA).inventory), amount, "inventory drift");
+        assertEq(escrow.getFlow(flowA).accruedFees, 0, "accruedFees should never have accrued");
+
+        // withdrawFees with any positive amount must revert.
+        vm.prank(owner);
+        vm.expectRevert(BridgeEscrow.InsufficientAccruedFees.selector);
+        escrow.withdrawFees(flowA, 1);
     }
 
-    /// Lock with fee >= received reverts.
+    /// Lock with fee >= received reverts. Constructs a flow with `minAmount=0`
+    /// (allowed: no floor) and a non-zero `minFee` — the `lock` path must
+    /// still reject any lock where `received <= minFee`.
     function test_Lock_FeeGeqReceived_Reverts() public {
-        // Create a flow where minFee is large enough that fee >= received.
         vm.startPrank(owner);
         bytes32 expensiveFlow = escrow.addFlow(
             BridgeEscrow.FlowAddParams({
@@ -199,7 +208,7 @@ contract FeeSettlementTest is Test {
                 opnetDecimals: 6,
                 feeBps: 0,
                 minFee: 10_000e6, // 10k minFee
-                minAmount: 1,
+                minAmount: 0,     // no public-facing floor; OK with the new invariant
                 cap: 100_000_000e6,
                 dailyLimit: 100_000_000e6,
                 tipCapBps: 0
@@ -286,6 +295,25 @@ contract FeeSettlementTest is Test {
         (, , BridgeEscrow.DepositStatus s, , , , uint128 storedFee) = escrow.lockedDeposits(nonce);
         assertEq(uint8(s), uint8(BridgeEscrow.DepositStatus.Locked), "status flipped despite revert");
         assertEq(uint256(storedFee), uint256(fee), "fee lost on revert");
+    }
+
+    // ─── M-of-N attestation helpers (ported from RefundLockedDeposit.t.sol) ─
+
+    /// Build the `[uint8 numSigs][r||s||v]` 66-byte M-of-N blob for a 1-of-1
+    /// ECDSA signature over `digest`. Matches the format the contract's
+    /// `_verifySignatures` consumes (see `migrateToMofN`).
+    function _mofnSig(uint256 pk, bytes32 digest) internal pure returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(uint8(1), r, s, v);
+    }
+
+    /// Sign a RefundAuthorization for `nonce` against `flow` at the current
+    /// epoch with the authorized signer and submit `markDepositRefundable`.
+    function _markRefundable(uint256 nonce, bytes32 flow) internal {
+        bytes32 digest = escrow.hashRefundAuthorization(
+            nonce, flow, escrow.currentEpoch()
+        );
+        escrow.markDepositRefundable(nonce, _mofnSig(signerPk, digest));
     }
 
     // ─── Read helper ────────────────────────────────────────────────────

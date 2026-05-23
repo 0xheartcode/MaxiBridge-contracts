@@ -568,6 +568,7 @@ contract BridgeEscrow is
     error FeeExceedsAmount();           // lock with fee >= received (zero-net bridge)
     error LockNotSettleable();          // settleLockedDeposit on non-Locked status
     error SettlementWindowNotMet();     // settleLockedDeposit before lockedAt + WINDOW
+    error FlowMinAmountBelowMinFee();   // addFlow / setFlowMinAmount / setFlowFee: minAmount > 0 && minAmount <= minFee
 
     // ─── Flow Registry errors ──────────────────────────────────────────
     error FlowAlreadyExists();
@@ -1671,6 +1672,11 @@ contract BridgeEscrow is
         if (p.opnetDecimals == 0 || p.opnetDecimals > 30) revert FlowInvalidDecimals();
         if (p.feeBps > MAX_FEE_BPS) revert FeeBpsTooHigh();
         if (p.tipCapBps > MAX_TIP_BPS) revert TipCapTooHigh();
+        // #62-fix — if `minAmount` is set, it MUST exceed `minFee`. Otherwise
+        // the public-facing minimum advertises a usable amount that `lock`
+        // would reject with `FeeExceedsAmount` (because `fee >= received`).
+        // `minAmount == 0` is the explicit "no-floor" config and is allowed.
+        if (p.minAmount > 0 && p.minAmount <= p.minFee) revert FlowMinAmountBelowMinFee();
         // Mode 4 (POOLED_LOCK_VEST) is two-step: addFlow registers the route,
         // `setFlowVestingVault` then wires the destination VestingVault before
         // any user-facing path becomes safe. The lock and claim paths both
@@ -1787,6 +1793,10 @@ contract BridgeEscrow is
     function setFlowMinAmount(bytes32 flowId, uint128 newMin) external onlyOwner {
         FlowRecord storage f = flows[flowId];
         if (f.evmChainId == 0) revert FlowNotFound();
+        // #62-fix — preserve the addFlow invariant: a non-zero minAmount
+        // must exceed minFee, otherwise the smallest lock at the advertised
+        // floor reverts with FeeExceedsAmount.
+        if (newMin > 0 && newMin <= f.minFee) revert FlowMinAmountBelowMinFee();
         emit FlowMinAmountChanged(flowId, f.minAmount, newMin);
         f.minAmount = newMin;
     }
@@ -1797,6 +1807,11 @@ contract BridgeEscrow is
         if (newBps > MAX_FEE_BPS) revert FeeBpsTooHigh();
         FlowRecord storage f = flows[flowId];
         if (f.evmChainId == 0) revert FlowNotFound();
+        // #62-fix — preserve the addFlow invariant: if a positive minAmount
+        // is configured, it must still strictly exceed the (possibly new)
+        // minFee. Raising minFee at or above an existing minAmount would
+        // brick every lock at the floor.
+        if (f.minAmount > 0 && f.minAmount <= newMinFee) revert FlowMinAmountBelowMinFee();
         emit FlowFeeChanged(flowId, f.feeBps, newBps, f.minFee, newMinFee);
         f.feeBps = newBps;
         f.minFee = newMinFee;
