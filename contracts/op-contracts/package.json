@@ -18,6 +18,7 @@
         "test:confirm-burn": "npx tsx __test__/unit/tests/confirm-burn.ts",
         "clean": "rm -rf build/*",
         "build:authority": "asc src/authority/index.ts --config asconfig.json --target authority --use abort=src/authority/index/abort",
+        "build:mock": "asc src/mock/index.ts --config asconfig.json --target mock --use abort=src/mock/index/abort",
         "test:authority": "npx tsx __test__/unit/tests/authority.ts"
     },
     "dependencies": {

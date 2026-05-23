@@ -12,6 +12,10 @@
         "authority": {
             "outFile": "build/BridgeAuthority.wasm",
             "textFile": "build/BridgeAuthority.wat"
+        },
+        "mock": {
+            "outFile": "build/MockOP20.wasm",
+            "textFile": "build/MockOP20.wat"
         }
     },
     "options": {
