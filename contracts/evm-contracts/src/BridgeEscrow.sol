@@ -888,13 +888,18 @@ contract BridgeEscrow is
         rec.status = DepositStatus.Settled;
         if (fee > 0) {
             FlowRecord storage flow = flows[flowId];
-            // Both writes are bounded by previous lock-time invariants:
-            //   inventory was incremented by `rec.amount` (which is >= fee).
-            //   accruedFees is uint128 and tracks at most total locked-as-fee.
-            // 0.8.24 reverts on overflow regardless.
-            unchecked {
-                flow.inventory = flow.inventory - fee;
-            }
+            // Inventory was incremented by `rec.amount` at lock time
+            // (`rec.amount >= fee`), so subtracting `fee` from inventory is
+            // normally safe. The exception: `drainInventory` (onlyGuardian +
+            // whenPaused) could have lowered inventory below the
+            // outstanding-fee total. In that abnormal state we MUST NOT
+            // wrap — the underlying ERC20 has already been moved out, so
+            // promoting the fee would double-count escrow obligations.
+            // Solidity 0.8.x checked subtraction reverts on underflow;
+            // settlement of this nonce stays callable once governance
+            // re-provisions inventory (or never, by design, if the flow is
+            // being permanently retired). NO `unchecked` here.
+            flow.inventory = flow.inventory - fee;
             flow.accruedFees = uint128(uint256(flow.accruedFees) + fee);
         }
 

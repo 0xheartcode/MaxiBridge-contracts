@@ -252,6 +252,42 @@ contract FeeSettlementTest is Test {
         assertEq(escrow.getFlow(flowA).inventory, invA_before, "A inventory should be unchanged by sweep itself");
     }
 
+    /// Settlement must REVERT (not silently wrap inventory) when guardian
+    /// `drainInventory` has lowered `flow.inventory` below the outstanding
+    /// fee for this nonce. Regression test for the Codex-found `unchecked`
+    /// underflow bug. The original tokens have already left escrow via the
+    /// drain — promoting the fee would double-count.
+    function test_Settle_RevertsIfInventoryDrainedBelowFee() public {
+        uint256 amount = 10_000e6;
+        uint128 fee = uint128((amount * FEE_BPS) / 10_000);
+
+        vm.prank(alice);
+        (uint256 nonce, ) = escrow.lock(address(usdc), amount, RECIPIENT, flowA);
+
+        // Pause + drain ALL of flow A's inventory to treasury (simulates
+        // guardian wind-down). After this, inventory < fee.
+        vm.prank(guardian);
+        escrow.pause();
+        vm.prank(guardian);
+        escrow.drainInventory(flowA, amount);
+        vm.prank(owner);
+        escrow.unpause();
+
+        assertEq(escrow.getFlow(flowA).inventory, 0, "drain failed");
+
+        vm.warp(block.timestamp + escrow.SETTLEMENT_WINDOW() + 1);
+        // Solidity 0.8 checked subtraction reverts on underflow with the
+        // panic code 0x11 (arithmetic over/underflow). The settle remains
+        // callable later if governance re-provisions inventory.
+        vm.expectRevert();
+        escrow.settleLockedDeposit(nonce);
+
+        // Status MUST stay Locked (the revert rolled back the status write).
+        (, , BridgeEscrow.DepositStatus s, , , , uint128 storedFee) = escrow.lockedDeposits(nonce);
+        assertEq(uint8(s), uint8(BridgeEscrow.DepositStatus.Locked), "status flipped despite revert");
+        assertEq(uint256(storedFee), uint256(fee), "fee lost on revert");
+    }
+
     // ─── Read helper ────────────────────────────────────────────────────
 
     /// `lockedDeposits` is `public` so Solidity generates a getter, but the
