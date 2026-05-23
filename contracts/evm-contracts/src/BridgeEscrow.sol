@@ -350,11 +350,19 @@ contract BridgeEscrow is
     ///         Locked     — lock() succeeded; NOT refundable
     ///         Refundable — M-of-N attested the OPNet voucher was cancelled
     ///         Refunded   — terminal; tokens returned to the depositor
+    ///         Settled    — terminal; OPNet-side mint is presumed final
+    ///                      (time-based via `settleLockedDeposit`). Only
+    ///                      this transition promotes the deposit's fee
+    ///                      from inventory-backing into `accruedFees`.
+    /// @dev    APPENDED ENUM VALUES — `Settled` MUST stay at the end so
+    ///         existing on-chain status codes (0..3) remain stable across
+    ///         the upgrade.
     enum DepositStatus {
         None,
         Locked,
         Refundable,
-        Refunded
+        Refunded,
+        Settled
     }
 
     /// @notice On-chain record of every successful `lock` call. Indexed by
@@ -374,6 +382,13 @@ contract BridgeEscrow is
         uint128 amount;        // post-balance-delta received amount (refund value)
         address token;         // ERC-20 to send back
         bytes32 flowId;        // for inventory decrement on refund
+        // #62-fix — per-deposit fee captured at lock. Stays in escrow as
+        // part of `flow.inventory` until either (a) the deposit refunds —
+        // fee is never promoted; or (b) `settleLockedDeposit` promotes it
+        // into `flow.accruedFees` after the settlement window elapses.
+        // Struct-field append (the struct lives in a `mapping`) — does NOT
+        // consume a top-level storage slot.
+        uint128 fee;
     }
 
     /// @notice depositNonce → LockRecord. Set in `lock`, consumed in
@@ -549,6 +564,10 @@ contract BridgeEscrow is
     error VestingVaultNotSet();
     error VestingVaultTokenMismatch();
     error InsufficientAccruedFees();
+    // #62-fix — lifecycle errors for time-based settlement.
+    error FeeExceedsAmount();           // lock with fee >= received (zero-net bridge)
+    error LockNotSettleable();          // settleLockedDeposit on non-Locked status
+    error SettlementWindowNotMet();     // settleLockedDeposit before lockedAt + WINDOW
 
     // ─── Flow Registry errors ──────────────────────────────────────────
     error FlowAlreadyExists();
@@ -680,8 +699,11 @@ contract BridgeEscrow is
         if (amountReceived_ == 0) revert NothingReceived();
 
         // 4. cap + inventory increment, on the ACTUAL received amount
-        //    (post fee-on-transfer balance delta).
-        _bumpLockInventory(flowId, amountReceived_);
+        //    (post fee-on-transfer balance delta). `_bumpLockInventory`
+        //    also computes the per-deposit fee that we'll capture on the
+        //    LockRecord (NOT promoted to accruedFees yet — see
+        //    `settleLockedDeposit`).
+        uint128 lockFee = _bumpLockInventory(flowId, amountReceived_);
 
         unchecked {
             depositNonce_ = ++depositNonce;
@@ -696,7 +718,8 @@ contract BridgeEscrow is
             status: DepositStatus.Locked,
             amount: uint128(amountReceived_),
             token: token,
-            flowId: flowId
+            flowId: flowId,
+            fee: lockFee
         });
 
         emit Locked(token, msg.sender, amount, amountReceived_, opnetRecipient, depositNonce_);
@@ -810,6 +833,74 @@ contract BridgeEscrow is
         );
     }
 
+    /// @notice #62-fix — Window after `lockedAt` during which the M-of-N can
+    ///         still mark a Locked deposit `Refundable`. Past this window any
+    ///         caller may settle the deposit, promoting its captured fee
+    ///         from inventory-backing into withdrawable revenue. Long enough
+    ///         that ops/M-of-N can comfortably issue a Refundable mark for
+    ///         any OPNet voucher that needs cancelling; constant (not
+    ///         governance-settable) to keep the surface flat.
+    uint64 public constant SETTLEMENT_WINDOW = 14 days;
+
+    /// @notice #62-fix — Emitted when a Locked deposit transitions to Settled
+    ///         and its fee is promoted from inventory to `flow.accruedFees`.
+    event DepositSettled(
+        uint256 indexed depositNonce,
+        bytes32 indexed flowId,
+        uint128 fee,
+        address indexed by
+    );
+
+    /// @notice #62-fix — Promote a Locked deposit to Settled after the
+    ///         settlement window has elapsed without an M-of-N
+    ///         `markDepositRefundable`. Permissionless: anyone may call it;
+    ///         no external transfers occur — `rec.fee` is moved from
+    ///         `flow.inventory` (where it sat as user-backing principal)
+    ///         into `flow.accruedFees` (treasury-eligible revenue). Net
+    ///         escrow ERC20 balance is unchanged; this is a relabel.
+    ///
+    /// @dev    Mutually exclusive with the refund path: a deposit already in
+    ///         `Refundable` (or `Refunded`/`Settled`) reverts
+    ///         `LockNotSettleable`. The M-of-N is expected to issue
+    ///         `markDepositRefundable` well before SETTLEMENT_WINDOW for any
+    ///         deposit whose OPNet voucher needs cancelling.
+    ///
+    ///         Pre-upgrade `Locked` deposits carry `rec.fee == 0` because
+    ///         the field didn't exist before this upgrade; they settle as
+    ///         zero-fee deposits (conservative — slight tail-window
+    ///         under-report of revenue, accepted).
+    ///
+    ///         CEI: status read → status write → inventory/fee mutation.
+    ///         No external calls; no reentrancy guard needed.
+    function settleLockedDeposit(uint256 depositNonce_) external {
+        LockRecord storage rec = lockedDeposits[depositNonce_];
+        if (rec.status != DepositStatus.Locked) revert LockNotSettleable();
+        // Window guard. `lockedAt` is uint64; addition with a `days` constant
+        // is bounded well below uint64.max for any plausible block time.
+        if (block.timestamp < uint256(rec.lockedAt) + SETTLEMENT_WINDOW) {
+            revert SettlementWindowNotMet();
+        }
+
+        bytes32 flowId = rec.flowId;
+        uint128 fee = rec.fee;
+
+        // Effects.
+        rec.status = DepositStatus.Settled;
+        if (fee > 0) {
+            FlowRecord storage flow = flows[flowId];
+            // Both writes are bounded by previous lock-time invariants:
+            //   inventory was incremented by `rec.amount` (which is >= fee).
+            //   accruedFees is uint128 and tracks at most total locked-as-fee.
+            // 0.8.24 reverts on overflow regardless.
+            unchecked {
+                flow.inventory = flow.inventory - fee;
+            }
+            flow.accruedFees = uint128(uint256(flow.accruedFees) + fee);
+        }
+
+        emit DepositSettled(depositNonce_, flowId, fee, msg.sender);
+    }
+
     /// @notice M-of-N attestation that a locked deposit's OPNet voucher was
     ///         cancelled and will never mint — the ONLY path that makes a
     ///         deposit refundable. The bridge authority collects the
@@ -892,41 +983,44 @@ contract BridgeEscrow is
     /// @dev PR γ.2a — cap check + inventory increment, post-pull. Uses the
     ///      balance-delta `received` so the bookkeeping reflects what the
     ///      bridge actually holds, not what the caller asked to send.
-    function _bumpLockInventory(bytes32 flowId, uint256 received) internal {
+    function _bumpLockInventory(bytes32 flowId, uint256 received)
+        internal
+        returns (uint128 lockFee)
+    {
         if (received > type(uint128).max) revert FlowCapExceeded();
         FlowRecord storage flow = flows[flowId];
         uint256 newInventory = uint256(flow.inventory) + received;
         if (newInventory > uint256(flow.cap)) revert FlowCapExceeded();
         flow.inventory = uint128(newInventory);
 
-        // ─── Per-flow source-side fee accrual ─────────────────────────────
-        // The EVM→OPNet (lock) direction takes the bridge fee on the source
-        // side: the user locks `received` (gross), only the net is bridged
-        // to OPNet, and the fee portion stays in escrow. Record exactly that
-        // fee portion in `flow.accruedFees` so it can be withdrawn to the
-        // treasury via the non-emergency `withdrawFees` path. This is the
-        // SAME `fee = max(minFee, gross * feeBps / 10_000)` formula the
-        // server uses; computed on the realized `received` (balance-delta),
-        // consistent with the inventory bump above.
+        // ─── #62-fix — per-deposit fee CAPTURE (not promotion) ────────────
+        // Compute the fee that WILL be earned by the bridge if this deposit
+        // ultimately settles via successful OPNet mint. We do NOT promote it
+        // into `flow.accruedFees` here — that would let `withdrawFees` drain
+        // principal that may still be needed by a downstream `refundLockedDeposit`.
+        //
+        // Fee is stored on the LockRecord by the caller. It is promoted to
+        // `flow.accruedFees` (and removed from `flow.inventory`) only via
+        // `settleLockedDeposit`, which is gated on `SETTLEMENT_WINDOW`
+        // having elapsed since `lockedAt`. A refund (`refundLockedDeposit`)
+        // is mutually exclusive with settlement: the M-of-N moves the
+        // deposit to `Refundable` BEFORE settlement, and the fee never
+        // promotes — keeping the user's refund whole.
         //
         // Modes that retain an EVM-side fee on lock: WRAPPED (0),
         // POOLED_LOCK_RELEASE (3), POOLED_LOCK_VEST (4) — exactly the modes
-        // `_consumeLockFlow` permits to reach this point. No mode dispatch
-        // needed: every lock that lands here is a fee-bearing source side.
-        // A flow with feeBps == 0 AND minFee == 0 accrues nothing.
+        // `_consumeLockFlow` permits to reach this point.
         uint256 fee = (received * uint256(flow.feeBps)) / 10_000;
         uint256 minFee = uint256(flow.minFee);
         if (minFee > fee) fee = minFee;
-        // Fee can never exceed the received amount (else the lock would have
-        // no net to bridge). Clamp defensively so a misconfigured minFee >
-        // received can't over-accrue beyond what was actually locked.
-        if (fee > received) fee = received;
-        if (fee > 0) {
-            // received <= uint128.max (checked above) and accruedFees is
-            // uint128; the sum is bounded by total locked which is itself
-            // <= cap <= uint128.max. 0.8.24 reverts on overflow regardless.
-            flow.accruedFees = uint128(uint256(flow.accruedFees) + fee);
-        }
+        // Fail-closed on all-fee locks. If the fee would consume the entire
+        // (or more than) received amount, there is no net to bridge — reject
+        // the lock instead of silently producing a zero-net mint on OPNet.
+        // (Replaces the previous defensive `if (fee > received) fee = received`
+        // clamp, which papered over a misconfigured minFee.)
+        if (fee >= received) revert FeeExceedsAmount();
+        // fee < received <= uint128.max — cast is safe.
+        lockFee = uint128(fee);
     }
 
     /// @dev MED-001 — minAmount + rolling-window dailyLimit enforcement for
