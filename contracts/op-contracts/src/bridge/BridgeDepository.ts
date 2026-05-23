@@ -41,6 +41,7 @@ import {
     FlowTipCapUpdated,
     RelayerTipPaid,
     BurnConfirmed,
+    FeesWithdrawn,
 } from './events';
 
 /**
@@ -355,6 +356,24 @@ export class BridgeDepository extends ReentrancyGuard {
         Blockchain.nextPointer,
         false,
     );
+
+    // ─── #62 — per-flow OPNet-source fee accrual ───────────────────────
+    // Mirror of EVM `BridgeEscrow.FlowRecord.accruedFees`. The OPNet→EVM
+    // (lockForBridge) direction takes the bridge fee on the OPNet source
+    // side: the user locks `received` (gross), only the net is bridged to
+    // the EVM counterpart, and the fee portion stays in the depository.
+    // We record EXACTLY that fee portion here, keyed by flowId, so it can
+    // be swept to the governor via the non-emergency `withdrawFees` path.
+    //
+    // This accumulator is the ENTIRE safety property of `withdrawFees`: a
+    // withdrawal is strictly bounded by `_flowAccruedFees[flowId]` and can
+    // therefore NEVER reach into user-locked principal or another flow's
+    // reserves. There is no "withdraw excess balance" fallback.
+    //
+    // Append-only: declared as the LAST storage slot to preserve the
+    // upgrade discipline (this contract is redeployed fresh on testnet, so
+    // it ships baked into v1 storage, but the ordering rule still holds).
+    private _flowAccruedFees: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
     public constructor() {
         super();
@@ -1400,6 +1419,45 @@ export class BridgeDepository extends ReentrancyGuard {
         const received: u256 = SafeMath.sub(balAfter, balBefore);
         if (received.isZero()) throw new Revert('BridgeDepository: nothing received');
 
+        // ─── #62 — per-flow OPNet-source fee accrual ──────────────────
+        // Mirror of EVM `BridgeEscrow._bumpLockInventory`. lockForBridge is
+        // the OPNet→EVM (source) leg: the user locks `received` (gross),
+        // only the net crosses to the EVM counterpart, and the fee portion
+        // stays in this depository's custody. Record that exact fee in
+        // `_flowAccruedFees[flowId]` so the governor can sweep it via the
+        // non-emergency `withdrawFees` path.
+        //
+        // SAME formula the server uses and the EVM side accrues:
+        //   fee = max(minFee, received * feeBps / 10_000), clamped to received.
+        // Computed on the realized balance-delta `received`, consistent with
+        // the inventory bump below. Every mode lockForBridge admits (1/3/4)
+        // is a fee-bearing source side, so no extra mode dispatch is needed.
+        // A flow with feeBps == 0 AND minFee == 0 accrues nothing.
+        //
+        // NOTE: this is a pure accounting accumulator layered on top of the
+        // existing flow — it does NOT reduce the inventory credit below, and
+        // the lock continues to sign/emit the full `received` gross to the
+        // EVM side (the fee carve happens server-side at sign time). The
+        // accumulator simply names how much of the standing balance is
+        // bridge revenue vs. user-backing principal.
+        let lockFee: u256 = SafeMath.div(
+            SafeMath.mul(received, this._flowFeeBps.get(flowId)),
+            u256.fromU32(10000),
+        );
+        const lockMinFee: u256 = this._flowMinFee.get(flowId);
+        if (u256.gt(lockMinFee, lockFee)) {
+            lockFee = lockMinFee;
+        }
+        // Fee can never exceed what was actually locked (else there'd be no
+        // net to bridge). Clamp defensively against a misconfigured minFee.
+        if (u256.gt(lockFee, received)) {
+            lockFee = received;
+        }
+        if (!lockFee.isZero()) {
+            const accruedBefore: u256 = this._flowAccruedFees.get(flowId);
+            this._flowAccruedFees.set(flowId, SafeMath.add(accruedBefore, lockFee));
+        }
+
         // #44 — mode-1 (INVERSE_WRAPPED) inventory production. The canonical
         // OP20 just entered the bridge; it now backs the EVM-side wrapped
         // mint and must be releasable back via claimReleaseWithVoucher.
@@ -1766,6 +1824,96 @@ export class BridgeDepository extends ReentrancyGuard {
             new InventoryDrainedOpNet(flowId, token, recipient, Blockchain.tx.sender, amount),
         );
         return new BytesWriter(0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  #62 — non-emergency per-flow fee withdrawal (mirror of EVM
+    //  BridgeEscrow.withdrawFees)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Withdraw accrued OPNet-source bridge fees for a flow. This is the
+     * ROUTINE revenue-collection path — unlike `drainInventoryOpNet` it is
+     * NOT pause-gated, so fees can be swept during normal operation.
+     *
+     * Governor-only, `@nonReentrant`, strict CEI. The withdrawable amount
+     * is bounded STRICTLY by `_flowAccruedFees[flowId]` (the accumulator
+     * incremented in `lockForBridge` by exactly the fee portion of each
+     * lock) — this bound is the entire safety property. There is NO
+     * "withdraw excess balance" fallback: a withdrawal can never reach into
+     * user-locked principal or another flow's reserves.
+     *
+     * Recipient mirrors the EVM "treasury-only" discipline. The OPNet
+     * depository has no set-once treasury slot, so fees are swept to the
+     * governor (`_governor`) — the simplest safe choice on OPNet and the
+     * same trust boundary that authorizes the call.
+     *
+     * Args mirror `provisionInventoryOpNet` / `drainInventoryOpNet`:
+     *   (flowId, token, amount) — `token` MUST be the flow's registered
+     *   canonical OPNet token (the asset the fee was accrued in).
+     */
+    @method(
+        { name: 'flowId', type: ABIDataTypes.UINT256 },
+        { name: 'token', type: ABIDataTypes.ADDRESS },
+        { name: 'amount', type: ABIDataTypes.UINT256 },
+    )
+    @emit('FeesWithdrawn')
+    @nonReentrant
+    public withdrawFees(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const flowId: u256 = calldata.readU256();
+        const token: Address = calldata.readAddress();
+        const amount: u256 = calldata.readU256();
+
+        if (token.isZero()) throw new Revert('BridgeDepository: zero token');
+        if (amount.isZero()) throw new Revert('BridgeDepository: zero amount');
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        // Bind the passed token to the flow's registered canonical token —
+        // a withdrawal can't be made against a different asset.
+        if (!u256.eq(this._flowOpnetToken.get(flowId), _opnetAddrToU256(token))) {
+            throw new Revert('BridgeDepository: token not flow canonical');
+        }
+
+        // Verify → effect → interaction (CEI). The accumulator is the sole
+        // bound; decrement it BEFORE the external transfer. An over-withdraw
+        // reverts before any token moves.
+        const accrued: u256 = this._flowAccruedFees.get(flowId);
+        if (u256.gt(amount, accrued)) {
+            throw new Revert('BridgeDepository: insufficient accrued fees');
+        }
+        this._flowAccruedFees.set(flowId, SafeMath.sub(accrued, amount));
+
+        // Recipient = governor (no treasury slot on OPNet).
+        const recipient: Address = this._governor.value;
+
+        const transferSelector: u32 = encodeSelector('transfer(address,uint256)');
+        const w = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+        w.writeSelector(transferSelector);
+        w.writeAddress(recipient);
+        w.writeU256(amount);
+        Blockchain.call(token, w);
+
+        this.emitEvent(
+            new FeesWithdrawn(flowId, token, recipient, Blockchain.tx.sender, amount),
+        );
+        return new BytesWriter(0);
+    }
+
+    /**
+     * @view — per-flow accrued OPNet-source fees (base units of the flow's
+     * canonical OPNet token). Lets the server surface BOTH the EVM and OPNet
+     * fee accumulators on a fee dashboard. Mirrors reading EVM
+     * `getFlow(flowId).accruedFees`.
+     */
+    @view
+    @returns({ name: 'accrued', type: ABIDataTypes.UINT256 })
+    public accruedFees(calldata: Calldata): BytesWriter {
+        const flowId: u256 = calldata.readU256();
+        const r = new BytesWriter(32);
+        r.writeU256(this._flowAccruedFees.get(flowId));
+        return r;
     }
 
     /**

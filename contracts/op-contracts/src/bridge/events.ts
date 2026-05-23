@@ -187,6 +187,25 @@ export class InventoryDrainedOpNet extends NetEvent {
     }
 }
 
+/**
+ * #62 — emitted on `withdrawFees`. The governor sweeps `amount` of a flow's
+ * accrued OPNet-source bridge fees to `to` (the governor — there is no
+ * set-once treasury slot on the OPNet depository). Mirrors EVM
+ * `BridgeEscrow.FeesWithdrawn(flowId, token, treasury, amount)`. `by` is
+ * `Blockchain.tx.sender` (the governor) for audit correlation.
+ */
+export class FeesWithdrawn extends NetEvent {
+    constructor(flowId: u256, token: Address, to: Address, by: Address, amount: u256) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 3 + 32 * 2);
+        data.writeU256(flowId);
+        data.writeAddress(token);
+        data.writeAddress(to);
+        data.writeAddress(by);
+        data.writeU256(amount);
+        super('FeesWithdrawn', data);
+    }
+}
+
 // ─── PR α — Flow Registry events ──────────────────────────────────────
 
 /**
