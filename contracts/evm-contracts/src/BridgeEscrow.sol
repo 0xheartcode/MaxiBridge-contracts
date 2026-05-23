@@ -235,6 +235,15 @@ contract BridgeEscrow is
         // instead of `safeTransfer`ing directly to the recipient. Governor-
         // repointable via `setFlowVestingVault` (restricted to mode 4).
         address vestingVault;
+        // Per-flow accumulated source-side bridge fees (EVM-lock direction).
+        // Incremented on each `lock` by exactly the computed fee portion;
+        // withdrawn (treasury-only) via `withdrawFees`. This is the entire
+        // safety bound for routine fee collection — `withdrawFees` can NEVER
+        // exceed this accumulator, so it can never touch user-locked
+        // principal or another flow's reserves. Struct-field append (the
+        // struct lives in a mapping) — does NOT consume a top-level storage
+        // slot, so the `uint256[42] __gap` is unaffected.
+        uint128 accruedFees;
     }
 
     // ---------------------------------------------------------------------
@@ -452,6 +461,16 @@ contract BridgeEscrow is
 
     event TreasurySet(address indexed treasury);
     event GuardianSet(address indexed guardian);
+
+    /// @notice Emitted when accrued source-side fees for a flow are
+    ///         withdrawn (always to the set-once `treasury`). Non-emergency
+    ///         routine revenue collection — does NOT require pausing.
+    event FeesWithdrawn(
+        bytes32 indexed flowId,
+        address indexed token,
+        address indexed to,
+        uint256 amount
+    );
     event SignerAdded(address indexed signer, uint256 newCount);
     event SignerRemoved(address indexed signer, uint256 newCount);
     event ThresholdSet(uint256 indexed oldThreshold, uint256 indexed newThreshold);
@@ -529,6 +548,7 @@ contract BridgeEscrow is
     error VestingVaultNotPermitted();
     error VestingVaultNotSet();
     error VestingVaultTokenMismatch();
+    error InsufficientAccruedFees();
 
     // ─── Flow Registry errors ──────────────────────────────────────────
     error FlowAlreadyExists();
@@ -878,6 +898,35 @@ contract BridgeEscrow is
         uint256 newInventory = uint256(flow.inventory) + received;
         if (newInventory > uint256(flow.cap)) revert FlowCapExceeded();
         flow.inventory = uint128(newInventory);
+
+        // ─── Per-flow source-side fee accrual ─────────────────────────────
+        // The EVM→OPNet (lock) direction takes the bridge fee on the source
+        // side: the user locks `received` (gross), only the net is bridged
+        // to OPNet, and the fee portion stays in escrow. Record exactly that
+        // fee portion in `flow.accruedFees` so it can be withdrawn to the
+        // treasury via the non-emergency `withdrawFees` path. This is the
+        // SAME `fee = max(minFee, gross * feeBps / 10_000)` formula the
+        // server uses; computed on the realized `received` (balance-delta),
+        // consistent with the inventory bump above.
+        //
+        // Modes that retain an EVM-side fee on lock: WRAPPED (0),
+        // POOLED_LOCK_RELEASE (3), POOLED_LOCK_VEST (4) — exactly the modes
+        // `_consumeLockFlow` permits to reach this point. No mode dispatch
+        // needed: every lock that lands here is a fee-bearing source side.
+        // A flow with feeBps == 0 AND minFee == 0 accrues nothing.
+        uint256 fee = (received * uint256(flow.feeBps)) / 10_000;
+        uint256 minFee = uint256(flow.minFee);
+        if (minFee > fee) fee = minFee;
+        // Fee can never exceed the received amount (else the lock would have
+        // no net to bridge). Clamp defensively so a misconfigured minFee >
+        // received can't over-accrue beyond what was actually locked.
+        if (fee > received) fee = received;
+        if (fee > 0) {
+            // received <= uint128.max (checked above) and accruedFees is
+            // uint128; the sum is bounded by total locked which is itself
+            // <= cap <= uint128.max. 0.8.24 reverts on overflow regardless.
+            flow.accruedFees = uint128(uint256(flow.accruedFees) + fee);
+        }
     }
 
     /// @dev MED-001 — minAmount + rolling-window dailyLimit enforcement for
@@ -1418,6 +1467,43 @@ contract BridgeEscrow is
         if (treasury == address(0)) revert TreasuryNotSet();
         if (amount == 0) revert AmountZero();
         emit EmergencyWithdraw(token, treasury, amount, msg.sender);
+        IERC20(token).safeTransfer(treasury, amount);
+    }
+
+    /// @notice Withdraw accrued source-side bridge fees for a flow to the
+    ///         set-once `treasury`. This is the ROUTINE revenue-collection
+    ///         path — unlike `emergencyWithdraw` it does NOT require the
+    ///         bridge to be paused, so fees can be swept during normal
+    ///         operation.
+    /// @dev    The recipient is ALWAYS `treasury` — never an arbitrary
+    ///         address. The withdrawable amount is bounded by the per-flow
+    ///         `accruedFees` accumulator (incremented in `_bumpLockInventory`
+    ///         by exactly the fee portion of each lock); this bound is the
+    ///         entire safety property. There is NO "withdraw excess balance"
+    ///         fallback — a withdrawal can never reach into user-locked
+    ///         principal or another flow's reserves.
+    ///         Gated `onlyOwnerOrGuardian` (same role lattice as `pause` /
+    ///         `cancelVoucher`), `nonReentrant`, strict CEI.
+    function withdrawFees(bytes32 flowId, uint256 amount)
+        external
+        onlyOwnerOrGuardian
+        nonReentrant
+    {
+        if (treasury == address(0)) revert TreasuryNotSet();
+        FlowRecord storage flow = flows[flowId];
+        if (flow.evmChainId == 0) revert FlowNotFound();
+        if (amount == 0) revert AmountZero();
+        if (amount > uint256(flow.accruedFees)) revert InsufficientAccruedFees();
+
+        // Effects (CEI): decrement the accumulator before the transfer.
+        unchecked {
+            flow.accruedFees = flow.accruedFees - uint128(amount);
+        }
+
+        address token = flow.evmToken;
+        emit FeesWithdrawn(flowId, token, treasury, amount);
+
+        // Interaction.
         IERC20(token).safeTransfer(treasury, amount);
     }
 
