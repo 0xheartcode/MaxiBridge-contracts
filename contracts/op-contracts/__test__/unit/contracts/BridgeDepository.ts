@@ -728,7 +728,7 @@ export class BridgeDepository extends ContractRuntime {
         ABIDataTypes.ADDRESS,
         ABIDataTypes.UINT256,
     );
-    private readonly accruedFeesSelector: number = encodeNumericSelector('accruedFees()');
+    private readonly accruedFeesSelector: number = encodeNumericSelector('accruedFees(uint256)');
 
     public async withdrawFees(flowId: bigint, token: Address, amount: bigint): Promise<void> {
         const w = new BinaryWriter();

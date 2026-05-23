@@ -519,8 +519,7 @@ export const BridgeDepositoryAbi = [
     },
     {
         name: 'accruedFees',
-        constant: true,
-        inputs: [],
+        inputs: [{ name: 'flowId', type: ABIDataTypes.UINT256 }],
         outputs: [{ name: 'accrued', type: ABIDataTypes.UINT256 }],
         type: BitcoinAbiTypes.Function,
     },

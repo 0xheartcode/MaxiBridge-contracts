@@ -642,7 +642,7 @@ export interface IBridgeDepository extends IOP_NETContract {
         recipient: Address,
     ): Promise<DrainInventoryOpNet>;
     withdrawFees(flowId: bigint, token: Address, amount: bigint): Promise<WithdrawFees>;
-    accruedFees(): Promise<AccruedFees>;
+    accruedFees(flowId: bigint): Promise<AccruedFees>;
     addSignerToSet(pubKeyHash: bigint): Promise<AddSignerToSet>;
     removeSignerFromSet(pubKeyHash: bigint): Promise<RemoveSignerFromSet>;
     setRequiredSignatures(threshold: bigint): Promise<SetRequiredSignatures>;
