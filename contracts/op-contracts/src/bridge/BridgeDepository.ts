@@ -1029,6 +1029,14 @@ export class BridgeDepository extends ReentrancyGuard {
         if (tipCapBps > MAX_TIP_BPS) {
             throw new Revert('BridgeDepository: tipCapBps too high');
         }
+        // #62-fix invariant: if `minAmount` is set, it MUST exceed `minFee`.
+        // Otherwise the public-facing minimum advertises a usable amount
+        // that `lockForBridge` would reject with "fee exceeds amount"
+        // (because `fee >= received`). `minAmount == 0` is the explicit
+        // "no-floor" config and is allowed.
+        if (!minAmount.isZero() && u256.le(minAmount, minFee)) {
+            throw new Revert('BridgeDepository: minAmount <= minFee');
+        }
 
         const flowId: u256 = _computeFlowId(
             mode,
@@ -1197,6 +1205,12 @@ export class BridgeDepository extends ReentrancyGuard {
         if (this._flowExists.get(flowId).isZero()) {
             throw new Revert('BridgeDepository: flow not found');
         }
+        // #62-fix invariant: preserve addFlow's `minAmount > minFee` (when
+        // minAmount is non-zero). Without this, lowering minAmount below the
+        // current minFee would brick every lock at the advertised floor.
+        if (!newMin.isZero() && u256.le(newMin, this._flowMinFee.get(flowId))) {
+            throw new Revert('BridgeDepository: minAmount <= minFee');
+        }
         const oldMin: u256 = this._flowMinAmount.get(flowId);
         this._flowMinAmount.set(flowId, newMin);
         this.emitEvent(new FlowMinAmountChanged(flowId, oldMin, newMin));
@@ -1222,6 +1236,12 @@ export class BridgeDepository extends ReentrancyGuard {
         }
         if (newBps > MAX_WRAP_FEE_BPS) {
             throw new Revert('BridgeDepository: feeBps too high');
+        }
+        // #62-fix invariant: if a positive minAmount is configured, raising
+        // minFee at or above it would brick locks at the floor. Reject.
+        const currentMinAmount: u256 = this._flowMinAmount.get(flowId);
+        if (!currentMinAmount.isZero() && u256.le(currentMinAmount, newMinFee)) {
+            throw new Revert('BridgeDepository: minAmount <= minFee');
         }
         const oldBps: u32 = this._flowFeeBps.get(flowId).toU32();
         const oldMinFee: u256 = this._flowMinFee.get(flowId);
@@ -1448,10 +1468,13 @@ export class BridgeDepository extends ReentrancyGuard {
         if (u256.gt(lockMinFee, lockFee)) {
             lockFee = lockMinFee;
         }
-        // Fee can never exceed what was actually locked (else there'd be no
-        // net to bridge). Clamp defensively against a misconfigured minFee.
-        if (u256.gt(lockFee, received)) {
-            lockFee = received;
+        // #62-fix — fail-closed on all-fee locks. Mirrors the EVM
+        // `FeeExceedsAmount` revert in `BridgeEscrow._bumpLockInventory`.
+        // The previous defensive clamp (`if (lockFee > received) lockFee =
+        // received`) papered over a misconfigured `minFee` and allowed locks
+        // with zero bridgeable net. Reject those configs at lock time.
+        if (u256.ge(lockFee, received)) {
+            throw new Revert('BridgeDepository: fee exceeds amount');
         }
         if (!lockFee.isZero()) {
             const accruedBefore: u256 = this._flowAccruedFees.get(flowId);
@@ -1907,7 +1930,12 @@ export class BridgeDepository extends ReentrancyGuard {
      * fee accumulators on a fee dashboard. Mirrors reading EVM
      * `getFlow(flowId).accruedFees`.
      */
-    @view
+    // #62-fix — was `@view` which always emits an empty-parens selector
+    // (sha256('accruedFees()')) and ABI inputs: [], even though the impl
+    // reads a `flowId` from calldata. Frontend typed-ABI consumers would be
+    // wrong. Use `@method` so the generated ABI carries the `flowId` input
+    // and the selector becomes sha256('accruedFees(uint256)').
+    @method({ name: 'flowId', type: ABIDataTypes.UINT256 })
     @returns({ name: 'accrued', type: ABIDataTypes.UINT256 })
     public accruedFees(calldata: Calldata): BytesWriter {
         const flowId: u256 = calldata.readU256();

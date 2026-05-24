@@ -105,7 +105,7 @@ contract RefundLockedDepositTest is Test {
     }
 
     function _statusOf(uint256 nonce) internal view returns (BridgeEscrow.DepositStatus) {
-        ( , , BridgeEscrow.DepositStatus status, , , ) = escrow.lockedDeposits(nonce);
+        ( , , BridgeEscrow.DepositStatus status, , , , ) = escrow.lockedDeposits(nonce);
         return status;
     }
 

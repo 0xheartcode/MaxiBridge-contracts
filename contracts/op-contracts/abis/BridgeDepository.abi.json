@@ -652,10 +652,15 @@
         },
         {
             "name": "accruedFees",
-            "type": "View",
+            "type": "Function",
             "payable": false,
             "onlyOwner": false,
-            "inputs": [],
+            "inputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                }
+            ],
             "outputs": [
                 {
                     "name": "accrued",

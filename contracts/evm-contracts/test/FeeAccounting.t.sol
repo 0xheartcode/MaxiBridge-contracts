@@ -95,7 +95,31 @@ contract FeeAccountingTest is Test {
         usdc.approve(address(escrow), type(uint256).max);
     }
 
-    // ─── Accrual ──────────────────────────────────────────────────────────
+    // ─── Helpers ─────────────────────────────────────────────────────────
+    //
+    // Under the post-#62-fix lifecycle, lock-time fee accrual no longer
+    // happens; the fee is captured per-deposit on the LockRecord and only
+    // promoted to `flow.accruedFees` (with a matching inventory deduction)
+    // via `settleLockedDeposit` after the settlement window. These helpers
+    // collapse the lock → warp → settle dance into one call so the original
+    // test assertions still read clearly.
+
+    function _lockAs(address user, uint256 amount) internal returns (uint256 nonce) {
+        vm.prank(user);
+        (nonce, ) = escrow.lock(address(usdc), amount, RECIPIENT, flowId);
+    }
+
+    function _settle(uint256 nonce) internal {
+        vm.warp(block.timestamp + escrow.SETTLEMENT_WINDOW() + 1);
+        escrow.settleLockedDeposit(nonce);
+    }
+
+    function _lockAndSettle(address user, uint256 amount) internal returns (uint256 nonce) {
+        nonce = _lockAs(user, amount);
+        _settle(nonce);
+    }
+
+    // ─── Accrual (post-#62-fix: promotion happens at settle, not lock) ─────
 
     function test_Accrual_BumpsByExactFee() public {
         uint256 amount = 10_000e6;
@@ -104,22 +128,32 @@ contract FeeAccountingTest is Test {
         assertEq(escrow.getFlow(flowId).accruedFees, 0);
         uint128 invBefore = escrow.getFlow(flowId).inventory;
 
-        vm.prank(alice);
-        escrow.lock(address(usdc), amount, RECIPIENT, flowId);
+        uint256 nonce = _lockAs(alice, amount);
+        // Lock-time invariant under the new spec: accruedFees stays zero
+        // and inventory is bumped by the gross amount. Fee is captured
+        // per-deposit on the LockRecord, NOT promoted yet.
+        BridgeEscrow.FlowRecord memory midF = escrow.getFlow(flowId);
+        assertEq(uint256(midF.accruedFees), 0, "accruedFees should be 0 before settle");
+        assertEq(uint256(midF.inventory) - uint256(invBefore), amount, "inventory should be gross at lock");
+
+        _settle(nonce);
 
         BridgeEscrow.FlowRecord memory f = escrow.getFlow(flowId);
-        assertEq(uint256(f.accruedFees), expectedFee, "accruedFees != fee");
-        // Inventory still tracks the FULL received amount (fee stays in
-        // escrow as part of the locked balance; it is not subtracted from
-        // inventory — only earmarked by the accumulator).
-        assertEq(uint256(f.inventory) - uint256(invBefore), amount, "inventory drift");
+        assertEq(uint256(f.accruedFees), expectedFee, "accruedFees != fee after settle");
+        // Post-settle inventory must drop back by exactly the fee — settlement
+        // is a relabel from inventory-backing into withdrawable revenue.
+        assertEq(uint256(f.inventory) - uint256(invBefore), amount - expectedFee, "inventory not reduced by fee");
     }
 
     function test_Accrual_Accumulates() public {
-        vm.startPrank(alice);
-        escrow.lock(address(usdc), 10_000e6, RECIPIENT, flowId);
-        escrow.lock(address(usdc), 20_000e6, RECIPIENT, flowId);
-        vm.stopPrank();
+        uint256 n1 = _lockAs(alice, 10_000e6);
+        uint256 n2 = _lockAs(alice, 20_000e6);
+
+        // Warp once past the window then settle both deposits — accrual
+        // must accumulate exactly as it did under the old (broken) spec.
+        vm.warp(block.timestamp + escrow.SETTLEMENT_WINDOW() + 1);
+        escrow.settleLockedDeposit(n1);
+        escrow.settleLockedDeposit(n2);
 
         uint256 expected = ((10_000e6 + 20_000e6) * uint256(FEE_BPS)) / 10_000; // 150e6
         assertEq(uint256(escrow.getFlow(flowId).accruedFees), expected);
@@ -185,16 +219,20 @@ contract FeeAccountingTest is Test {
         vm.startPrank(alice);
         tok.approve(address(escrow), type(uint256).max);
         // gross 100e6 → bps fee = 100e6 * 1 / 10000 = 1e4 < minFee 1e6.
-        escrow.lock(address(tok), 100e6, RECIPIENT, mf);
+        (uint256 nonce, ) = escrow.lock(address(tok), 100e6, RECIPIENT, mf);
         vm.stopPrank();
+
+        // Promote the captured fee via settlement.
+        vm.warp(block.timestamp + escrow.SETTLEMENT_WINDOW() + 1);
+        escrow.settleLockedDeposit(nonce);
+
         assertEq(uint256(escrow.getFlow(mf).accruedFees), 1e6);
     }
 
     // ─── withdrawFees ───────────────────────────────────────────────────────
 
     function test_WithdrawFees_TransfersAndDecrements() public {
-        vm.prank(alice);
-        escrow.lock(address(usdc), 10_000e6, RECIPIENT, flowId);
+        _lockAndSettle(alice, 10_000e6);
         uint256 fee = (10_000e6 * uint256(FEE_BPS)) / 10_000; // 50e6
 
         uint256 treBefore = usdc.balanceOf(treasury);
@@ -210,8 +248,7 @@ contract FeeAccountingTest is Test {
     }
 
     function test_WithdrawFees_FullDrain() public {
-        vm.prank(alice);
-        escrow.lock(address(usdc), 10_000e6, RECIPIENT, flowId);
+        _lockAndSettle(alice, 10_000e6);
         uint256 fee = (10_000e6 * uint256(FEE_BPS)) / 10_000;
 
         vm.prank(owner);
@@ -221,16 +258,14 @@ contract FeeAccountingTest is Test {
     }
 
     function test_WithdrawFees_GuardianCanCall() public {
-        vm.prank(alice);
-        escrow.lock(address(usdc), 10_000e6, RECIPIENT, flowId);
+        _lockAndSettle(alice, 10_000e6);
         vm.prank(guardian);
         escrow.withdrawFees(flowId, 10e6);
         assertEq(usdc.balanceOf(treasury), 10e6);
     }
 
     function test_WithdrawFees_EmitsEvent() public {
-        vm.prank(alice);
-        escrow.lock(address(usdc), 10_000e6, RECIPIENT, flowId);
+        _lockAndSettle(alice, 10_000e6);
 
         vm.expectEmit(true, true, true, true, address(escrow));
         emit FeesWithdrawn(flowId, address(usdc), treasury, 30e6);
@@ -243,8 +278,7 @@ contract FeeAccountingTest is Test {
         // the routine-revenue contract: unlike emergencyWithdraw it has no
         // whenPaused gate.
         assertEq(escrow.paused(), false);
-        vm.prank(alice);
-        escrow.lock(address(usdc), 10_000e6, RECIPIENT, flowId);
+        _lockAndSettle(alice, 10_000e6);
         vm.prank(owner);
         escrow.withdrawFees(flowId, 10e6);
         assertEq(usdc.balanceOf(treasury), 10e6);
@@ -254,8 +288,9 @@ contract FeeAccountingTest is Test {
     function test_WithdrawFees_NotBlockedByPause() public {
         // Even when paused, withdrawFees still works (no whenPaused, no
         // whenNotPaused gate — it is orthogonal to pause state).
-        vm.prank(alice);
-        escrow.lock(address(usdc), 10_000e6, RECIPIENT, flowId);
+        // NOTE: settle happens BEFORE pause because settle is permissionless;
+        //       the post-fix lifecycle is lock → settle → (later) pause.
+        _lockAndSettle(alice, 10_000e6);
         vm.prank(guardian);
         escrow.pause();
         assertEq(escrow.paused(), true);
