@@ -267,6 +267,31 @@ await opnet('WrappedOP20 — burnForRelease', async (vm: OPNetUnit) => {
             await token.burnForRelease(ethRecipient32(), 10_000n, 1);
         }).toThrow();
     });
+
+    // #68 Tier C — the burn records the flowId it was given in the
+    // BurnedForRelease event (appended last at offset 132 of the 164B data).
+    await vm.it('records the flowId in the BurnedForRelease event', async () => {
+        setSender(alice);
+        const flowId = 0x9abcn;
+        const events = await token.burnForReleaseEvents(ethRecipient32(), 100n, 1, flowId);
+        const burned = events.find((e) => e.type === 'BurnedForRelease');
+        Assert.expect(burned !== undefined).toEqual(true);
+        const data = burned!.data;
+        // Event layout (164B): user(32) | amount(32) | ethRecipient(32) |
+        //   destChainId(4) | burnNonce(32) | flowId(32). flowId at offset 132.
+        Assert.expect(data.length).toEqual(164);
+        let parsedFlowId = 0n;
+        for (let i = 132; i < 164; i++) {
+            parsedFlowId = (parsedFlowId << 8n) | BigInt(data[i]);
+        }
+        Assert.expect(parsedFlowId).toEqual(flowId);
+        // burnNonce (offset 100) still parses to 1 — pre-existing offsets stable.
+        let parsedNonce = 0n;
+        for (let i = 100; i < 132; i++) {
+            parsedNonce = (parsedNonce << 8n) | BigInt(data[i]);
+        }
+        Assert.expect(parsedNonce).toEqual(1n);
+    });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

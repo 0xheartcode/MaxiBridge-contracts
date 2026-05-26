@@ -42,7 +42,10 @@ contract WrappedERC20 is ERC20, Ownable, Pausable {
         address indexed from,
         uint256 amount,
         bytes32 opnetRecipient,
-        uint256 indexed burnNonce
+        uint256 indexed burnNonce,
+        // #68 Tier C — flowId APPENDED last (non-indexed) so all pre-existing
+        // log offsets stay stable. Names which flow/route this burn is for.
+        bytes32 flowId
     );
 
     /// @dev Monotonic burn nonce — gives each burn a unique id even when
@@ -87,19 +90,25 @@ contract WrappedERC20 is ERC20, Ownable, Pausable {
     ///         indexer can issue a release/mint voucher on OPNet.
     /// @dev    `whenNotPaused` so an incident-response pause halts new
     ///         OPNet release/mint liabilities from accruing.
+    /// @param  flowId — #68 Tier C: which flow/route this burn is for. Only
+    ///         recorded in the event; the signed release voucher binds it to
+    ///         the destination flow on the OPNet side.
     /// @param  opnetRecipient — 32-byte OPNet identity that receives on the
     ///         other side. Caller is responsible for picking the right
     ///         encoding for their target (canonical OP20 receive vs
     ///         wrapped OP20 receive).
     /// @param  amount — token base units (6 decimals).
-    function burnForRelease(bytes32 opnetRecipient, uint256 amount) external whenNotPaused {
+    function burnForRelease(bytes32 flowId, bytes32 opnetRecipient, uint256 amount)
+        external
+        whenNotPaused
+    {
         if (opnetRecipient == bytes32(0)) revert ZeroRecipient();
         if (amount == 0) revert AmountZero();
         _burn(msg.sender, amount);
         unchecked {
             ++burnNonce;
         }
-        emit BurnedForRelease(msg.sender, amount, opnetRecipient, burnNonce);
+        emit BurnedForRelease(msg.sender, amount, opnetRecipient, burnNonce, flowId);
     }
 
     function pause() external onlyOwner {

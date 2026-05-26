@@ -53,9 +53,13 @@ export class BurnedForRelease extends NetEvent {
         ethRecipient: Uint8Array,
         destChainId: u32,
         burnNonce: u256,
+        flowId: u256,
     ) {
-        // 32 (user) + 32 (amount) + 32 (ethRecipient) + 4 (destChainId) + 32 (burnNonce) = 132
-        const data = new BytesWriter(ADDRESS_BYTE_LENGTH + 32 + 32 + 4 + 32);
+        // 32 (user) + 32 (amount) + 32 (ethRecipient) + 4 (destChainId)
+        //   + 32 (burnNonce) + 32 (flowId) = 164
+        // #68 Tier C: flowId is APPENDED last so all pre-existing offsets
+        // (user/amount/ethRecipient/destChainId/burnNonce) stay byte-stable.
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH + 32 + 32 + 4 + 32 + 32);
         data.writeAddress(user);
         data.writeU256(amount);
         for (let i: i32 = 0; i < 32; i++) {
@@ -63,6 +67,7 @@ export class BurnedForRelease extends NetEvent {
         }
         data.writeU32(destChainId);
         data.writeU256(burnNonce);
+        data.writeU256(flowId);
         super('BurnedForRelease', data);
     }
 }

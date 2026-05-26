@@ -21,8 +21,10 @@ export class WrappedOP20 extends OP20 {
         ABIDataTypes.ADDRESS,
         ABIDataTypes.UINT256,
     );
+    // #68 Tier C — flowId (UINT256) is now the FIRST param of burnForRelease.
     private readonly burnForReleaseSelector: number = encodeSelectorWithParams(
         'burnForRelease',
+        ABIDataTypes.UINT256,
         ABIDataTypes.BYTES32,
         ABIDataTypes.UINT256,
         ABIDataTypes.UINT32,
@@ -122,18 +124,44 @@ export class WrappedOP20 extends OP20 {
         ethRecipient: Uint8Array,
         amount: bigint,
         destChainId: number,
+        // #68 Tier C — flowId is the contract's FIRST param. Kept LAST + optional
+        // here so existing call sites stay valid; defaults to 0 (legacy / unbound).
+        flowId: bigint = 0n,
     ): Promise<bigint> {
         if (ethRecipient.length !== 32) {
             throw new Error(`ethRecipient must be 32 bytes (got ${ethRecipient.length})`);
         }
         const w = new BinaryWriter();
         w.writeSelector(this.burnForReleaseSelector);
+        // #68 Tier C — flowId FIRST (matches the contract @method order).
+        w.writeU256(flowId);
         // BYTES32 is 32 raw bytes, no length prefix.
         w.writeBytes(ethRecipient);
         w.writeU256(amount);
         w.writeU32(destChainId);
         const r = await this.getResponse(w.getBuffer());
         return r.readU256();
+    }
+
+    /**
+     * #68 Tier C — same as `burnForRelease` but returns the raw emitted events
+     * so a test can assert the BurnedForRelease event carries the flowId.
+     */
+    public async burnForReleaseEvents(
+        ethRecipient: Uint8Array,
+        amount: bigint,
+        destChainId: number,
+        flowId: bigint,
+    ): Promise<{ type: string; data: Uint8Array }[]> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.burnForReleaseSelector);
+        w.writeU256(flowId);
+        w.writeBytes(ethRecipient);
+        w.writeU256(amount);
+        w.writeU32(destChainId);
+        const result = await this.execute({ calldata: w.getBuffer() });
+        if (result.error) throw result.error;
+        return result.events.map((e) => ({ type: e.type, data: e.data }));
     }
 
     public async bridgeDepository(): Promise<Address> {

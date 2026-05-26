@@ -27,7 +27,7 @@ import { BridgeDepository } from '../contracts/BridgeDepository.js';
 // ─── Constants — must mirror BridgeDepository.ts ──────────────────────
 const VOUCHER_NETWORK_ID: bigint = 2n;
 const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x59893fe6;
-const VOUCHER_PREIMAGE_LEN = 508;
+const VOUCHER_PREIMAGE_LEN = 540; // #68 Tier B — appended flowId u256
 const ETH_CHAIN_ID: bigint = 1n;
 const FLOW_WINDOW_DURATION = 86400n;
 
@@ -106,6 +106,7 @@ interface VoucherFields {
     relayerTip?: bigint;
     signerEpoch?: number;
     voucherId: bigint;
+    flowId?: bigint; // #68 Tier B
 }
 
 function writeU128BE(w: BinaryWriter, v: bigint): void {
@@ -139,6 +140,7 @@ function buildVoucher(v: VoucherFields): { preimage: Uint8Array; hash: Uint8Arra
     writeU128BE(w, v.relayerTip ?? 0n);
     w.writeU32(v.signerEpoch ?? 1);
     w.writeU256(v.voucherId);
+    w.writeU256(v.flowId ?? _lastRegisteredFlowId); // #68 Tier B — appended LAST
 
     const preimage = w.getBuffer();
     if (preimage.length !== VOUCHER_PREIMAGE_LEN) {
@@ -184,6 +186,10 @@ function opnetAddrToBigInt(addr: Address): bigint {
 const DEFAULT_SOURCE_BRIDGE: Address = Blockchain.generateRandomAddress();
 const DEFAULT_SOURCE_TOKEN: Address = Blockchain.generateRandomAddress();
 
+// #68 Tier B — last-registered flowId; buildVoucher uses it as the default
+// flowId so vouchers bind to the flow the test just registered.
+let _lastRegisteredFlowId: bigint = 0n;
+
 interface FlowOpts {
     mode?: bigint;
     sourceBridgeAddr?: Address;
@@ -197,7 +203,7 @@ interface FlowOpts {
 async function registerFlow(setup: BridgeSetup, opts: FlowOpts = {}): Promise<bigint> {
     const sourceBridgeAddr = opts.sourceBridgeAddr ?? DEFAULT_SOURCE_BRIDGE;
     const sourceTokenAddr = opts.sourceTokenAddr ?? DEFAULT_SOURCE_TOKEN;
-    return await setup.depository.addFlow({
+    const flowId = await setup.depository.addFlow({
         mode: opts.mode ?? 0n,
         chainId: ETH_CHAIN_ID,
         evmBridge: evmAddrRightPadToBigInt(sourceBridgeAddr),
@@ -213,6 +219,8 @@ async function registerFlow(setup: BridgeSetup, opts: FlowOpts = {}): Promise<bi
         dailyLimit: opts.dailyLimit ?? 100_000_000_000n,
         tipCapBps: opts.tipCapBps ?? 0n,
     });
+    _lastRegisteredFlowId = flowId; // #68 Tier B
+    return flowId;
 }
 
 function defaultFields(setup: BridgeSetup, recipient: Address, salt: bigint): VoucherFields {

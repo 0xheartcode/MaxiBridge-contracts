@@ -250,7 +250,7 @@ Plus scripts-dev's cross-codebase consistency audit which caught **2 BLOCKERs + 
 - ✅ `_storageVersion` first + append-only OPNet storage discipline
 - ✅ Register endpoint pre-validates tx before creating DB row
 - ✅ Session-only admin auth in prod
-- ✅ ML-DSA voucher preimage binding (508 bytes, full field list)
+- ✅ ML-DSA voucher preimage binding (540 bytes incl. trailing flowId — #68; full field list)
 - ✅ `@method`/`@view` decorators only; no manual `execute` dispatch
 - ✅ Signer epoch invalidation (no deadlines)
 - ✅ Address equality `.equals()/.isZero()` (14 locations fixed)

@@ -1514,8 +1514,13 @@ contract BridgeEscrowTest is Test {
         assertEq(wmoto.balanceOf(alice), 1_000e6);
 
         bytes32 opnetRcp = bytes32(uint256(0xBEEF));
+        // #68 Tier C — burnForRelease now takes a flowId (first arg). Assert it
+        // is carried in the BurnedForRelease event (appended last field).
+        bytes32 flowId = bytes32(uint256(0xF10D));
+        vm.expectEmit(true, false, true, true, address(wmoto));
+        emit WrappedERC20.BurnedForRelease(alice, 250e6, opnetRcp, 1, flowId);
         vm.prank(alice);
-        wmoto.burnForRelease(opnetRcp, 250e6);
+        wmoto.burnForRelease(flowId, opnetRcp, 250e6);
         assertEq(wmoto.balanceOf(alice), 750e6);
         assertEq(wmoto.burnNonce(), 1);
     }

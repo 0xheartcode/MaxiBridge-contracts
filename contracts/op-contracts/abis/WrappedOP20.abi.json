@@ -158,6 +158,10 @@
             "onlyOwner": false,
             "inputs": [
                 {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
                     "name": "ethRecipient",
                     "type": "BYTES32"
                 },
@@ -364,6 +368,10 @@
                 },
                 {
                     "name": "burnNonce",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "flowId",
                     "type": "UINT256"
                 }
             ],

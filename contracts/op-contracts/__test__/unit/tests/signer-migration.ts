@@ -23,7 +23,7 @@ import { BridgeDepository } from '../contracts/BridgeDepository.js';
 // ─── Constants ──────────────────────────────────────────────────────────────
 const VOUCHER_NETWORK_ID: bigint = 2n;
 const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x59893fe6;
-const VOUCHER_PREIMAGE_LEN = 508;
+const VOUCHER_PREIMAGE_LEN = 540; // #68 Tier B — appended flowId u256
 const ETH_CHAIN_ID: bigint = 1n;
 
 // ─── Harness ────────────────────────────────────────────────────────────────
@@ -142,6 +142,7 @@ interface VoucherFields {
     netAmount: bigint;
     voucherId: bigint;
     signerEpoch: number;
+    flowId?: bigint; // #68 Tier B
 }
 
 function writeU128BE(w: BinaryWriter, v: bigint): void {
@@ -175,6 +176,7 @@ function buildVoucher(v: VoucherFields): { preimage: Uint8Array; hash: Uint8Arra
     writeU128BE(w, 0n);
     w.writeU32(v.signerEpoch);
     w.writeU256(v.voucherId);
+    w.writeU256(v.flowId ?? 0n); // #68 Tier B — appended LAST
 
     const preimage = w.getBuffer();
     if (preimage.length !== VOUCHER_PREIMAGE_LEN) {
@@ -302,7 +304,7 @@ await opnet('BridgeDepository.migrateSignerSet — atomic mutations', async (vm:
             for (let i = 0; i < 32; i++) v = (v << 8n) | BigInt(bytes[i]!);
             return v;
         })();
-        await setup.depository.addFlow({
+        const migFlowId = await setup.depository.addFlow({
             mode: 0n,
             chainId: ETH_CHAIN_ID,
             evmBridge: evmBridgeBigInt,
@@ -332,6 +334,10 @@ await opnet('BridgeDepository.migrateSignerSet — atomic mutations', async (vm:
             netAmount: 995_000n,
             voucherId: 0xfeed01n,
             signerEpoch: 1,
+            // #68 Tier B — bind the voucher to the registered flow so the
+            // claim reverts on the EPOCH mismatch (the test's intent), not on
+            // a flow-not-found from a zero flowId.
+            flowId: migFlowId,
         };
         const { preimage, hash } = buildVoucher(fields);
         const oldSigPub = new Uint8Array(setup.signerWallet.mldsaKeypair.publicKey);

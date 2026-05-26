@@ -31,7 +31,7 @@ import { BridgeDepository } from '../contracts/BridgeDepository.js';
 
 const VOUCHER_NETWORK_ID: bigint = 2n; // testnet
 const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x59893fe6;
-const VOUCHER_PREIMAGE_LEN = 508;
+const VOUCHER_PREIMAGE_LEN = 540; // #68 Tier B — appended flowId u256
 
 const ETH_CHAIN_ID: bigint = 1n; // Ethereum mainnet
 
@@ -56,6 +56,11 @@ interface BridgeSetup {
     wusdt: WrappedOP20;
     wusdtAddress: Address;
     signerWallet: Wallet;
+    // #68 Tier B — default route flowIds (mode 0, DEFAULT_SOURCE_*), captured
+    // at registration so happy-path vouchers carry a flowId that matches a
+    // registered + ACTIVE flow bound to the wrapped token.
+    defaultFlowId: bigint;
+    defaultFlowIdUsdt: bigint;
 }
 
 async function setupContracts(): Promise<BridgeSetup> {
@@ -109,6 +114,8 @@ async function setupContracts(): Promise<BridgeSetup> {
         wusdc, wusdcAddress,
         wusdt, wusdtAddress,
         signerWallet,
+        defaultFlowId: 0n,
+        defaultFlowIdUsdt: 0n,
     };
 
     // PR β.2.payout-opnet — claim path now derives a flowId per voucher and
@@ -154,6 +161,8 @@ interface VoucherFields {
     relayerTip?: bigint;
     signerEpoch?: number;
     voucherId: bigint;
+    /** #68 Tier B — route binding flowId. Default 0 (will fail flow lookup). */
+    flowId?: bigint;
 }
 
 /** Write a 16-byte (uint128) big-endian value. */
@@ -168,7 +177,7 @@ function writeU128BE(w: BinaryWriter, v: bigint): void {
 }
 
 /**
- * Builds the 508-byte voucher preimage exactly as BridgeDepository.parseVoucher
+ * Builds the 540-byte voucher preimage exactly as BridgeDepository.parseVoucher
  * reads it, and returns the SHA-256 hash of the preimage ready for ML-DSA.
  */
 function buildVoucher(v: VoucherFields): { preimage: Uint8Array; hash: Uint8Array } {
@@ -192,6 +201,7 @@ function buildVoucher(v: VoucherFields): { preimage: Uint8Array; hash: Uint8Arra
     writeU128BE(w, v.relayerTip ?? 0n);
     w.writeU32(v.signerEpoch ?? 1);
     w.writeU256(v.voucherId);
+    w.writeU256(v.flowId ?? 0n); // #68 Tier B — appended LAST
 
     const preimage = w.getBuffer();
     if (preimage.length !== VOUCHER_PREIMAGE_LEN) {
@@ -322,13 +332,15 @@ async function registerFlowFor(
  * token register their own flow inline before claiming.
  */
 async function registerDefaultFlows(setup: BridgeSetup, tipCapBps: bigint = 0n): Promise<void> {
-    await registerFlowFor(setup, {
+    // #68 Tier B — capture the returned flowIds so happy-path vouchers can
+    // carry a flowId that maps to these registered + ACTIVE mode-0 flows.
+    setup.defaultFlowId = await registerFlowFor(setup, {
         sourceBridgeAddr: DEFAULT_SOURCE_BRIDGE,
         sourceTokenAddr: DEFAULT_SOURCE_TOKEN,
         wrappedToken: setup.wusdcAddress,
         tipCapBps,
     });
-    await registerFlowFor(setup, {
+    setup.defaultFlowIdUsdt = await registerFlowFor(setup, {
         sourceBridgeAddr: DEFAULT_SOURCE_BRIDGE,
         sourceTokenAddr: DEFAULT_SOURCE_TOKEN,
         wrappedToken: setup.wusdtAddress,
@@ -357,6 +369,10 @@ function defaultFields(s: BridgeSetup, recipient: Address): VoucherFields {
         netAmount: 995_000n,
         voucherId: 0xa1b2c3d4e5n,
         signerEpoch: 1,
+        // #68 Tier B — bind to the default wUSDC mode-0 flow registered in
+        // setupContracts. Tests overriding wrappedToken / source addrs must
+        // register their own flow and pass its flowId.
+        flowId: s.defaultFlowId,
     };
 }
 
@@ -415,6 +431,8 @@ await opnet('BridgeDepository — happy path', async (vm: OPNetUnit) => {
             voucherId: 2n,
             sourceLogIndex: 2,
             wrappedToken: setup.wusdtAddress,
+            // #68 Tier B — bind to the wUSDT default flow (token-flow binding).
+            flowId: setup.defaultFlowIdUsdt,
         };
         const v2 = buildVoucher(f2);
         setSender(alice);
@@ -993,13 +1011,14 @@ await opnet('BridgeDepository — Fix #5: source-event key includes chain id', a
         };
         // PR β.2.payout-opnet — register the BSC route for the same wUSDC.
         setSender(deployer);
-        await registerFlowFor(setup, {
+        const bscFlowId = await registerFlowFor(setup, {
             chainId: 56n,
             sourceBridgeAddr: f2.sourceBridgeAddr!,
             sourceTokenAddr: f2.sourceTokenAddr!,
             wrappedToken: setup.wusdcAddress,
         });
-        const v2 = buildVoucher(f2);
+        // #68 Tier B — bind the voucher to the BSC route's flow.
+        const v2 = buildVoucher({ ...f2, flowId: bscFlowId });
         setSender(alice);
         await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
 
@@ -1038,12 +1057,13 @@ await opnet('BridgeDepository — Fix #5: source-event key includes chain id', a
         };
         // PR β.2.payout-opnet — register a flow keyed on the alt source bridge.
         setSender(deployer);
-        await registerFlowFor(setup, {
+        const altFlowId = await registerFlowFor(setup, {
             sourceBridgeAddr: altBridge,
             sourceTokenAddr: f2.sourceTokenAddr!,
             wrappedToken: setup.wusdcAddress,
         });
-        const v2 = buildVoucher(f2);
+        // #68 Tier B — bind the voucher to the alt-bridge route's flow.
+        const v2 = buildVoucher({ ...f2, flowId: altFlowId });
         setSender(alice);
         await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
 
@@ -1275,6 +1295,87 @@ await opnet('BridgeDepository — Phase 1.6 voucher cancellation', async (vm: OP
 
         // Touch wusdcAddress to satisfy unused-var lint without changing logic.
         Assert.expect(wusdcAddress.toString().length > 0).toEqual(true);
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 17b. #68 Tier B — voucher carries flowId; claim derives mode from
+//      _flowMode[flowId] + binds flowId ↔ wrappedToken.
+// ════════════════════════════════════════════════════════════════════════════
+
+await opnet('BridgeDepository — #68 Tier B flowId route binding', async (vm: OPNetUnit) => {
+    let setup: BridgeSetup;
+
+    vm.beforeEach(async () => {
+        Blockchain.dispose();
+        Blockchain.clearContracts();
+        await Blockchain.init();
+        setSender(deployer);
+        setup = await setupContracts();
+    });
+
+    vm.afterEach(() => disposeSetup(setup));
+
+    await vm.it('flowId ↔ wrappedToken mismatch reverts (flow token mismatch)', async () => {
+        const { depository, signerWallet } = setup;
+        // Voucher's wrappedToken is wUSDT but flowId points at the wUSDC flow.
+        const fields = {
+            ...defaultFields(setup, alice),
+            wrappedToken: setup.wusdtAddress,
+            flowId: setup.defaultFlowId, // wUSDC flow — does NOT bind wUSDT
+        };
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        }).toThrow();
+    });
+
+    await vm.it('unknown flowId reverts (flow not found)', async () => {
+        const { depository, signerWallet } = setup;
+        const fields = { ...defaultFields(setup, alice), flowId: 0xdeadn };
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        }).toThrow();
+    });
+
+    await vm.it('mode-0 flow routes through claimMintWithVoucher (mints)', async () => {
+        const { depository, wusdc, signerWallet } = setup;
+        // Default wUSDC flow is mode 0 — mint path succeeds.
+        const fields = defaultFields(setup, alice);
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(alice);
+        await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        Assert.expect(await wusdc.balanceOf(alice)).toEqual(fields.netAmount);
+    });
+
+    await vm.it('mode-3 flow rejected on the mint path (not mintable mode)', async () => {
+        const { depository, signerWallet } = setup;
+        // Register a POOLED_LOCK_RELEASE (mode 3) flow on a distinct route,
+        // bound to wUSDC. A mint voucher (claimMintWithVoucher selector)
+        // carrying this flowId must revert — mode 3 is release-only.
+        const altBridge = Blockchain.generateRandomAddress();
+        const altToken = Blockchain.generateRandomAddress();
+        setSender(deployer);
+        const mode3FlowId = await registerFlowFor(setup, {
+            mode: 3n,
+            sourceBridgeAddr: altBridge,
+            sourceTokenAddr: altToken,
+            wrappedToken: setup.wusdcAddress,
+        });
+        const fields = {
+            ...defaultFields(setup, alice),
+            sourceBridgeAddr: altBridge,
+            sourceTokenAddr: altToken,
+            flowId: mode3FlowId,
+        };
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        }).toThrow();
     });
 });
 

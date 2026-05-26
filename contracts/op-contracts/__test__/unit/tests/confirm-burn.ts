@@ -35,7 +35,7 @@ import { BridgeDepository } from '../contracts/BridgeDepository.js';
 const VOUCHER_NETWORK_ID: bigint = 2n;
 const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x59893fe6;
 const CONFIRM_BURN_SELECTOR: number = 0x9cffeea6;
-const VOUCHER_PREIMAGE_LEN = 508;
+const VOUCHER_PREIMAGE_LEN = 540; // #68 Tier B — appended flowId u256
 const BURN_ATTESTATION_LEN = 252;
 const ETH_CHAIN_ID: bigint = 1n;
 
@@ -217,6 +217,7 @@ interface VoucherFields {
     relayerTip?: bigint;
     signerEpoch?: number;
     voucherId: bigint;
+    flowId?: bigint; // #68 Tier B
 }
 
 function writeU128BE_writer(w: BinaryWriter, v: bigint): void {
@@ -250,6 +251,7 @@ function buildVoucher(v: VoucherFields): { preimage: Uint8Array; hash: Uint8Arra
     writeU128BE_writer(w, v.relayerTip ?? 0n);
     w.writeU32(v.signerEpoch ?? 1);
     w.writeU256(v.voucherId);
+    w.writeU256(v.flowId ?? 0n); // #68 Tier B — appended LAST
 
     const preimage = w.getBuffer();
     if (preimage.length !== VOUCHER_PREIMAGE_LEN) {

@@ -43,7 +43,7 @@ import {
  * in turn only mints when a valid ML-DSA voucher was produced by the
  * current-epoch bridge signer.
  *
- * Burn is user-initiated: `burnForRelease(ethRecipient, amount, destChainId)`
+ * Burn is user-initiated: `burnForRelease(flowId, ethRecipient, amount, destChainId)`
  * performs a real OP20 burn and emits `BurnedForRelease` so the EVM indexer
  * can issue a release voucher against the EVM escrow.
  *
@@ -431,7 +431,21 @@ export class WrappedOP20 extends OP20S {
      * uniquely identifiable even when the same user burns the same amount
      * to the same recipient repeatedly.
      */
+    //
+    // #68 Tier C — `flowId` is the FIRST param so a burn names which flow /
+    // route it is for (the burn-initiated counterpart of the deposit-side
+    // flowId). The token does NOT know the flow registry, so it only RECORDS
+    // flowId in the event — flow validation happens at claim time on
+    // BridgeDepository via the Tier B `_flowOpnetToken[flowId]` binding.
+    //
+    // ⚠️ IMMUTABILITY: WrappedOP20 is intentionally NON-UPGRADEABLE (no
+    // UpdatablePlugin). Changing this signature changes the `burnForRelease`
+    // selector (was 0x1d40b843) AND the `BurnedForRelease` event layout. On
+    // MAINNET this is NOT an in-place upgrade — it requires a FRESH wrapped-
+    // token DEPLOY + holder migration + re-audit. Only free to change on
+    // testnet (redeploy). Do not change this signature lightly.
     @method(
+        { name: 'flowId', type: ABIDataTypes.UINT256 },
         { name: 'ethRecipient', type: ABIDataTypes.BYTES32 },
         { name: 'amount', type: ABIDataTypes.UINT256 },
         { name: 'destChainId', type: ABIDataTypes.UINT32 },
@@ -445,6 +459,8 @@ export class WrappedOP20 extends OP20S {
             throw new Revert('WrappedOP20: paused');
         }
 
+        // #68 Tier C — flowId read FIRST (recorded, not validated here).
+        const flowId: u256 = calldata.readU256();
         // BYTES32 is encoded as 32 raw bytes with no length prefix.
         const ethRecipient: Uint8Array = calldata.readBytes(32);
         const amount: u256 = calldata.readU256();
@@ -485,7 +501,9 @@ export class WrappedOP20 extends OP20S {
         const nextNonce: u256 = SafeMath.add(this._burnNonce.value, u256.One);
         this._burnNonce.value = nextNonce;
 
-        this.emitEvent(new BurnedForRelease(user, amount, ethRecipient, destChainId, nextNonce));
+        this.emitEvent(
+            new BurnedForRelease(user, amount, ethRecipient, destChainId, nextNonce, flowId),
+        );
 
         // Return burnNonce so tooling can link the tx to the EVM-side lookup.
         const writer = new BytesWriter(32);

@@ -68,6 +68,7 @@ export const WrappedOP20Events = [
             { name: 'ethRecipient', type: ABIDataTypes.BYTES },
             { name: 'destChainId', type: ABIDataTypes.UINT32 },
             { name: 'burnNonce', type: ABIDataTypes.UINT256 },
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
         ],
         type: BitcoinAbiTypes.Event,
     },
@@ -152,6 +153,7 @@ export const WrappedOP20Abi = [
     {
         name: 'burnForRelease',
         inputs: [
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
             { name: 'ethRecipient', type: ABIDataTypes.BYTES32 },
             { name: 'amount', type: ABIDataTypes.UINT256 },
             { name: 'destChainId', type: ABIDataTypes.UINT32 },

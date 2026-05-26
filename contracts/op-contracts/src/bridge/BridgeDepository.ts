@@ -126,10 +126,11 @@ const FLOW_WINDOW_DURATION: u64 = 86400;
  *   relayerTip          u128     16   ← NEW (uint128 BE)
  *   signerEpoch         u32       4
  *   voucherId           u256     32
+ *   flowId              u256     32   ← NEW (#68 Tier B — route binding)
  *   ────────────────────────────────
- *   total                       508
+ *   total                       540
  */
-const VOUCHER_PREIMAGE_LEN: i32 = 508;
+const VOUCHER_PREIMAGE_LEN: i32 = 540;
 
 /**
  * PR γ.2b — BurnAttestation preimage length. 252 bytes total.
@@ -150,7 +151,7 @@ const CONFIRM_BURN_SELECTOR: u32 = 0x9cffeea6;
  *
  * Users call `claimMintWithVoucher(voucher, mldsaSig)` paying their own gas.
  * The contract verifies:
- *   (1) parsed voucher length == 508 bytes
+ *   (1) parsed voucher length == 540 bytes
  *   (2) embedded signerEpoch matches current `_signerEpoch`
  *   (3) ML-DSA signature verifies against `_bridgeSignerHash[epoch]`
  *   (4) recipient == Blockchain.tx.sender  (front-run safe)
@@ -1366,31 +1367,41 @@ export class BridgeDepository extends ReentrancyGuard {
         if (evmRecipient.length != 32) {
             throw new Revert('BridgeDepository: ethRecipient must be 32 bytes');
         }
-        // Mode dispatch — only INVERSE_WRAPPED (1), POOLED_LOCK_RELEASE (3),
-        // or POOLED_LOCK_VEST (4) accept lockForBridge. Modes 3 and 4 share
-        // identical OPNet lock semantics; 4 only differs on the EVM
-        // destination (deposits into a VestingVault there).
-        const mode: u256 = this._tokenMode.get(_addrKey(canonical));
-        const isInverse: bool = u256.eq(mode, u256.fromU32(1));
-        const isPooled: bool =
-            u256.eq(mode, u256.fromU32(3)) || u256.eq(mode, u256.fromU32(4));
-        if (!isInverse && !isPooled) {
-            throw new Revert('BridgeDepository: token not in lockable mode');
-        }
-
-        // #44 — explicit flow binding. lockForBridge must name the flow it
-        // locks into so the OPNet-side inventory ledger can be credited
-        // coherently. The flowId is validated against the mode, canonical
-        // token and destChainId the caller supplied; any mismatch reverts.
+        // #68 — mode-per-flow. The route's mode is read from the FLOW the
+        // caller names, NOT from a per-token stamp. This lets one canonical
+        // token participate in several pooled flows of different modes at
+        // once (e.g. the same (evmToken, opnetToken) pair as mode 3 AND
+        // mode 4, chosen per transfer by the flowId). The flowId is the
+        // routing authority — it is set governor-only at addFlow time, and
+        // the token + chain binding checks below tie the caller's args to
+        // that flow, so a caller still cannot lock the wrong token/chain
+        // into a flow.
+        //
+        // (Pre-#68 the mode came from `_tokenMode[canonical]` and was then
+        // cross-checked against `_flowMode[flowId]`; that double enforcement
+        // pinned a token to one global mode and is exactly what blocked the
+        // same pair backing two pooled modes — the cross-check is now
+        // redundant because the flow IS the mode authority.)
         if (this._flowExists.get(flowId).isZero()) {
             throw new Revert('BridgeDepository: flow not found');
         }
         if (this._flowStatus.get(flowId).toU32() != FLOW_STATUS_ACTIVE) {
             throw new Revert('BridgeDepository: flow not active');
         }
-        if (!u256.eq(this._flowMode.get(flowId), mode)) {
-            throw new Revert('BridgeDepository: flow mode mismatch');
+        // Mode dispatch — only INVERSE_WRAPPED (1), POOLED_LOCK_RELEASE (3),
+        // or POOLED_LOCK_VEST (4) accept lockForBridge. Modes 3 and 4 share
+        // identical OPNet lock semantics; 4 only differs on the EVM
+        // destination (deposits into a VestingVault there).
+        const mode: u256 = this._flowMode.get(flowId);
+        const isInverse: bool = u256.eq(mode, u256.fromU32(1));
+        const isPooled: bool =
+            u256.eq(mode, u256.fromU32(3)) || u256.eq(mode, u256.fromU32(4));
+        if (!isInverse && !isPooled) {
+            throw new Revert('BridgeDepository: flow not in lockable mode');
         }
+        // #44 — explicit flow binding. lockForBridge names the flow it locks
+        // into so the OPNet-side inventory ledger is credited coherently;
+        // the canonical token + destChainId are validated against that flow.
         if (!u256.eq(this._flowOpnetToken.get(flowId), _opnetAddrToU256(canonical))) {
             throw new Revert('BridgeDepository: flow token mismatch');
         }
@@ -1571,7 +1582,19 @@ export class BridgeDepository extends ReentrancyGuard {
         // POOLED_LOCK_RELEASE (3), or POOLED_LOCK_VEST (4). The `wrappedToken`
         // field is the canonical OP20 to release. Modes 3 and 4 release
         // identically from the OPNet pool (the vest is EVM-side only).
-        const releaseMode: u256 = this._tokenMode.get(_addrKey(parsed.wrappedToken));
+        // #68 Tier B — route mode derived from the voucher's flowId (NOT the
+        // per-token `_tokenMode`). Require flow exists + ACTIVE + bound to the
+        // wrappedToken before dispatching.
+        if (this._flowExists.get(parsed.flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        if (this._flowStatus.get(parsed.flowId).toU32() != FLOW_STATUS_ACTIVE) {
+            throw new Revert('BridgeDepository: flow not active');
+        }
+        if (!u256.eq(this._flowOpnetToken.get(parsed.flowId), _opnetAddrToU256(parsed.wrappedToken))) {
+            throw new Revert('BridgeDepository: flow token mismatch');
+        }
+        const releaseMode: u256 = this._flowMode.get(parsed.flowId);
         const isInverse2: bool = u256.eq(releaseMode, u256.fromU32(1));
         const isPooled2: bool =
             u256.eq(releaseMode, u256.fromU32(3)) || u256.eq(releaseMode, u256.fromU32(4));
@@ -2482,10 +2505,23 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: unknown wrappedToken');
         }
 
-        // ── Step 5b: token must be in a mintable mode ──
+        // ── Step 5b: route mode derived from the voucher's flowId (#68 Tier B) ──
+        // The signed voucher carries an explicit flowId; the claim mode comes
+        // from `_flowMode[flowId]` (NOT the per-token `_tokenMode`). We require
+        // the flow to exist + be ACTIVE and enforce a flowId ↔ wrappedToken
+        // binding so one wrapped token's claims are pinned to a specific flow.
         // Valid for WRAPPED (0) and NATIVE_BURN_MINT (2) only.
         // INVERSE_WRAPPED (1) and POOLED_LOCK_RELEASE (3) use claimReleaseWithVoucher.
-        const mintMode: u256 = this._tokenMode.get(_addrKey(parsed.wrappedToken));
+        if (this._flowExists.get(parsed.flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        if (this._flowStatus.get(parsed.flowId).toU32() != FLOW_STATUS_ACTIVE) {
+            throw new Revert('BridgeDepository: flow not active');
+        }
+        if (!u256.eq(this._flowOpnetToken.get(parsed.flowId), _opnetAddrToU256(parsed.wrappedToken))) {
+            throw new Revert('BridgeDepository: flow token mismatch');
+        }
+        const mintMode: u256 = this._flowMode.get(parsed.flowId);
         const isMintableWrapped: bool = mintMode.isZero();
         const isMintableNative: bool = u256.eq(mintMode, u256.fromU32(2));
         if (!isMintableWrapped && !isMintableNative) {
@@ -2793,6 +2829,10 @@ class ParsedVoucher {
     relayerTip: u256 = u256.Zero;
     signerEpoch: u32 = 0;
     voucherId: u256 = u256.Zero;
+    // #68 Tier B — route binding. Appended LAST in the preimage so no
+    // existing offsets shift. The claim leg derives its mode from
+    // `_flowMode[flowId]` and binds `flowId ↔ wrappedToken`.
+    flowId: u256 = u256.Zero;
 }
 
 function parseVoucher(buf: Uint8Array): ParsedVoucher {
@@ -2817,6 +2857,7 @@ function parseVoucher(buf: Uint8Array): ParsedVoucher {
     p.relayerTip = readU128BE(buf, off); off += 16;
     p.signerEpoch = readU32BE(buf, off); off += 4;
     p.voucherId = readU256BE(buf, off); off += 32;
+    p.flowId = readU256BE(buf, off); off += 32;
     // Sanity check — if this fails the constant is out of sync.
     if (off != <u32>VOUCHER_PREIMAGE_LEN) {
         throw new Revert('BridgeDepository: parser off-by-one');
@@ -2843,7 +2884,7 @@ function readU256BE(buf: Uint8Array, off: u32): u256 {
  * Read a 16-byte (uint128) big-endian value into a u256. We use u256 as the
  * carrying type (rather than u128) so downstream fee-math, comparisons and
  * SafeMath ops compose with the rest of the contract without conversions.
- * Caller must ensure offsets stay within the 508-byte preimage bound.
+ * Caller must ensure offsets stay within the 540-byte preimage bound.
  */
 function readU128BE(buf: Uint8Array, off: u32): u256 {
     const tmp = new Uint8Array(32);

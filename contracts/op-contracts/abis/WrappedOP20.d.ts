@@ -39,6 +39,7 @@ export type BurnedForReleaseEvent = {
     readonly ethRecipient: Uint8Array;
     readonly destChainId: number;
     readonly burnNonce: bigint;
+    readonly flowId: bigint;
 };
 
 // ------------------------------------------------------------------
@@ -185,7 +186,12 @@ export interface IWrappedOP20 extends IOP_NETContract {
     setSupportedDestChain(destChainId: number, enabled: boolean): Promise<SetSupportedDestChain>;
     isSupportedDestChain(): Promise<IsSupportedDestChain>;
     mintTo(to: Address, amount: bigint): Promise<MintTo>;
-    burnForRelease(ethRecipient: Uint8Array, amount: bigint, destChainId: number): Promise<BurnForRelease>;
+    burnForRelease(
+        flowId: bigint,
+        ethRecipient: Uint8Array,
+        amount: bigint,
+        destChainId: number,
+    ): Promise<BurnForRelease>;
     bridgeDepository(): Promise<BridgeDepository>;
     governor(): Promise<Governor>;
     burnNonce(): Promise<BurnNonce>;

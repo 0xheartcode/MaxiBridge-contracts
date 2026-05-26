@@ -17,7 +17,7 @@ EVM → OPNet (deposit)                    OPNet → EVM (withdraw)
    BridgeEscrow.lock(...)                   WrappedOP20.burnForRelease(...)
    → Locked event                           → BurnedForRelease event
 2. Indexer waits EVM_CONFIRMATIONS       2. Indexer waits OPNET_CONFIRMATIONS
-3. Server signs 508-byte ML-DSA          3. Server signs EIP-712 ReleaseIntent
+3. Server signs 540-byte ML-DSA          3. Server signs EIP-712 ReleaseIntent
    voucher (free, off-chain)                (free, off-chain)
 4. dApp shows "Claim wUSDC"              4. dApp shows "Claim USDC"
 5. User signs claimMintWithVoucher       5. User signs BridgeEscrow.claim(sig)
@@ -234,6 +234,8 @@ npm run integration:drills             # security drills (replay, rotation, reor
    - `2` NATIVE_BURN_MINT — symmetric mint/burn, used for native tokens with bridge mint authority on both sides.
    - `3` POOLED_LOCK_RELEASE — pre-funded reserve pool on both sides, no minting (canonical MOTO-style).
    - `4` POOLED_LOCK_VEST — identical to mode 3 on the source/lock side, but the EVM `claim` deposits into a per-flow **`VestingVault`** that linearly drips to the beneficiary over a fixed block window. The window is an **immutable per-vault constructor arg** (`vestingBlocks`), NOT hardcoded — deploy default is `72_000` (~10 days at 12s/block, the agreed testnet launch window); pass `VESTING_VAULT_BLOCKS=50400` for ~7d, etc. Used when a client wants destination-side release to trickle instead of paying all at once. **Two-step setup:** governor calls `addFlow(mode=4)` then `setFlowVestingVault(flowId, vault)` — `lock` / `claim` / `provisionInventory` all defensively reject mode-4 flows whose vault is still zero, so a half-set-up flow can't strand tokens. `setFlowVestingVault` additionally requires `vault.token() == flow.evmToken` (closes governance-misconfiguration class — a vault holding the wrong asset can never be wired). Each bridge claim opens an independent schedule keyed by the voucher `opnetNonce` (no top-up — each lock = its own vest on its own clock). Bridge can `clawback(beneficiary, opnetNonce)` the unvested portion if the source voucher is reorged out (C-01 follow-through for Mode 4). 42 tests under `test/VestingVault.t.sol` + `test/BridgeEscrowMode4.t.sol`. Operator surface: deploy via `npm run deploy:evm:vesting-vault` (`scripts/src/deploy/evm-deploy-vesting-vault.ts`, env: `VESTING_VAULT_TOKEN` / `VESTING_VAULT_BRIDGE` / optional `VESTING_VAULT_BLOCKS`); wire + faucet from the admin panel `/admin/mode4` tab (calldata-export pattern, no admin-side signer). **Reorg + Mode 4 = TWO ops calls:** `BridgeEscrow.cancelVoucher(opnetNonce)` then `VestingVault.clawback(beneficiary, opnetNonce)` — the second one returns the unvested portion to the bridge while the vested-so-far stays with the beneficiary.
+   **Routing is per-flow on BOTH chains (#68 — mode-per-flow).** The route's mode is read from the **flow** the transfer names, not from a per-token stamp. EVM was always per-flow (`lock`/`claim` carry `flowId`). OPNet now matches: `lockForBridge` reads `_flowMode[flowId]`; `claimMintWithVoucher` / `claimReleaseWithVoucher` read `_flowMode[voucher.flowId]` (the voucher carries `flowId` — Tier B, 540-byte preimage) and bind `_flowOpnetToken[flowId]==identity(wrappedToken)`; `burnForRelease` on both `WrappedOP20` and `WrappedERC20` takes a `flowId` first arg and emits it (Tier C). Net effect: **one (evmToken, opnetToken) pair can back several flows of different modes at once** (e.g. mode 3 AND mode 4), chosen per transfer by `flowId` — true N:M. `_tokenMode` (set-once) is retained but **no longer routing-authoritative** (nothing reads it for routing); the flow registry (governor-only `addFlow`) is the mode authority, and per-flow `status`/`cap`/`dailyLimit` now gate the voucher-claim leg too. Tier C changes the (non-upgradeable) `WrappedOP20.burnForRelease` selector → on mainnet a multi-mode mint/burn token needs a fresh wrapper deploy + holder migration + re-audit (do deliberately). Lock-initiated pooled multi-mode (Tier A) needs none of that.
+
 3. **Upgradeability split:**
    - **EVM `BridgeEscrow`:** OZ UUPS proxy with full hardening (`_disableInitializers` in impl ctor, `initializer` gated init, `_authorizeUpgrade` onlyOwner, no `selfdestruct`, no arbitrary `delegatecall`, `uint256[42] __gap`; storage-layout CI diff gate is `astId`-insensitive). **Owner is `TimelockController(604800s)` (7 days), not the deployer EOA** — every upgrade goes through `schedule(...) → wait 7d → execute(...)`. Mirrors OPNet's `UpdatablePlugin(1008 blocks)` so users have a full week to exit on either chain. Deploy the timelock with `npm run deploy:evm:timelock` (script: `scripts/src/deploy/evm-deploy-timelock.ts`); transfer ownership with `npm run deploy:evm:transfer-ownership` (`scripts/src/deploy/evm-transfer-ownership-to-timelock.ts`). Proposer = governance Safe (`EVM_GOVERNANCE_SAFE`); executors = `address(0)` (open-execute, the 7-day delay IS the safeguard); admin = `address(0)` (burned at construction). Test scaffold: `contracts/evm-contracts/test/TimelockUpgrade.t.sol`. Ceremony walk-through: `docs/RUNBOOK.md` §0.
    - **OPNet `BridgeDepository`:** `UpdatablePlugin(1008 blocks)` (~7 days at 10min/block) registered in the ctor — Phase 2.2 raised this from 144 (~24h) to give users a full week to exit before any upgrade lands. `onUpdate()` runs migrations gated by `_storageVersion: StoredU256`; storage APPEND-ONLY per workspace "Five Upgrade Commandments". **Governance-gated upgrade authority (PR #43, closes Bug #16b):** in addition to the plugin's `onlyDeployer` gate, every applyUpdate requires governance pre-authorization. Governor (or registered BridgeAuthority) wires `setUpgradeAuthority(addr)`; from then on each upgrade needs `proposeUpgrade()` to land — `onUpdate` consumes the one-shot flag and reverts (rolling back the apply) if it isn't armed. Veto path: `cancelProposedUpgrade()` (governor / authority / upgradeAuthority). Legacy deployer-only path stays open while `_upgradeAuthority` is unset (v1 bootstrap window). Net effect: a compromised deployer hot key alone cannot push a malicious upgrade.
@@ -260,7 +262,7 @@ npm run integration:drills             # security drills (replay, rotation, reor
 
 ## 6. Voucher preimages (CRITICAL — both sides)
 
-### EVM → OPNet (ML-DSA, 508 bytes — PR β.2.format)
+### EVM → OPNet (ML-DSA, 540 bytes — PR β.2.format + #68 Tier B)
 
 ```
 Offset  Size  Field
@@ -283,10 +285,11 @@ Offset  Size  Field
 456     16    relayerTip          (u128 BE) — permissionless tip (PR β.2.format; payout in next sub-PR)
 472      4    signerEpoch         (u32 BE)  — MUST equal _signerEpoch at verify time
 476     32    voucherId           (u256 BE) — per-voucher replay guard
-508          = total → SHA-256 → 32B hash → ML-DSA verify
+508     32    flowId              (u256 BE) — #68 Tier B: route binding; claim derives mode from _flowMode[flowId] + binds _flowOpnetToken[flowId]==identity(wrappedToken)
+540          = total → SHA-256 → 32B hash → ML-DSA verify
 ```
 
-14 × 32B + 16B + 2 × 4B = 508B. Server + contract + test fixture must agree **bit-for-bit** — a single-byte drift fails ML-DSA verify on-chain.
+15 × 32B + 16B + 2 × 4B = 540B. Server + contract + test fixture must agree **bit-for-bit** — a single-byte drift fails ML-DSA verify on-chain. **#68 Tier B:** `flowId` is appended LAST (offsets 0..507 unchanged from the 508-byte β.2.format layout); `claimMintWithVoucher` / `claimReleaseWithVoucher` now route on `_flowMode[flowId]` (not `_tokenMode[wrappedToken]`) and enforce per-flow status on the claim leg.
 
 **Migration note (PR β.2.format):** `grossSrcAmount` is plumbed equal to `grossDstAmount` until decimal-aware AmountPolicy lands; `relayerTip` is signed over but not paid out yet (the contract parses the new fields, mint amount still comes from `netDstAmount`).
 
@@ -328,7 +331,7 @@ on-chain bricks every voucher:
 | Role | Env vars | What it signs | Authority |
 |------|---------|---------------|-----------|
 | **Deployer / Governor** | `OPNET_DEPLOYER_WIF` / `OPNET_DEPLOYER_MLDSA` | The Bitcoin tx that carries OPNet calldata (deploy, wire, rotateSigner, pause/unpause). Its identity is `msg.sender` inside the contract, which `onlyGovernor` methods check against. | `BridgeDepository._governor` |
-| **Voucher signer** | `MLDSA_SIGNER_WIF` / `MLDSA_SIGNER_KEY` | 508-byte ML-DSA voucher preimages (off-chain). Its **pubkey hash** is stored at `BridgeDepository._bridgeSigners[epoch]`. The contract verifies every claim's ML-DSA blob against this hash. | Registered at epoch via `setInitialSigner` / `rotateSigner` |
+| **Voucher signer** | `MLDSA_SIGNER_WIF` / `MLDSA_SIGNER_KEY` | 540-byte ML-DSA voucher preimages (off-chain). Its **pubkey hash** is stored at `BridgeDepository._bridgeSigners[epoch]`. The contract verifies every claim's ML-DSA blob against this hash. | Registered at epoch via `setInitialSigner` / `rotateSigner` |
 
 ### The failure mode we already hit on mainnet
 
@@ -418,7 +421,7 @@ Server MUST pack via `packOpnetMofN`. Frontend passes the blob through unchanged
 | Method | Signature | Selector |
 |--------|-----------|----------|
 | `claimMintWithVoucher` | `claimMintWithVoucher(bytes,bytes)` | `0x59893fe6` |
-| `burnForRelease` | `burnForRelease(bytes32,uint256,uint32)` | `0x1d40b843` |
+| `burnForRelease` (#68 Tier C — flowId first) | `burnForRelease(uint256,bytes32,uint256,uint32)` | regenerated on rebuild (was `0x1d40b843`) |
 | `mintTo` | `mintTo(address,uint256)` | `0xedb20b7e` |
 | `setBridgeDepository` | `setBridgeDepository(address)` | `0xad2a4138` |
 | `rotateSigner` | `rotateSigner(bytes)` | `0x932e12d6` |
@@ -427,6 +430,8 @@ Server MUST pack via `packOpnetMofN`. Frontend passes the blob through unchanged
 | `addWrappedToken` | `addWrappedToken(address)` | `0xf9d97ede` |
 | `networkId` (view) | `networkId()` | `0x63d10908` |
 | `paused` (view) | `paused()` | `0x5c0ff0ee` |
+
+> **#68 Tier C — `burnForRelease` selector change.** Adding `flowId` as the first param changed the selector AND the `BurnedForRelease` event layout on BOTH chains. Because `WrappedOP20` / `WrappedERC20` are **intentionally NON-UPGRADEABLE**, on MAINNET this is **not an in-place upgrade** — it requires a FRESH wrapped-token DEPLOY + holder migration + re-audit. On testnet it's a free redeploy. The OPNet selector is regenerated on rebuild; the EVM event topic0 is now `keccak256("BurnedForRelease(address,uint256,bytes32,uint256,bytes32)")`.
 
 **Phase 1/2 additions — EVM `BridgeEscrow` (keccak256 selectors):**
 
@@ -491,9 +496,9 @@ Inventory effects (#44 — single-count invariant): **mode 1 → no inventory mu
 
 **`burnForRelease.ethRecipient` uses LEFT-PAD (LOW 20 bytes).** `ethRecipient` is a fixed 32-byte `bytes32`. For EVM destinations (chainId 1 / 11155111), the contract enforces upper 12 bytes are zero + lower 20 = ETH address. Callers left-pad: `padStart(64, '0')`. **Never `padEnd`** — puts the address in bytes 0..19 and reverts.
 
-**Voucher preimage `sourceBridgeAddr` / `sourceTokenAddr` use RIGHT-PAD (HIGH 20 bytes).** Inside the 508-byte preimage, EVM bridge + token addresses are encoded as `ethAddr20 ++ zeroPad12` (address in bytes 0..19, zeros in bytes 20..31). OPPOSITE convention from `ethRecipient` — intentional because these are opaque binding fields the contract never needs to recover the 20-byte EVM address from. To extract an EVM address from a preimage field, slice `[0..20]`, NOT `[12..32]`.
+**Voucher preimage `sourceBridgeAddr` / `sourceTokenAddr` use RIGHT-PAD (HIGH 20 bytes).** Inside the 540-byte preimage, EVM bridge + token addresses are encoded as `ethAddr20 ++ zeroPad12` (address in bytes 0..19, zeros in bytes 20..31). OPPOSITE convention from `ethRecipient` — intentional because these are opaque binding fields the contract never needs to recover the 20-byte EVM address from. To extract an EVM address from a preimage field, slice `[0..20]`, NOT `[12..32]`.
 
-### `BurnedForRelease` event data layout (132 bytes total)
+### `BurnedForRelease` event data layout (164 bytes total — #68 Tier C)
 
 ```
 Offset  Size  Field
@@ -502,8 +507,13 @@ Offset  Size  Field
  64      32   ethRecipient      (bytes32 — for EVM dest, last 20B = address)
  96       4   destChainId       (u32 BE)
 100      32   burnNonce         (u256 BE)
-132          = end
+132      32   flowId            (u256 BE) — #68 Tier C; APPENDED last so offsets 0..131 are stable
+164          = end
 ```
+
+`flowId` (offset 132) names which flow/route the burn is for — the burn-initiated counterpart of the deposit-side flowId. The OPNet scanner reads it and persists it on the withdrawal's `flow_id` column; the withdrawal-signer prefers this event flowId over the (evmToken, opnetToken) pair resolver so a mint/burn wrapped token live in >1 flow binds to the right one. A pre-#68 wrapper (132B event) yields a null flowId → signer falls back to the pair resolver.
+
+The **EVM** `WrappedERC20.BurnedForRelease` event likewise gained a trailing non-indexed `bytes32 flowId` (new signature `BurnedForRelease(address,uint256,bytes32,uint256,bytes32)` — topic0 changed); the EVM scanner parses + stores it on the deposit row, and the deposit-signer prefers it for the OPNet voucher.
 
 Server indexer: for EVM destinations, extract `ethRecipient[12:32]` (last 20 bytes) as `address to` in the EIP-712 ReleaseIntent.
 
@@ -641,7 +651,7 @@ Server scanner parses `netAmount` at offset 196, `voucherId` at offset 228. **Of
 | Key | Purpose | v1 dev | Production (Phase 3) |
 |-----|---------|--------|---------------------|
 | EVM ECDSA signer | Signs EIP-712 `ReleaseIntent` for `BridgeEscrow.claim` | Hot wallet from `cast wallet new` (or deployer), private key in root `.env` | AWS KMS, revocable in seconds |
-| OPNet ML-DSA signer | Signs 508-byte voucher preimage for `claimMintWithVoucher` | `Wallet.fromWif + MLDSA`, keys in root `.env` | Vault transit / custom KMS sign service |
+| OPNet ML-DSA signer | Signs 540-byte voucher preimage for `claimMintWithVoucher` | `Wallet.fromWif + MLDSA`, keys in root `.env` | Vault transit / custom KMS sign service |
 
 Signer modules behind interfaces (`EcdsaSigner.sign(digest)`, `MldsaSigner.sign(preimage)`) — drop-in swap for KMS in Phase 3.
 

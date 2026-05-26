@@ -19,8 +19,8 @@ EVM → OPNet (DEPOSIT)
     → wUSDC minted to user
 
 OPNet → EVM (WITHDRAW)
-  User burns wUSDC via WrappedOP20.burnForRelease()
-    → BurnedForRelease event emitted
+  User burns wUSDC via WrappedOP20.burnForRelease(flowId, ...)
+    → BurnedForRelease event emitted (carries flowId — #68)
   Indexer waits OPNET_CONFIRMATIONS blocks
   Server signs EIP-712 ReleaseIntent bound to burn event
   User calls BridgeEscrow.claim(intent, sig)
@@ -31,7 +31,7 @@ OPNet → EVM (WITHDRAW)
 
 ## Message Formats
 
-### ML-DSA Voucher (EVM → OPNet, 508 bytes)
+### ML-DSA Voucher (EVM → OPNet, 540 bytes)
 
 Used by `BridgeDepository.claimMintWithVoucher`. The contract hashes the preimage with SHA-256, then verifies the ML-DSA signature against the registered signer pubkey for the current epoch.
 
@@ -56,6 +56,9 @@ Used by `BridgeDepository.claimMintWithVoucher`. The contract hashes the preimag
 | `relayerTip` | 16B | Permissionless tip (signed over; payout in a future PR) |
 | `signerEpoch` | 4B | Must equal current on-chain epoch |
 | `voucherId` | 32B | Unpredictable server nonce — per-voucher replay guard |
+| `flowId` | 32B | Flow binding (#68) — appended last; the depository routes the claim by `_flowMode[flowId]`, not by `_tokenMode` |
+
+> **Per-flow routing (#68).** Both chains now resolve the bridge mode from the **flow**, not the token. EVM → OPNet claims route by the voucher's trailing `flowId` (→ `_flowMode[flowId]`); OPNet → EVM burns carry a `flowId` first arg into `burnForRelease`, and the depository likewise routes by `_flowMode[flowId]`. `_tokenMode` is no longer routing-authoritative — one (evmToken, opnetToken) pair can back multiple flows/modes.
 
 **Why ML-DSA?** OPNet's contract VM has deprecated ECDSA in favour of the quantum-resistant ML-DSA scheme. The server holds an ML-DSA keypair (WIF + hex in `.env` for v1; HashiCorp Vault or AWS KMS custom service for production).
 
