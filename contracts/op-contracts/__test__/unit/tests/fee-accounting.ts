@@ -173,7 +173,7 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
 
     vm.afterEach(() => disposeSetup(setup));
 
-    await vm.it('mode-1 lock accrues exact bps fee; inventory == full received (net unchanged)', async () => {
+    await vm.it('mode-1 lock accrues exact bps fee; inventory == received - fee (HIGH-002)', async () => {
         const { depository, wusdcAddress } = setup;
         await depository.setTokenMode(wusdcAddress, 1n, 0xc0ffeen);
         const flowId = await registerFlow(setup, { mode: 1n, feeBps: 50n });
@@ -184,10 +184,46 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
 
         // fee = 2_000_000 * 50 / 10_000 = 10_000
         Assert.expect(await depository.accruedFees(flowId)).toEqual(10_000n);
-        // Inventory (getFlow index 16) is credited with the FULL received —
-        // the fee accumulator is layered on top, it does NOT reduce backing.
+        // HIGH-002 (audit 2026-05-25): inventory is credited with NET
+        // (received - fee), NOT gross. Pre-fix this asserted == received and
+        // every governor fee sweep widened the ledger-vs-balance gap by the
+        // swept amount.
         const flow = await depository.getFlow(flowId);
-        Assert.expect(flow[16]!).toEqual(2_000_000n);
+        Assert.expect(flow[16]!).toEqual(1_990_000n);
+    });
+
+    await vm.it('mode-1 invariant: inventory + accruedFees == bridge balance, across lock + withdrawFees (HIGH-002)', async () => {
+        // The full round-trip invariant the fix restores: after any sequence
+        // of mode-1 locks AND a fee sweep, the per-flow ledger plus the
+        // unswept fee accumulator equals the depository's token balance
+        // attributable to this flow. Pre-fix the sweep dropped balance but
+        // left inventory unchanged, breaking the equality.
+        const { depository, depositoryAddress, wusdcAddress, wusdc } = setup;
+        await depository.setTokenMode(wusdcAddress, 1n, 0xc0ffeen);
+        const flowId = await registerFlow(setup, { mode: 1n, feeBps: 50n });
+
+        await fundAndApprove(setup, 4_000_000n);
+        setSender(alice);
+        await depository.lockForBridge(flowId, wusdcAddress, 2_000_000n, evmRecipient(), 1);
+
+        // Bridge balance after lock = received (gross) = 2_000_000.
+        const balAfterLock = await wusdc.balanceOf(depositoryAddress);
+        const flowAfterLock = await depository.getFlow(flowId);
+        const accruedAfterLock = await depository.accruedFees(flowId);
+        Assert.expect(flowAfterLock[16]! + accruedAfterLock).toEqual(balAfterLock);
+
+        // Governor (deployer) sweeps the full accrued fee.
+        setSender(deployer);
+        await depository.withdrawFees(flowId, wusdcAddress, accruedAfterLock);
+
+        // Post-sweep: balance dropped by fee; inventory unchanged; accrued = 0.
+        // Pre-fix: balance == 1_990_000, inventory == 2_000_000 → invariant
+        // BROKEN. Post-fix: balance == 1_990_000, inventory == 1_990_000 → OK.
+        const balAfterSweep = await wusdc.balanceOf(depositoryAddress);
+        const flowAfterSweep = await depository.getFlow(flowId);
+        const accruedAfterSweep = await depository.accruedFees(flowId);
+        Assert.expect(accruedAfterSweep).toEqual(0n);
+        Assert.expect(flowAfterSweep[16]! + accruedAfterSweep).toEqual(balAfterSweep);
     });
 
     await vm.it('minFee floor wins when bps-derived fee is lower', async () => {

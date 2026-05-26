@@ -1454,12 +1454,12 @@ export class BridgeDepository extends ReentrancyGuard {
         // is a fee-bearing source side, so no extra mode dispatch is needed.
         // A flow with feeBps == 0 AND minFee == 0 accrues nothing.
         //
-        // NOTE: this is a pure accounting accumulator layered on top of the
-        // existing flow — it does NOT reduce the inventory credit below, and
-        // the lock continues to sign/emit the full `received` gross to the
-        // EVM side (the fee carve happens server-side at sign time). The
-        // accumulator simply names how much of the standing balance is
-        // bridge revenue vs. user-backing principal.
+        // NOTE: this accumulator names the sweepable fee portion of the
+        // bridge's standing balance. Inventory credit below (mode 1) is the
+        // NET portion (received - lockFee) — together they sum to the
+        // physical balance per flow at all times. The lock continues to
+        // sign/emit the full `received` gross to the EVM side (the fee
+        // carve happens server-side at sign time).
         let lockFee: u256 = SafeMath.div(
             SafeMath.mul(received, this._flowFeeBps.get(flowId)),
             u256.fromU32(10000),
@@ -1482,16 +1482,23 @@ export class BridgeDepository extends ReentrancyGuard {
         }
 
         // #44 — mode-1 (INVERSE_WRAPPED) inventory production. The canonical
-        // OP20 just entered the bridge; it now backs the EVM-side wrapped
-        // mint and must be releasable back via claimReleaseWithVoucher.
-        // Credit the flow ledger so the reverse leg has inventory to draw
-        // down — this is the SOLE mode-1 inventory producer (confirmBurn no
-        // longer increments). Mode-3 (POOLED) locks are source-side only —
-        // the release pool lives on the EVM counterpart — so they do NOT
-        // credit OPNet inventory (provisioned via provisionInventoryOpNet).
+        // OP20 just entered the bridge; the NET portion backs the EVM-side
+        // wrapped mint and must be releasable back via claimReleaseWithVoucher.
+        // Credit `received - lockFee` (NOT gross) so a later `withdrawFees`
+        // sweep that subtracts only from `_flowAccruedFees` doesn't leave
+        // `_flowInventory` overstating the principal available for releases.
+        // This is the SOLE mode-1 inventory producer (confirmBurn no longer
+        // increments). Mode-3 (POOLED) locks are source-side only — the
+        // release pool lives on the EVM counterpart — so they do NOT credit
+        // OPNet inventory (provisioned via provisionInventoryOpNet).
+        //
+        // HIGH-002 (audit 2026-05-25): pre-fix this credited `received`
+        // (gross), and every governor fee sweep widened the gap between
+        // physical balance and inventory ledger by exactly the swept amount.
         if (isInverse) {
+            const netReceived: u256 = SafeMath.sub(received, lockFee);
             const invBefore: u256 = this._flowInventory.get(flowId);
-            const invAfter: u256 = SafeMath.add(invBefore, received);
+            const invAfter: u256 = SafeMath.add(invBefore, netReceived);
             if (u256.gt(invAfter, this._flowCap.get(flowId))) {
                 throw new Revert('BridgeDepository: flow cap exceeded');
             }

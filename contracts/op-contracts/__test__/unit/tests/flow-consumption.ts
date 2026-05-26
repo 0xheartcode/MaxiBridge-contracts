@@ -638,14 +638,16 @@ await opnet('BridgeDepository — #44 — lockForBridge → claimReleaseWithVouc
             await wusdc.increaseAllowance(alice, depositoryAddress, 4_000_000n);
 
             // lockForBridge — the SOLE mode-1 inventory producer. evmRecipient
-            // is a left-padded EVM address (upper 12 bytes zero).
+            // is a left-padded EVM address (upper 12 bytes zero). Default
+            // feeBps for registerFlow is 50 (0.5%), so 3_000_000 lock accrues
+            // a 15_000 fee and credits 2_985_000 NET to inventory (HIGH-002).
             const evmRecipient = new Uint8Array(32);
             for (let i = 12; i < 32; i++) evmRecipient[i] = 0xab;
             setSender(alice);
             await depository.lockForBridge(flowId, wusdcAddress, 3_000_000n, evmRecipient, 1);
 
             let flow = await depository.getFlow(flowId);
-            Assert.expect(flow[16]!).toEqual(3_000_000n); // inventory == locked
+            Assert.expect(flow[16]!).toEqual(2_985_000n); // inventory == net (received - fee)
 
             // claimReleaseWithVoucher draws the ledger down by grossAmount.
             const buildRelease = (salt: bigint, gross: bigint, fee: bigint, net: bigint) =>
@@ -667,10 +669,14 @@ await opnet('BridgeDepository — #44 — lockForBridge → claimReleaseWithVouc
             const r1 = buildRelease(0x7001n, 1_000_000n, 5_000n, 995_000n);
             await depository.claimReleaseWithVoucher(r1.preimage, signVoucher(signerWallet, r1.hash));
             flow = await depository.getFlow(flowId);
-            Assert.expect(flow[16]!).toEqual(2_000_000n);
+            // 2_985_000 (post-HIGH-002 net credit) − 1_000_000 release = 1_985_000.
+            Assert.expect(flow[16]!).toEqual(1_985_000n);
 
-            // Over-release — grossAmount 2_500_000 > remaining inventory 2_000_000.
-            const r2 = buildRelease(0x7002n, 2_500_000n, 12_500n, 2_487_500n);
+            // Over-release — grossAmount 2_000_000 > remaining inventory 1_985_000.
+            // (Pre-fix used 2_500_000 against a 2_000_000 floor; the net credit
+            //  lowers the floor by exactly the fee, so the over-release boundary
+            //  shifts too.)
+            const r2 = buildRelease(0x7002n, 2_000_000n, 10_000n, 1_990_000n);
             await Assert.expect(async () => {
                 await depository.claimReleaseWithVoucher(
                     r2.preimage, signVoucher(signerWallet, r2.hash),
