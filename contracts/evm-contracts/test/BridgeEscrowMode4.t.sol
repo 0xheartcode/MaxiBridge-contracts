@@ -336,6 +336,129 @@ contract BridgeEscrowMode4Test is Test {
     }
 
     // ------------------------------------------------------------------
+    // HIGH-001 — clawback forwarder (audit 2026-05-25)
+    // ------------------------------------------------------------------
+
+    /// Proves the bug existed pre-fix: VestingVault.clawback is `onlyBridge`,
+    /// so calling it directly from owner / guardian / anyone reverts.
+    /// Recovery is impossible without the BridgeEscrow forwarder.
+    function test_Clawback_DirectVaultCall_ByOwner_Reverts_NotBridge() public {
+        _wireVault();
+        _seedInventory(500e6);
+        bytes32 nonce = keccak256("voucher-direct-vault-clawback");
+        escrow.claim(_makeIntent(bob, 100e6, nonce), _signIntent(signerPk, _makeIntent(bob, 100e6, nonce)));
+
+        vm.prank(owner);
+        vm.expectRevert(VestingVault.NotBridge.selector);
+        vault.clawback(bob, nonce);
+    }
+
+    /// Happy path: cancelVoucher → clawbackVestedClaim succeeds, inventory
+    /// is re-credited by the unvested amount, vault schedule terminates.
+    function test_Clawback_Forwarder_HappyPath_BeforeAnyVest() public {
+        _wireVault();
+        _seedInventory(500e6);
+        bytes32 nonce = keccak256("voucher-clawback-pre-vest");
+        BridgeEscrow.ReleaseIntent memory intent = _makeIntent(bob, 100e6, nonce);
+        escrow.claim(intent, _signIntent(signerPk, intent));
+
+        // Inventory after claim: 500 - 100 = 400.
+        assertEq(escrow.getFlow(motoVestFlowId).inventory, 400e6, "inventory decremented by claim");
+        // Bridge balance after claim: 500 - 100 (went to vault) = 400.
+        assertEq(moto.balanceOf(address(escrow)), 400e6, "bridge token balance after claim");
+
+        // Cancel voucher (incident response — first step).
+        vm.prank(owner);
+        escrow.cancelVoucher(nonce);
+
+        // Clawback at startBlock = no vest yet → full 100 returns.
+        vm.prank(owner);
+        escrow.clawbackVestedClaim(motoVestFlowId, bob, nonce);
+
+        // Inventory restored to 500.
+        assertEq(escrow.getFlow(motoVestFlowId).inventory, 500e6, "inventory recredited");
+        // Bridge balance restored to 500.
+        assertEq(moto.balanceOf(address(escrow)), 500e6, "bridge balance recredited");
+        // Bob got nothing (no vest had accrued yet).
+        assertEq(moto.balanceOf(bob), 0, "beneficiary received nothing pre-vest");
+        // Vault is empty; schedule is terminal.
+        assertEq(moto.balanceOf(address(vault)), 0, "vault drained");
+        assertTrue(vault.getSchedule(bob, nonce).clawedBack, "schedule marked clawed-back");
+    }
+
+    /// Mid-vest: clawback at the halfway point splits funds — beneficiary
+    /// keeps the vested portion, bridge recovers the unvested remainder.
+    function test_Clawback_Forwarder_MidVest_SplitsCorrectly() public {
+        _wireVault();
+        _seedInventory(500e6);
+        bytes32 nonce = keccak256("voucher-clawback-mid-vest");
+        BridgeEscrow.ReleaseIntent memory intent = _makeIntent(bob, 100e6, nonce);
+        escrow.claim(intent, _signIntent(signerPk, intent));
+
+        // Advance to halfway through the vest window.
+        vm.roll(block.number + VESTING_BLOCKS / 2);
+
+        vm.prank(owner);
+        escrow.cancelVoucher(nonce);
+        vm.prank(owner);
+        escrow.clawbackVestedClaim(motoVestFlowId, bob, nonce);
+
+        // Inventory recredited by the unvested half (50e6); the vested half
+        // (50e6) is genuinely paid out and never returns to the ledger.
+        assertEq(escrow.getFlow(motoVestFlowId).inventory, 450e6, "inventory + unvested half");
+        assertEq(moto.balanceOf(bob), 50e6, "beneficiary kept vested half");
+        assertEq(moto.balanceOf(address(escrow)), 450e6, "bridge balance back to inventory");
+        assertEq(moto.balanceOf(address(vault)), 0, "vault drained");
+    }
+
+    /// Voucher must be cancelled first — clawback without cancellation
+    /// reverts so the operator can't accidentally terminate a live schedule.
+    function test_Clawback_Forwarder_RevertsIfVoucherNotCancelled() public {
+        _wireVault();
+        _seedInventory(500e6);
+        bytes32 nonce = keccak256("voucher-not-cancelled");
+        BridgeEscrow.ReleaseIntent memory intent = _makeIntent(bob, 100e6, nonce);
+        escrow.claim(intent, _signIntent(signerPk, intent));
+
+        vm.prank(owner);
+        vm.expectRevert(BridgeEscrow.VoucherNotCancelled.selector);
+        escrow.clawbackVestedClaim(motoVestFlowId, bob, nonce);
+    }
+
+    /// Mode dispatch: clawback only applies to Mode 4. Register a Mode 0
+    /// (WRAPPED) flow and verify the forwarder rejects it as WrongMode.
+    function test_Clawback_Forwarder_RevertsForNonMode4Flow() public {
+        vm.prank(owner);
+        bytes32 wrappedFlowId = escrow.addFlow(
+            BridgeEscrow.FlowAddParams({
+                mode: uint8(BridgeEscrow.TokenMode.WRAPPED),
+                evmChainId: TEST_EVM_CHAIN_ID,
+                evmBridge: TEST_EVM_BRIDGE,
+                evmToken: address(moto),
+                evmDecimals: 6,
+                opnetBridge: TEST_OPNET_BRIDGE,
+                opnetToken: bytes32(uint256(0xC0DE2)),
+                opnetDecimals: 6,
+                feeBps: 0,
+                minFee: 0,
+                minAmount: 0,
+                cap: type(uint128).max,
+                dailyLimit: type(uint128).max,
+                tipCapBps: 0
+            })
+        );
+
+        // Pre-cancel a voucher so we get past that check and surface WrongMode.
+        bytes32 nonce = keccak256("voucher-wrong-mode");
+        vm.prank(owner);
+        escrow.cancelVoucher(nonce);
+
+        vm.prank(owner);
+        vm.expectRevert(BridgeEscrow.WrongMode.selector);
+        escrow.clawbackVestedClaim(wrappedFlowId, bob, nonce);
+    }
+
+    // ------------------------------------------------------------------
     // helpers
     // ------------------------------------------------------------------
 

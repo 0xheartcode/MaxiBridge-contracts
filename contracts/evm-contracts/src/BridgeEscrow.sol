@@ -506,6 +506,13 @@ contract BridgeEscrow is
     event FlowFeeChanged(bytes32 indexed flowId, uint16 oldBps, uint16 newBps, uint128 oldMinFee, uint128 newMinFee);
     event FlowTipCapUpdated(bytes32 indexed flowId, uint16 oldBps, uint16 newBps);
     event FlowVestingVaultChanged(bytes32 indexed flowId, address oldVault, address newVault);
+    event VestedClaimClawedBack(
+        bytes32 indexed flowId,
+        address indexed beneficiary,
+        bytes32 indexed opnetNonce,
+        uint128 returnedAmount,
+        address by
+    );
     event SignerSetMigrated(
         uint32 indexed oldEpoch,
         uint32 indexed newEpoch,
@@ -564,6 +571,7 @@ contract BridgeEscrow is
     error VestingVaultNotSet();
     error VestingVaultTokenMismatch();
     error InsufficientAccruedFees();
+    error VoucherNotCancelled();        // HIGH-001 — clawback requires prior cancelVoucher
     // #62-fix — lifecycle errors for time-based settlement.
     error FeeExceedsAmount();           // lock with fee >= received (zero-net bridge)
     error LockNotSettleable();          // settleLockedDeposit on non-Locked status
@@ -1339,6 +1347,55 @@ contract BridgeEscrow is
         if (cancelledVouchers[opnetNonce]) return;
         cancelledVouchers[opnetNonce] = true;
         emit VoucherCancelled(opnetNonce, msg.sender);
+    }
+
+    /// @notice Recover the unvested portion of a Mode 4 claim whose source
+    ///         voucher has been cancelled. Forwards to the flow's
+    ///         `VestingVault.clawback`: the vault pays vested-so-far to the
+    ///         beneficiary and returns the unvested remainder to this
+    ///         contract. Re-credits `flow.inventory` so the release ledger
+    ///         tracks the actual balance held.
+    /// @dev    HIGH-001 follow-through for Mode 4 reorg handling. The
+    ///         documented incident flow assumed callers could invoke the
+    ///         vault directly, but `VestingVault.clawback` is `onlyBridge`
+    ///         — without this forwarder no role can recover the tokens.
+    ///         Voucher MUST be cancelled first: clawback is an incident-
+    ///         response action, not a casual revoke. The cap check is
+    ///         deliberately skipped — this restores funds that came out of
+    ///         the flow's pool at claim time, not a new deposit. Gated
+    ///         `onlyOwnerOrGuardian` (same lattice as `cancelVoucher` /
+    ///         `pause`), `nonReentrant`. The vault is a trusted,
+    ///         reentrancy-guarded custodian deployed by us — calling it
+    ///         before the inventory write is safe and required to know
+    ///         the returned amount.
+    function clawbackVestedClaim(
+        bytes32 flowId,
+        address beneficiary,
+        bytes32 opnetNonce
+    )
+        external
+        onlyOwnerOrGuardian
+        nonReentrant
+    {
+        FlowRecord storage flow = flows[flowId];
+        if (flow.evmChainId == 0) revert FlowNotFound();
+        if (flow.mode != uint8(TokenMode.POOLED_LOCK_VEST)) revert WrongMode();
+        address vault = flow.vestingVault;
+        if (vault == address(0)) revert VestingVaultNotSet();
+        if (!cancelledVouchers[opnetNonce]) revert VoucherNotCancelled();
+
+        // Interaction — vault transfers vested-so-far to beneficiary and
+        // returns unvested remainder to msg.sender (this contract).
+        uint128 returned = IVestingVault(vault).clawback(beneficiary, opnetNonce);
+
+        // Effect — restore the flow ledger. Cap is intentionally not
+        // re-enforced: a governor lowering cap between claim and clawback
+        // must not be able to brick recovery.
+        if (returned > 0) {
+            flow.inventory = flow.inventory + returned;
+        }
+
+        emit VestedClaimClawedBack(flowId, beneficiary, opnetNonce, returned, msg.sender);
     }
 
     // ---------------------------------------------------------------------
