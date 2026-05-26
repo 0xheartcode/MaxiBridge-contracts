@@ -458,6 +458,48 @@ contract BridgeEscrowMode4Test is Test {
         escrow.clawbackVestedClaim(wrappedFlowId, bob, nonce);
     }
 
+    /// Access control (HIGH-001 polish): clawbackVestedClaim is gated
+    /// `onlyOwnerOrGuardian`. A caller that is neither must revert at the
+    /// modifier — before any function-body check runs, so no wiring is
+    /// needed to surface it. (Was uncovered: the happy/wrong-mode/not-
+    /// cancelled tests all pranked `owner`, exercising only the owner branch.)
+    function test_Clawback_Forwarder_RevertsForUnauthorizedCaller() public {
+        bytes32 nonce = keccak256("voucher-unauthorized-clawback");
+        vm.prank(alice); // alice is a plain user, not owner and not guardian
+        vm.expectRevert(BridgeEscrow.NotGuardian.selector);
+        escrow.clawbackVestedClaim(motoVestFlowId, bob, nonce);
+    }
+
+    /// Access control (HIGH-001 polish): the guardian branch of
+    /// `onlyOwnerOrGuardian` works end-to-end — guardian (not owner) can run
+    /// the full incident-response ceremony (cancelVoucher → clawback). This
+    /// is the path that matters once `owner` becomes the 7-day Timelock and
+    /// the guardian is the only role able to respond immediately.
+    function test_Clawback_Forwarder_GuardianCanClawback() public {
+        address guardian = address(0x6A4D);
+        vm.prank(owner);
+        escrow.setGuardian(guardian);
+
+        _wireVault();
+        _seedInventory(500e6);
+        bytes32 nonce = keccak256("voucher-guardian-clawback");
+        BridgeEscrow.ReleaseIntent memory intent = _makeIntent(bob, 100e6, nonce);
+        escrow.claim(intent, _signIntent(signerPk, intent));
+        assertEq(escrow.getFlow(motoVestFlowId).inventory, 400e6, "inventory decremented by claim");
+
+        // Guardian (NOT owner) runs both incident-response steps.
+        vm.prank(guardian);
+        escrow.cancelVoucher(nonce);
+        vm.prank(guardian);
+        escrow.clawbackVestedClaim(motoVestFlowId, bob, nonce);
+
+        // No vest accrued → full 100 recovered; ledger + balance restored.
+        assertEq(escrow.getFlow(motoVestFlowId).inventory, 500e6, "inventory recredited by guardian");
+        assertEq(moto.balanceOf(address(escrow)), 500e6, "bridge balance recredited");
+        assertEq(moto.balanceOf(bob), 0, "beneficiary received nothing pre-vest");
+        assertTrue(vault.getSchedule(bob, nonce).clawedBack, "schedule marked clawed-back");
+    }
+
     // ------------------------------------------------------------------
     // helpers
     // ------------------------------------------------------------------
