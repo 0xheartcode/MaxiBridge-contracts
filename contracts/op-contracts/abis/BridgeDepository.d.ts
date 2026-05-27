@@ -116,6 +116,10 @@ export type GovernorUpdatedEvent = {
     readonly oldGov: Address;
     readonly newGov: Address;
 };
+export type PauserSetEvent = {
+    readonly oldPauser: Address;
+    readonly newPauser: Address;
+};
 export type MintedFromVoucherEvent = {
     readonly recipient: Address;
     readonly wrappedToken: Address;
@@ -484,6 +488,16 @@ export type SetPaused = CallResult<{}, OPNetEvent<PausedEvent | UnpausedEvent>[]
 export type SetGovernor = CallResult<{}, OPNetEvent<GovernorUpdatedEvent>[]>;
 
 /**
+ * @description Represents the result of the transferGovernor function call.
+ */
+export type TransferGovernor = CallResult<{}, OPNetEvent<GovernorUpdatedEvent>[]>;
+
+/**
+ * @description Represents the result of the setPauser function call.
+ */
+export type SetPauser = CallResult<{}, OPNetEvent<PauserSetEvent>[]>;
+
+/**
  * @description Represents the result of the claimMintWithVoucher function call.
  */
 export type ClaimMintWithVoucher = CallResult<{}, OPNetEvent<MintedFromVoucherEvent | RelayerTipPaidEvent>[]>;
@@ -504,6 +518,16 @@ export type Governor = CallResult<
 export type Paused = CallResult<
     {
         paused: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the pauser function call.
+ */
+export type Pauser = CallResult<
+    {
+        pauser: Address;
     },
     OPNetEvent<never>[]
 >;
@@ -656,9 +680,12 @@ export interface IBridgeDepository extends IOP_NETContract {
     isSignerAuthorized(): Promise<IsSignerAuthorized>;
     setPaused(paused: boolean): Promise<SetPaused>;
     setGovernor(newGovernor: Address): Promise<SetGovernor>;
+    transferGovernor(newGovernor: Address): Promise<TransferGovernor>;
+    setPauser(newPauser: Address): Promise<SetPauser>;
     claimMintWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<ClaimMintWithVoucher>;
     governor(): Promise<Governor>;
     paused(): Promise<Paused>;
+    pauser(): Promise<Pauser>;
     signerEpoch(): Promise<SignerEpoch>;
     signerHashAtEpoch(): Promise<SignerHashAtEpoch>;
     isVoucherUsed(): Promise<IsVoucherUsed>;

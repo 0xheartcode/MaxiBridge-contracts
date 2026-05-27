@@ -985,14 +985,15 @@ contract BridgeEscrowTest is Test {
         assertTrue(escrow.paused());
     }
 
-    /// @dev Pauser can freeze but NOT thaw — unpause is owner/guardian only.
+    /// @dev Pauser can freeze but NOT thaw — unpause is OWNER-ONLY (H-01), so
+    ///      neither pauser nor guardian can re-open the bridge.
     function test_Pauser_CannotUnpause() public {
         vm.prank(owner);
         escrow.setPauser(pauserAddr);
         vm.prank(pauserAddr);
         escrow.pause();
         vm.prank(pauserAddr);
-        vm.expectRevert(BridgeEscrow.NotGuardian.selector);
+        vm.expectRevert();
         escrow.unpause();
     }
 

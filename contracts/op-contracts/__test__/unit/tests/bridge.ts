@@ -920,17 +920,26 @@ await opnet('BridgeDepository — roles (transferGovernor + pauser)', async (vm:
         }).toThrow();
     });
 
-    await vm.it('pauser can pause + unpause but not other governor ops', async () => {
+    await vm.it('pauser can FREEZE but never THAW (H-01); governor thaws', async () => {
         const { depository } = setup;
 
         setSender(deployer);
         await depository.setPauser(bob);
         Assert.expect((await depository.pauser()).equals(bob)).toEqual(true);
 
-        // Pauser flips the pause flag.
+        // Pauser can FREEZE.
         setSender(bob);
         await depository.setPaused(true);
         Assert.expect(await depository.paused()).toEqual(true);
+
+        // Pauser CANNOT THAW — freeze-but-never-thaw, mirrors EVM unpause owner-only.
+        await Assert.expect(async () => {
+            await depository.setPaused(false);
+        }).toThrow();
+        Assert.expect(await depository.paused()).toEqual(true);
+
+        // Only the governor may re-open.
+        setSender(deployer);
         await depository.setPaused(false);
         Assert.expect(await depository.paused()).toEqual(false);
 

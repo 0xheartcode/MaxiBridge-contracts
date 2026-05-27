@@ -203,18 +203,19 @@ contract GuardianRoleTest is Test {
     // guardian CANNOT call owner-exclusive calls — OZ Ownable revert
     // -----------------------------------------------------------------
 
-    /// @dev Roles PR — `unpause` is now owner OR guardian (was owner-only).
-    ///      The dedicated pauser role can freeze but never thaw; guardian can
-    ///      do both as part of the incident-response surface.
-    function test_Guardian_CanUnpause() public {
+    /// @dev Audit H-01: guardian + pauser can FREEZE but never THAW. unpause is
+    ///      owner-only, so a guardian that pauses cannot itself re-open — a
+    ///      compromised incident-response key can't keep/flip the bridge open.
+    function test_Guardian_CannotUnpause() public {
         _installGuardian();
         vm.prank(guardian);
         escrow.pause();
         assertTrue(escrow.paused());
 
         vm.prank(guardian);
+        vm.expectRevert();
         escrow.unpause();
-        assertFalse(escrow.paused());
+        assertTrue(escrow.paused(), "guardian must not be able to unpause");
     }
 
     function test_Guardian_CannotAddSigner() public {

@@ -833,6 +833,32 @@
             "outputs": []
         },
         {
+            "name": "transferGovernor",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newGovernor",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setPauser",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newPauser",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
             "name": "claimMintWithVoucher",
             "type": "Function",
             "payable": false,
@@ -872,6 +898,19 @@
                 {
                     "name": "paused",
                     "type": "BOOL"
+                }
+            ]
+        },
+        {
+            "name": "pauser",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "pauser",
+                    "type": "ADDRESS"
                 }
             ]
         },
@@ -1364,6 +1403,20 @@
                 },
                 {
                     "name": "newGov",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "PauserSet",
+            "values": [
+                {
+                    "name": "oldPauser",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "newPauser",
                     "type": "ADDRESS"
                 }
             ],

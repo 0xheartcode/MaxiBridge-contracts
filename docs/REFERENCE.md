@@ -63,7 +63,7 @@ cast send $EVM_BRIDGE_ESCROW \
 - A compromised **owner** alone can pause but CANNOT drain — guardian role is required.
 - A compromised **guardian** alone CANNOT drain — owner-controlled pause is required first.
 - A compromised **owner + guardian** drain to `treasury` only — the Safe address is the recovery sink, not an attacker EOA.
-- For mainnet: `owner` should be a Safe + `TimelockController` (Phase 2.2 — 7-day delay). `guardian` should be on an independent device, paged via PagerDuty. `treasury` should be a separate Safe (or the same Safe with policy review).
+- For mainnet: `owner` should be a Safe + `TimelockController` (Phase 2.2 — 3-day delay). `guardian` should be on an independent device, paged via PagerDuty. `treasury` should be a separate Safe (or the same Safe with policy review).
 
 ---
 

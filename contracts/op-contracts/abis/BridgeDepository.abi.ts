@@ -194,6 +194,14 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'PauserSet',
+        values: [
+            { name: 'oldPauser', type: ABIDataTypes.ADDRESS },
+            { name: 'newPauser', type: ABIDataTypes.ADDRESS },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'MintedFromVoucher',
         values: [
             { name: 'recipient', type: ABIDataTypes.ADDRESS },
@@ -606,6 +614,18 @@ export const BridgeDepositoryAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
+        name: 'transferGovernor',
+        inputs: [{ name: 'newGovernor', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setPauser',
+        inputs: [{ name: 'newPauser', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
         name: 'claimMintWithVoucher',
         inputs: [
             { name: 'voucher', type: ABIDataTypes.BYTES },
@@ -626,6 +646,13 @@ export const BridgeDepositoryAbi = [
         constant: true,
         inputs: [],
         outputs: [{ name: 'paused', type: ABIDataTypes.BOOL }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'pauser',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'pauser', type: ABIDataTypes.ADDRESS }],
         type: BitcoinAbiTypes.Function,
     },
     {

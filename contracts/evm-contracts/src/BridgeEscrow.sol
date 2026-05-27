@@ -1465,9 +1465,12 @@ contract BridgeEscrow is
         _pause();
     }
 
-    /// @notice Resume. Owner or guardian only — the `pauser` role can freeze
-    ///         but never thaw.
-    function unpause() external onlyOwnerOrGuardian {
+    /// @notice Resume. OWNER-ONLY (audit H-01). The guardian and `pauser`
+    ///         roles can freeze for incident response but must never re-open
+    ///         the bridge — resumption is a deliberate governance decision
+    ///         (timelock-gated on mainnet), so a compromised incident-response
+    ///         key cannot thaw a legitimate freeze.
+    function unpause() external onlyOwner {
         _unpause();
     }
 

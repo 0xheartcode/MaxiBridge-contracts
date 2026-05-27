@@ -394,15 +394,15 @@ export class BridgeDepository extends ReentrancyGuard {
         // AddressMemoryMap MUST be initialized in the constructor body.
         this._wrappedTokens = new AddressMemoryMap(this._wrappedTokensPointer);
 
-        // Phase 2.2 — 7-day upgrade timelock.
-        // Updatable-via-plugin: 1008 blocks (~7 days at 10min/block) timelock
-        // between submitUpdate and applyUpdate. Gives users a full week to
-        // exit before any upgrade lands, matching the EVM-side
-        // TimelockController(604800s). Pointers allocated at the END of the
+        // 3-day upgrade timelock (governance decision 2026-05-27, was 1008/7d).
+        // Updatable-via-plugin: 432 blocks (~3 days at 10min/block) timelock
+        // between submitUpdate and applyUpdate. Gives users 3 days to exit
+        // before any upgrade lands, matching the EVM-side
+        // TimelockController(259200s). Pointers allocated at the END of the
         // constructor body so they append after every previously declared
         // storage slot, preserving append-only discipline for future
         // upgrades.
-        this.registerPlugin(new UpdatablePlugin(1008));
+        this.registerPlugin(new UpdatablePlugin(432));
     }
 
     public override onDeployment(calldata: Calldata): void {
@@ -2485,8 +2485,15 @@ export class BridgeDepository extends ReentrancyGuard {
     @method({ name: 'paused', type: ABIDataTypes.BOOL })
     @emit('Paused', 'Unpaused')
     public setPaused(calldata: Calldata): BytesWriter {
-        this.onlyGovernorOrPauser();
         const paused: boolean = calldata.readBoolean();
+        // Freeze-but-never-thaw (mirrors EVM BridgeEscrow H-01): the pauser and
+        // governor may FREEZE; only the governor may THAW (re-open the bridge).
+        // A compromised pauser/incident key cannot keep the bridge open.
+        if (paused) {
+            this.onlyGovernorOrPauser();
+        } else {
+            this.onlyGovernor();
+        }
         this._paused.value = paused;
         if (paused) {
             this.emitEvent(new Paused());
