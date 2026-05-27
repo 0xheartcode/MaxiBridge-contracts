@@ -202,11 +202,17 @@ contract LockInventoryTest is Test {
     }
 
     function test_Lock_EmitsLockedToFlowEvent() public {
+        // FINDING-001 (audit 2026-05-26): LockedToFlow now carries
+        // `depositNonce` as a 5th (non-indexed) param so off-chain
+        // indexers can pair it with `Locked` by nonce. Topic signature
+        // changed accordingly; data layout is now (uint256 amount,
+        // uint256 depositNonce).
+        uint256 nonceBefore = escrow.depositNonce();
         vm.recordLogs();
         vm.prank(alice);
         escrow.lock(address(usdc), 5_000e6, RECIPIENT, flowId);
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        bytes32 sig = keccak256("LockedToFlow(bytes32,address,address,uint256)");
+        bytes32 sig = keccak256("LockedToFlow(bytes32,address,address,uint256,uint256)");
         bool found;
         for (uint256 i; i < entries.length; i++) {
             if (entries[i].topics.length > 0 && entries[i].topics[0] == sig) {
@@ -214,7 +220,10 @@ contract LockInventoryTest is Test {
                 assertEq(entries[i].topics[1], flowId);
                 assertEq(address(uint160(uint256(entries[i].topics[2]))), alice);
                 assertEq(address(uint160(uint256(entries[i].topics[3]))), address(usdc));
-                assertEq(abi.decode(entries[i].data, (uint256)), 5_000e6);
+                (uint256 emittedAmount, uint256 emittedNonce) =
+                    abi.decode(entries[i].data, (uint256, uint256));
+                assertEq(emittedAmount, 5_000e6, "amount");
+                assertEq(emittedNonce, nonceBefore + 1, "depositNonce matches Locked");
                 break;
             }
         }

@@ -65,6 +65,7 @@ export type LockedForBridgeEvent = {
     readonly destChainId: number;
     readonly lockNonce: bigint;
     readonly mode: number;
+    readonly flowId: bigint;
 };
 export type ReleasedFromVoucherEvent = {
     readonly recipient: Address;

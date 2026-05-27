@@ -108,6 +108,12 @@ export class TokenModeSet extends NetEvent {
  * OPNet to bridge to EVM. Indexer picks this up and signs an EIP-712
  * MintIntent (mode 2) or ReleaseIntent (mode 4) for the EVM side.
  */
+// FINDING-002 (audit 2026-05-26): `flowId` appended LAST so off-chain
+// indexers can persist the canonical route identity without re-deriving
+// from the per-token `_tokenMode` (which after PR #76 is no longer the
+// routing authority for N:M). Old-format readers tolerant of trailing
+// bytes still parse the first 168 bytes; flow-aware readers parse 200.
+// Compatible event NAME — only the data length changes.
 export class LockedForBridge extends NetEvent {
     constructor(
         canonicalToken: Address,
@@ -117,8 +123,9 @@ export class LockedForBridge extends NetEvent {
         destChainId: u32,
         lockNonce: u256,
         mode: u32,
+        flowId: u256, // FINDING-002 — appended
     ) {
-        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32 + 32 + 4 + 32 + 4);
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32 + 32 + 4 + 32 + 4 + 32);
         data.writeAddress(canonicalToken);
         data.writeAddress(user);
         data.writeU256(amount);
@@ -126,6 +133,7 @@ export class LockedForBridge extends NetEvent {
         data.writeU32(destChainId);
         data.writeU256(lockNonce);
         data.writeU32(mode);
+        data.writeU256(flowId); // FINDING-002 — appended LAST
         super('LockedForBridge', data);
     }
 }

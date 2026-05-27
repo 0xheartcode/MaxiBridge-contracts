@@ -104,6 +104,7 @@ export const BridgeDepositoryEvents = [
             { name: 'destChainId', type: ABIDataTypes.UINT32 },
             { name: 'lockNonce', type: ABIDataTypes.UINT256 },
             { name: 'mode', type: ABIDataTypes.UINT32 },
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
         ],
         type: BitcoinAbiTypes.Event,
     },

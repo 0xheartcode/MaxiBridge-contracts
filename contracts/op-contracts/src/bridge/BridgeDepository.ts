@@ -1530,6 +1530,8 @@ export class BridgeDepository extends ReentrancyGuard {
             destChainId,
             nextNonce,
             mode.toU32(),
+            flowId, // FINDING-002 — appended so the OPNet scanner can persist
+                    // flow_id without resolving from per-token state.
         ));
 
         const writer = new BytesWriter(32);

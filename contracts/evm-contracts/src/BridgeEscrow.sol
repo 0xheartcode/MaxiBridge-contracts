@@ -421,11 +421,17 @@ contract BridgeEscrow is
     /// @notice PR γ.2a — flow-tagged lock event. Emitted alongside `Locked`
     ///         so existing indexers keep working while flow-aware tooling
     ///         can subscribe to the per-flow stream.
+    /// @dev    FINDING-001 (audit 2026-05-26): `depositNonce` added so
+    ///         indexers can persist `flow_id` per deposit without joining
+    ///         against the legacy `Locked` event (which has no `flowId`).
+    ///         Same tx, same log block, but `LockedToFlow` is now the
+    ///         self-contained authoritative stream for flow-aware tooling.
     event LockedToFlow(
         bytes32 indexed flowId,
         address indexed user,
         address indexed token,
-        uint256 amount
+        uint256 amount,
+        uint256 depositNonce
     );
 
     /// @notice PR γ.2c — emitted on a successful permissionless refund of a
@@ -732,7 +738,7 @@ contract BridgeEscrow is
         });
 
         emit Locked(token, msg.sender, amount, amountReceived_, opnetRecipient, depositNonce_);
-        emit LockedToFlow(flowId, msg.sender, token, amountReceived_);
+        emit LockedToFlow(flowId, msg.sender, token, amountReceived_, depositNonce_);
     }
 
     /// @notice EIP-2612 one-transaction bridging: consume an off-chain
