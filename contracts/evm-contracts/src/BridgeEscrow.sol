@@ -1691,7 +1691,13 @@ contract BridgeEscrow is
 
         // Per-burn replay key. Computed before any sig work so the revert
         // surface is stable and cheap for an already-refunded burn.
-        bytes32 burnId = keccak256(abi.encode(intent.burnTxHash, intent.burnNonce));
+        // M-4 — bind wrappedToken + burner into the replay key. burnNonce is
+        // per-`WrappedERC20` (see WrappedERC20.burnNonce), so two different
+        // wrappeds can produce overlapping (txHash, nonce) pairs and one
+        // legitimate refund would otherwise permanently block the other.
+        bytes32 burnId = keccak256(
+            abi.encode(intent.wrappedToken, intent.burner, intent.burnTxHash, intent.burnNonce)
+        );
         if (refundedBurns[burnId]) revert BurnAlreadyRefunded();
 
         // Verify the M-of-N attestation over the EIP-712 digest. Done before
@@ -1712,6 +1718,15 @@ contract BridgeEscrow is
         if (flow.status != FLOW_STATUS_ACTIVE && flow.status != FLOW_STATUS_DRAINING) {
             revert FlowNotActive();
         }
+
+        // H-1 — the mint-on-EVM `claimMintWrapped` path enforces minAmount +
+        // rolling-window dailyLimit via `_consumeMintFlowLimits` (MED-001)
+        // precisely to bound how much a compromised signer can mint per 24h.
+        // `refundBurn` is the OTHER signer-attested mint primitive on this
+        // contract and must share the same bound, or it becomes an unbounded
+        // mint hole. Keyed on the minted `amount` (matches the helper's
+        // contract). `whenNotPaused` is a global freeze, not a rolling bound.
+        _consumeMintFlowLimits(flow, intent.amount);
 
         // Effects BEFORE interaction (CEI): set the replay flag, then mint.
         refundedBurns[burnId] = true;

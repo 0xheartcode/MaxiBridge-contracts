@@ -561,3 +561,111 @@ await opnet('BridgeDepository.burn-refund — flow binding', async (vm: OPNetUni
         Assert.expect(await setup.wusdc.balanceOf(alice)).toEqual(before);
     });
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// H-2 — mode allowlist (refundBurn only mints where bridge holds mint authority)
+// ════════════════════════════════════════════════════════════════════════════
+
+await opnet('BridgeDepository.burn-refund — H-2 mode gate', async (vm: OPNetUnit) => {
+    let setup: Setup;
+
+    vm.beforeEach(async () => {
+        Blockchain.dispose();
+        Blockchain.clearContracts();
+        Blockchain.medianTimestamp = 1_000_000n;
+        await Blockchain.init();
+        setSender(deployer);
+        setup = await setupContracts();
+    });
+
+    vm.afterEach(() => dispose(setup));
+
+    // The bridge can only re-mint where it holds OPNet mint authority: mode 0
+    // (WRAPPED) and mode 2 (NATIVE_BURN_MINT). Defense-in-depth: even if a
+    // signer set were ever cajoled into signing an attestation for a mode-1/3
+    // flow whose _flowOpnetToken happens to be an allowlisted wrapped, the
+    // contract must reject it at this gate, NOT mint.
+    await vm.it('mode-1 (INVERSE_WRAPPED) flow reverts: token not in mintable mode', async () => {
+        const flowId = await registerFlow(setup, 1n);
+        const { preimage, hash } = buildBurnRefundAuth(canonicalFields(setup, flowId));
+        const sig = signAuth(setup.signerWallet, hash);
+
+        const before = await setup.wusdc.balanceOf(alice);
+        setSender(alice);
+        await Assert.expect(async () => {
+            await setup.depository.refundBurn(preimage, sig);
+        }).toThrow();
+        Assert.expect(await setup.wusdc.balanceOf(alice)).toEqual(before);
+        Assert.expect(await setup.depository.isBurnRefunded(BURN_TX_HASH, BURN_NONCE)).toEqual(false);
+    });
+
+    await vm.it('mode-3 (POOLED_LOCK_RELEASE) flow reverts: token not in mintable mode', async () => {
+        const flowId = await registerFlow(setup, 3n);
+        const { preimage, hash } = buildBurnRefundAuth(canonicalFields(setup, flowId));
+        const sig = signAuth(setup.signerWallet, hash);
+
+        const before = await setup.wusdc.balanceOf(alice);
+        setSender(alice);
+        await Assert.expect(async () => {
+            await setup.depository.refundBurn(preimage, sig);
+        }).toThrow();
+        Assert.expect(await setup.wusdc.balanceOf(alice)).toEqual(before);
+        Assert.expect(await setup.depository.isBurnRefunded(BURN_TX_HASH, BURN_NONCE)).toEqual(false);
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// A-1 — rolling-window dailyLimit on refundBurn (mint-bound parity)
+// ════════════════════════════════════════════════════════════════════════════
+
+await opnet('BridgeDepository.burn-refund — A-1 daily limit', async (vm: OPNetUnit) => {
+    let setup: Setup;
+
+    vm.beforeEach(async () => {
+        Blockchain.dispose();
+        Blockchain.clearContracts();
+        Blockchain.medianTimestamp = 1_000_000n;
+        await Blockchain.init();
+        setSender(deployer);
+        setup = await setupContracts();
+    });
+
+    vm.afterEach(() => dispose(setup));
+
+    async function registerFlowWithDailyLimit(s: Setup, dailyLimit: bigint): Promise<bigint> {
+        return await s.depository.addFlow({
+            mode: 0n,
+            chainId: ETH_CHAIN_ID,
+            evmBridge: evmAddrRightPadToBigInt(SOURCE_BRIDGE),
+            evmToken: evmAddrRightPadToBigInt(SOURCE_TOKEN),
+            evmDecimals: 6n,
+            opnetBridge: opnetAddrToBigInt(s.depositoryAddress),
+            opnetToken: opnetAddrToBigInt(s.wusdcAddress),
+            opnetDecimals: 6n,
+            feeBps: FEE_BPS,
+            minFee: 0n,
+            minAmount: 0n,
+            cap: 1_000_000_000_000n,
+            dailyLimit,
+            tipCapBps: 0n,
+        });
+    }
+
+    // A-1 — without rolling-window dailyLimit consumption here, refundBurn is
+    // an unbounded mint primitive. A single AMOUNT-sized refund against a
+    // flow whose dailyLimit is AMOUNT-1 must revert → NO mint.
+    await vm.it('amount above flow dailyLimit reverts; NO mint', async () => {
+        const flowId = await registerFlowWithDailyLimit(setup, AMOUNT - 1n);
+        const { preimage, hash } = buildBurnRefundAuth(canonicalFields(setup, flowId));
+        const sig = signAuth(setup.signerWallet, hash);
+
+        const before = await setup.wusdc.balanceOf(alice);
+        setSender(alice);
+        await Assert.expect(async () => {
+            await setup.depository.refundBurn(preimage, sig);
+        }).toThrow();
+        Assert.expect(await setup.wusdc.balanceOf(alice)).toEqual(before);
+        // Replay guard must not have been set on revert (state rolled back).
+        Assert.expect(await setup.depository.isBurnRefunded(BURN_TX_HASH, BURN_NONCE)).toEqual(false);
+    });
+});

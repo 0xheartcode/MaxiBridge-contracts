@@ -126,7 +126,7 @@ contract BridgeEscrowBurnRefundTest is Test {
         BridgeEscrow.BurnRefundAuthorization memory a = _auth(100e6);
         bytes memory sig = _signAuth(signerPk, a);
 
-        bytes32 burnId = keccak256(abi.encode(a.burnTxHash, a.burnNonce));
+        bytes32 burnId = keccak256(abi.encode(a.wrappedToken, a.burner, a.burnTxHash, a.burnNonce));
         assertFalse(escrow.refundedBurns(burnId), "not refunded pre-call");
 
         vm.expectEmit(true, true, true, true);
@@ -291,6 +291,81 @@ contract BridgeEscrowBurnRefundTest is Test {
     }
 
     // =====================================================================
+    // H-1 — refundBurn shares the rolling-window dailyLimit (MED-001)
+    // =====================================================================
+
+    /// H-1 — without `_consumeMintFlowLimits` here, refundBurn is an unbounded
+    /// mint primitive: a compromised signer set re-mints arbitrarily across
+    /// fabricated (burnTxHash, burnNonce) tuples, bounded only by pause.
+    function test_refundBurn_dailyLimitExceeded_reverts() public {
+        vm.prank(owner);
+        escrow.setFlowDailyLimit(wmotoFlowId, 50e6);
+
+        BridgeEscrow.BurnRefundAuthorization memory a = _auth(100e6);
+        bytes memory sig = _signAuth(signerPk, a);
+
+        vm.expectRevert(BridgeEscrow.DailyLimitExceeded.selector);
+        escrow.refundBurn(a, sig);
+        _assertNoMint(a);
+    }
+
+    // =====================================================================
+    // M-4 — burnId binds wrappedToken + burner (per-token nonce collisions)
+    // =====================================================================
+
+    /// M-4 — `WrappedERC20.burnNonce` is per-token, so two different wrappeds
+    /// can legitimately produce the same (burnTxHash, burnNonce) pair. The
+    /// pre-fix burnId did not bind the token, so one legitimate refund would
+    /// permanently block the other. Asserts both refunds proceed independently.
+    function test_refundBurn_burnIdScopedToWrappedToken() public {
+        address burner2 = address(0xB0B2);
+        WrappedERC20 wmoto2 = new WrappedERC20(
+            "Wrapped MOTO 2",
+            "wMOTO2",
+            owner,
+            address(escrow),
+            EXPECTED_OPNET_CHAIN_ID,
+            bytes32(uint256(0xC0FFEE2))
+        );
+        vm.prank(owner);
+        bytes32 wmoto2FlowId = escrow.addFlow(
+            BridgeEscrow.FlowAddParams({
+                mode: uint8(BridgeEscrow.TokenMode.NATIVE_BURN_MINT),
+                evmChainId: TEST_EVM_CHAIN_ID,
+                evmBridge: TEST_EVM_BRIDGE,
+                evmToken: address(wmoto2),
+                evmDecimals: 6,
+                opnetBridge: TEST_OPNET_BRIDGE,
+                opnetToken: bytes32(uint256(0xC0FFEE2)),
+                opnetDecimals: 6,
+                feeBps: 0,
+                minFee: 0,
+                minAmount: 0,
+                cap: type(uint128).max,
+                dailyLimit: type(uint128).max,
+                tipCapBps: 0
+            })
+        );
+
+        // Refund #1 — wmoto + original burner.
+        BridgeEscrow.BurnRefundAuthorization memory a1 = _auth(100e6);
+        bytes memory sig1 = _signAuth(signerPk, a1);
+        escrow.refundBurn(a1, sig1);
+        assertEq(wmoto.balanceOf(burner), 100e6, "first refund minted wmoto");
+
+        // Refund #2 — same (burnTxHash, burnNonce) but a different wrapped +
+        // burner. Pre-fix this collided and reverted BurnAlreadyRefunded;
+        // post-fix the replay key is scoped, so both refunds succeed.
+        BridgeEscrow.BurnRefundAuthorization memory a2 = a1;
+        a2.wrappedToken = address(wmoto2);
+        a2.flowId = wmoto2FlowId;
+        a2.burner = burner2;
+        bytes memory sig2 = _signAuth(signerPk, a2);
+        escrow.refundBurn(a2, sig2);
+        assertEq(wmoto2.balanceOf(burner2), 100e6, "second refund minted wmoto2");
+    }
+
+    // =====================================================================
     // Helpers
     // =====================================================================
 
@@ -339,7 +414,7 @@ contract BridgeEscrowBurnRefundTest is Test {
 
     function _assertNoMint(BridgeEscrow.BurnRefundAuthorization memory a) internal view {
         assertEq(wmoto.balanceOf(a.burner), 0, "no mint on revert");
-        bytes32 burnId = keccak256(abi.encode(a.burnTxHash, a.burnNonce));
+        bytes32 burnId = keccak256(abi.encode(a.wrappedToken, a.burner, a.burnTxHash, a.burnNonce));
         assertFalse(escrow.refundedBurns(burnId), "replay flag not set on revert");
     }
 }

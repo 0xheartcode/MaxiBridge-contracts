@@ -2761,6 +2761,18 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: flow token mismatch');
         }
 
+        // H-2 — mode allowlist (mirrors claimMintWithVoucher). The bridge can
+        // only re-mint where it holds mint authority on the OPNet side, i.e.
+        // WRAPPED (0) and NATIVE_BURN_MINT (2). Without this, an attestation
+        // for a mode-1/3 flow whose `_flowOpnetToken` happens to point at an
+        // allowlisted wrapped would still mint here — defense-in-depth gap.
+        const refundMode: u256 = this._flowMode.get(flowId);
+        const isMintableWrapped: bool = refundMode.isZero();
+        const isMintableNative: bool = u256.eq(refundMode, u256.fromU32(2));
+        if (!isMintableWrapped && !isMintableNative) {
+            throw new Revert('BridgeDepository: token not in mintable mode');
+        }
+
         // ── M-of-N verify over the attestation bytes — SAME verifier the
         // vouchers + lock-refund + confirmBurn use. A bad / empty / wrong-epoch
         // / tampered-identity attestation fails here BEFORE any state change or
@@ -2771,6 +2783,25 @@ export class BridgeDepository extends ReentrancyGuard {
         // a re-entrant token (or a repeated call) cannot double-mint. This is
         // the single most important line in this method.
         this._refundedBurns.set(burnId, u256.One);
+
+        // A-1 — rolling 24h dailyLimit (mirrors claimMintWithVoucher §10b).
+        // Without this, `refundBurn` is an unbounded mint primitive: a
+        // compromised signer set could mint arbitrarily across many synthetic
+        // (burnTxHash, burnNonce) pairs, only bound by `requireNotPaused`.
+        // Keyed on `amount` (the minted quantity — mirrors EVM `H-1`).
+        const nowRefundMint: u64 = Blockchain.block.medianTimestamp;
+        const windowStartRefundMint: u64 = this._flowLastWindowStart.get(flowId).toU64();
+        let mintedTodayRefund: u256 = this._flowMintedToday.get(flowId);
+        if (nowRefundMint - windowStartRefundMint > FLOW_WINDOW_DURATION) {
+            mintedTodayRefund = u256.Zero;
+            this._flowLastWindowStart.set(flowId, u256.fromU64(nowRefundMint));
+        }
+        const newMintedRefund: u256 = SafeMath.add(mintedTodayRefund, amount);
+        const flowDailyLimitRefund: u256 = this._flowDailyLimit.get(flowId);
+        if (u256.gt(newMintedRefund, flowDailyLimitRefund)) {
+            throw new Revert('BridgeDepository: daily limit exceeded');
+        }
+        this._flowMintedToday.set(flowId, newMintedRefund);
 
         // ── INTERACTION — re-mint exactly `amount` of the wrapped token to the
         // attested burner. The bridge is the minter. `amount` is signer-
