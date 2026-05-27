@@ -318,16 +318,20 @@ contract BridgeEscrow is
     ///         and shares the incident-response surface (`pause`,
     ///         `cancelVoucher`, `removeSigner`, `migrateSignerSet`).
     /// @dev    Owner-rotatable via `setGuardian` (was set-once pre-roles PR).
-    ///         On mainnet `owner` is the 7-day TimelockController, so guardian
+    ///         On mainnet `owner` is the 3-day TimelockController, so guardian
     ///         rotation is timelock-gated — an instant-EOA owner reintroduces
-    ///         the hot-key risk this role exists to mitigate (re-audit gate).
+    ///         the hot-key risk this role exists to mitigate. H-3 (audit
+    ///         2026-05-27): consider a 2-step accept (`startGuardianTransfer`
+    ///         + `acceptGuardian`) as a follow-up if EOA owners are ever used
+    ///         in production — the timelock IS the staging mechanism today.
     address public guardian;
 
     /// @notice Destination for `emergencyWithdraw` drains.
     /// @dev    Owner-rotatable via `setTreasury` (was set-once pre-roles PR).
-    ///         On mainnet `owner` is the 7-day TimelockController, so treasury
-    ///         rotation is timelock-gated; with an instant-EOA owner a
-    ///         compromised key could redirect emergency drains (re-audit gate).
+    ///         On mainnet `owner` is the 3-day TimelockController, so treasury
+    ///         rotation is timelock-gated. H-3 (audit 2026-05-27): same 2-step
+    ///         consideration as `guardian` above — the timelock provides the
+    ///         3-day staging window for today's mainnet topology.
     address public treasury;
 
     /// @notice Unwrap fee, bps (1 bp = 0.01%). Charged on the OPNet→EVM
@@ -550,8 +554,10 @@ contract BridgeEscrow is
         address indexed by
     );
 
-    event TreasurySet(address indexed treasury);
-    event GuardianSet(address indexed guardian);
+    /// @dev H-3 (audit 2026-05-27): emits old + new for full audit-trail
+    ///      readability. Pre-fix the event carried only the new value.
+    event TreasurySet(address indexed oldTreasury, address indexed newTreasury);
+    event GuardianSet(address indexed oldGuardian, address indexed newGuardian);
     /// @notice Emitted when the dedicated pause role is set/rotated/disabled.
     event PauserSet(address indexed pauser);
 
@@ -737,7 +743,7 @@ contract BridgeEscrow is
 
     /// @notice H-01 — incident-response actions (pause, voucher
     ///         cancellation, signer removal/rotation) must stay fast even
-    ///         after `owner` is handed to the 7-day TimelockController.
+    ///         after `owner` is handed to the 3-day TimelockController.
     ///         The set-once `guardian` may invoke them alongside the owner.
     ///         Recovery actions (unpause, addSigner, setThreshold, upgrades,
     ///         flow/treasury config) remain owner-only — the timelock delay
@@ -1535,22 +1541,29 @@ contract BridgeEscrow is
 
     /// @notice Set or rotate the emergency-drain destination.
     /// @dev    Owner-rotatable (was set-once pre-roles PR). On mainnet `owner`
-    ///         is the 7-day TimelockController, so rotation is timelock-gated.
-    ///         With an instant-EOA owner this reintroduces a hot-key-drain
-    ///         redirection risk — re-audit before mainnet.
+    ///         is the 3-day TimelockController, so rotation is timelock-gated
+    ///         (the timelock IS the staging step). H-3 (audit 2026-05-27):
+    ///         emits the OLD treasury alongside the new for full audit-trail
+    ///         readability — a forgotten or accidental rotation now shows up
+    ///         with both values in the indexer. If EOA owners are ever used,
+    ///         consider adding an explicit `startTreasuryTransfer` /
+    ///         `acceptTreasury` 2-step on top (see `treasury` storage doc).
     function setTreasury(address newTreasury) external onlyOwner {
         if (newTreasury == address(0)) revert ZeroAddress();
+        address old = treasury;
         treasury = newTreasury;
-        emit TreasurySet(newTreasury);
+        emit TreasurySet(old, newTreasury);
     }
 
     /// @notice Set or rotate the guardian (incident-response co-signer).
     /// @dev    Owner-rotatable (was set-once pre-roles PR). Timelock-gated on
-    ///         mainnet; instant-EOA owner reintroduces hot-key risk — re-audit.
+    ///         mainnet (3 days). H-3 — emits old + new for audit-trail parity
+    ///         with `setTreasury`. Same 2-step follow-up consideration applies.
     function setGuardian(address newGuardian) external onlyOwner {
         if (newGuardian == address(0)) revert ZeroAddress();
+        address old = guardian;
         guardian = newGuardian;
-        emit GuardianSet(newGuardian);
+        emit GuardianSet(old, newGuardian);
     }
 
     /// @notice Update the unwrap fee bps. Capped at `MAX_FEE_BPS = 1000`
@@ -1664,8 +1677,11 @@ contract BridgeEscrow is
     ///
     /// @dev    Permissionless to *call* — the tokens always go to the
     ///         signer-attested `intent.burner`, so anyone may submit the blob.
-    ///         NOT pause-gated: like `markDepositRefundable`/`refundLockedDeposit`,
-    ///         recovery must stay possible during an incident freeze.
+    ///         M-5 — IS pause-gated (`whenNotPaused`). Unlike
+    ///         `markDepositRefundable` / `refundLockedDeposit` which return
+    ///         user PRINCIPAL during a freeze (no new asset created),
+    ///         `refundBurn` is a MINT primitive and pause halts mint authority
+    ///         system-wide (mirrors OPNet `requireNotPaused`).
     ///
     ///         Replay guard: `keccak256(abi.encode(burnTxHash, burnNonce))` is
     ///         set BEFORE the cross-contract mint (CEI) — the ONLY protection

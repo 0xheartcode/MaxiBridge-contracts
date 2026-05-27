@@ -2433,8 +2433,12 @@ export class BridgeDepository extends ReentrancyGuard {
     )
     @emit('LockMarkedRefundable')
     public markLockRefundable(calldata: Calldata): BytesWriter {
-        this.requireNotPaused();
-
+        // A-2 — NOT pause-gated (mirrors EVM `markDepositRefundable`).
+        // Lock-refund returns user PRINCIPAL — no new asset is created —
+        // and must stay possible during an incident freeze so operators
+        // can recover stranded locks even while the bridge is halted.
+        // The signer-set + epoch + identity binding is the entire trust
+        // anchor; pause does not gate this path on either chain.
         const lockNonce: u256 = calldata.readU256();
         const sig: Uint8Array = calldata.readBytesWithLength();
 
@@ -3318,11 +3322,19 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     /**
-     * Roles PR — strict governor handoff. Unlike `setGovernor` (which also
-     * accepts the registered BridgeAuthority to keep its cascade workable),
-     * `transferGovernor` is gated `onlyGovernor`: only the CURRENT governor
-     * may name its successor. After this lands the old governor immediately
-     * loses every `onlyGovernor`-gated surface.
+     * Roles PR — strict governor handoff at the governor key only.
+     *
+     * M-2 (audit 2026-05-27 clarification): "strict" is relative to the
+     * governor key — gated `onlyGovernor`, so only the CURRENT governor
+     * may name its successor via this path. After this lands, the old
+     * governor immediately loses every `onlyGovernor`-gated surface.
+     *
+     * However, the REGISTERED BRIDGE AUTHORITY can ALSO swap the governor
+     * via `setGovernor` (`onlyGovernorOrAuthority`) — that cascade exists
+     * by design so the authority can pivot the role during its own
+     * rotation ceremony (closes #16b). Reviewers must NOT assume that the
+     * governor key is the sole successor authority while
+     * `_authorityAddress` is non-zero.
      */
     @method({ name: 'newGovernor', type: ABIDataTypes.ADDRESS })
     @emit('GovernorUpdated')

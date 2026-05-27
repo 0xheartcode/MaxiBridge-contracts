@@ -881,8 +881,10 @@ contract BridgeEscrowTest is Test {
 
     function test_SetTreasury_Succeeds() public {
         vm.prank(owner);
-        vm.expectEmit(true, false, false, false);
-        emit BridgeEscrow.TreasurySet(treasuryAddr);
+        // H-3 (audit 2026-05-27): event now carries (oldTreasury, newTreasury).
+        // initialize() leaves treasury == address(0), so old == 0 on first set.
+        vm.expectEmit(true, true, false, false);
+        emit BridgeEscrow.TreasurySet(address(0), treasuryAddr);
         escrow.setTreasury(treasuryAddr);
         assertEq(escrow.treasury(), treasuryAddr);
     }
