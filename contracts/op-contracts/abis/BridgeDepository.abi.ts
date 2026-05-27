@@ -588,7 +588,7 @@ export const BridgeDepositoryAbi = [
         name: 'markLockRefundable',
         inputs: [
             { name: 'lockNonce', type: ABIDataTypes.UINT256 },
-            { name: 'attestation', type: ABIDataTypes.BYTES },
+            { name: 'sig', type: ABIDataTypes.BYTES },
         ],
         outputs: [],
         type: BitcoinAbiTypes.Function,

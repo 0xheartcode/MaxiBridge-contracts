@@ -696,7 +696,7 @@
                     "type": "UINT256"
                 },
                 {
-                    "name": "attestation",
+                    "name": "sig",
                     "type": "BYTES"
                 }
             ],

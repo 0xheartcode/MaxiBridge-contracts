@@ -769,15 +769,17 @@ export class BridgeDepository extends ContractRuntime {
         'isLockRefundable()',
     );
 
+    // HARDENED: the contract rebuilds the RefundAuthorization preimage from
+    // its own stored lock record + chain data; only the M-of-N sig blob is
+    // sent on the wire (ABI signature `markLockRefundable(uint256,bytes)`
+    // unchanged → selector stable).
     public async markLockRefundable(
         lockNonce: bigint,
-        attestation: Uint8Array,
         mldsaSig: Uint8Array,
     ): Promise<void> {
         const w = new BinaryWriter();
         w.writeSelector(this.markLockRefundableSelector);
         w.writeU256(lockNonce);
-        w.writeBytesWithLength(attestation);
         w.writeBytesWithLength(mldsaSig);
         await this.getResponse(w.getBuffer());
     }
@@ -789,7 +791,8 @@ export class BridgeDepository extends ContractRuntime {
         await this.getResponse(w.getBuffer());
     }
 
-    // Returns [status, user, token, flowId, amount, fee, mode] as 7 × u256.
+    // Returns [status, user, token, flowId, amount, fee, mode, blockNumber]
+    // as 8 × u256.
     public async lockRecord(lockNonce: bigint): Promise<bigint[]> {
         const w = new BinaryWriter();
         w.writeSelector(this.lockRecordSelector);
@@ -797,7 +800,7 @@ export class BridgeDepository extends ContractRuntime {
         const r = await this.getResponse(w.getBuffer());
         const blob = r.readBytesWithLength();
         const out: bigint[] = [];
-        for (let i = 0; i < 7; i++) {
+        for (let i = 0; i < 8; i++) {
             let v = 0n;
             for (let j = 0; j < 32; j++) {
                 v = (v << 8n) | BigInt(blob[i * 32 + j]!);

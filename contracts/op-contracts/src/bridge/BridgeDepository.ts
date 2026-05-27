@@ -156,23 +156,36 @@ const CONFIRM_BURN_SELECTOR: u32 = 0x9cffeea6;
  * Trustless stranded-lock refund (mirror of EVM
  * `BridgeEscrow.markDepositRefundable` + `refundLockedDeposit`).
  *
- * RefundAuthorization preimage length — 136 bytes total. Built in
- * `markLockRefundable` and SHA-256'd before M-of-N verify, exactly like the
- * 252-byte BurnAttestation. Layout (see the `markLockRefundable` doc):
- *   networkId    u256    32   (0)
- *   contractSelf Address 32   (32)
- *   selector     u32      4   (64)  — sha256('markLockRefundable(uint256,bytes)')
- *   lockNonce    u256    32   (68)
- *   flowId       u256    32   (100)
- *   signerEpoch  u32      4   (132)
- *                             = 136
+ * RefundAuthorization preimage length — 264 bytes total. The preimage is
+ * REBUILT inside `markLockRefundable` from the STORED lock record's fields +
+ * chain data (NOT from caller-supplied bytes) and SHA-256'd before M-of-N
+ * verify, exactly like the 252-byte BurnAttestation. Layout:
+ *   networkId       u256    32   (0)    — domain separation
+ *   contractSelf    Address 32   (32)   — this depository's identity
+ *   selector        u32      4   (64)   — sha256('markLockRefundable(uint256,bytes)')
+ *   lockNonce       u256    32   (68)    — the lock being authorized
+ *   flowId          u256    32   (100)   — stored _lockFlowId[lockNonce]
+ *   user            u256    32   (132)   — stored _lockUser[lockNonce] (locker identity)
+ *   canonicalToken  u256    32   (164)   — stored _lockToken[lockNonce]
+ *   amount          u256    32   (196)   — stored _lockAmount[lockNonce] (gross)
+ *   lockBlockNumber u256    32   (228)   — stored _lockBlock[lockNonce] (reorg guard)
+ *   signerEpoch     u32      4   (260)   — current _signerEpoch
+ *                                = 264
+ *
+ * HARDENING (reorg + identity binding): the preimage binds the lock's full
+ * IDENTITY (user, token, amount, lockBlockNumber) in addition to lockNonce +
+ * flowId. Under a deep OPNet/BTC reorg a `lockNonce` could be re-assigned to a
+ * DIFFERENT lock; binding the identity tuple means an attestation signed for
+ * one lock can NEVER verify against a record whose stored fields differ — the
+ * rebuilt preimage simply won't hash to what the signer signed. `lockBlockNumber`
+ * is the reorg guard, mirroring the voucher path's `sourceBlockHash` (CLAUDE.md §6).
  *
  * The server signer attests (off-chain) that the EVM far-leg of this OPNet
  * lock was cancelled / never claimed, so the locked principal can be safely
  * returned. The contract verifies the attestation against the SAME M-of-N
  * signer set that authorizes vouchers/burns — no new trust assumption.
  */
-const REFUND_AUTHORIZATION_LEN: i32 = 136;
+const REFUND_AUTHORIZATION_LEN: i32 = 264;
 
 /**
  * SHA-256 selector of `markLockRefundable(uint256,bytes)` first 4 bytes —
@@ -488,11 +501,19 @@ export class BridgeDepository extends ReentrancyGuard {
     //   _lockMode        → the flow mode at lock time (1/3/4). Pinned per
     //                      lock so the refund decrements inventory only for
     //                      mode 1 (the sole mode lockForBridge credited).
+    //   _lockBlock       → REORG GUARD. `Blockchain.block.number` captured at
+    //                      lock time, as u256. Bound into the RefundAuthorization
+    //                      preimage so an attestation can only ever apply to the
+    //                      lock recorded at that exact block. Mirrors the voucher
+    //                      path's `sourceBlockHash` (CLAUDE.md §6) — under a deep
+    //                      OPNet/BTC reorg a re-assigned `lockNonce` carries a
+    //                      different block, so the rebuilt preimage won't match.
     //
     // All NEW pointers appended AFTER `_guardian` to preserve append-only
-    // storage discipline. `onUpdate` bumps `_storageVersion` 4→5; no field
-    // seeding is required (unwritten StoredMapU256 slots read zero, which is
-    // LOCK_STATUS_NONE / zero everywhere — the correct "no such lock" base).
+    // storage discipline. Fresh deploy ships these baked into the v1 baseline
+    // layout (no in-place migration — the whole OPNet stack redeploys fresh,
+    // see onUpdate). Unwritten StoredMapU256 slots read zero (LOCK_STATUS_NONE /
+    // zero everywhere — the correct "no such lock" base).
     private _lockStatus: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
     private _lockUser: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
     private _lockToken: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
@@ -500,6 +521,7 @@ export class BridgeDepository extends ReentrancyGuard {
     private _lockAmount: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
     private _lockFee: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
     private _lockMode: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _lockBlock: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
     public constructor() {
         super();
@@ -537,12 +559,15 @@ export class BridgeDepository extends ReentrancyGuard {
         }
         this._networkId.value = networkId;
 
-        // Fresh deployments ship at the current storage version so no
-        // migration branch runs on a clean deploy. Roles PR → version 4
-        // (v1 baseline, v2 M-of-N seed, v3 dedicated pauser + treasury,
-        // v4 dedicated guardian + emergencyWithdraw, v5 stranded-lock refund
-        // ledger).
-        this._storageVersion.value = u256.fromU32(5);
+        // Fresh-baseline storage version. This stack is a FRESH redeploy (not
+        // an in-place upgrade of the prior mainnet depository — #68 Tier C
+        // already forces fresh non-upgradeable wrappers, so the WHOLE OPNet
+        // stack redeploys). The historical v2→v5 migration ladder is therefore
+        // dead weight and has been removed; a clean deploy ships at v1 with all
+        // role/refund fields present (StoredAddress/StoredMapU256 slots read
+        // zero, which is the correct fail-closed / "no such lock" base). A
+        // future POST-LAUNCH upgrade can start a fresh ladder from v1.
+        this._storageVersion.value = u256.fromU32(1);
         // Signer epoch starts at 1 so "epoch 0" is invalid by construction.
         this._signerEpoch.value = u256.One;
     }
@@ -562,10 +587,8 @@ export class BridgeDepository extends ReentrancyGuard {
         // Once the governor wires `_upgradeAuthority`, every subsequent
         // upgrade must be authorized via `proposeUpgrade()`. The flag is
         // consumed (cleared) here so each upgrade requires a fresh
-        // hand-shake. Until the authority is wired, the legacy
-        // deployer-only path remains active so the v1 bootstrap upgrade
-        // (which seeds storageVersion → 2) can land without a chicken-
-        // and-egg problem.
+        // hand-shake. Until the authority is wired, the legacy deployer-only
+        // path remains active (v1 bootstrap window).
         const upgradeAuthority: Address = this._upgradeAuthority.value;
         if (!upgradeAuthority.isZero()) {
             if (!this._pendingUpgradeAuthorized.value) {
@@ -575,55 +598,17 @@ export class BridgeDepository extends ReentrancyGuard {
             this._pendingUpgradeAuthorized.value = false;
         }
 
-        // Append-only migrations gated by _storageVersion. Every branch
-        // re-runs only once thanks to the version gate.
-        const version = this._storageVersion.value;
-        if (u256.lt(version, u256.fromU32(2))) {
-            // Phase 1.3 migration — seed the M-of-N signer set from the
-            // legacy single-signer state so the new claim path works
-            // immediately after the upgrade.
-            const epoch: u256 = this._signerEpoch.value;
-            const legacyHash: u256 = this._bridgeSignerHashes.get(epoch);
-            if (!legacyHash.isZero()) {
-                this._signerKeyHashSet.set(legacyHash, u256.One);
-                this._signerCount.value = u256.One;
-            }
-            this._requiredSignatures.value = u256.One;
-            // _authorityAddress left zero — governor sets it via a
-            // separate `setAuthorityAddress` call after upgrade.
-            this._storageVersion.value = u256.fromU32(2);
-        }
-        if (u256.lt(this._storageVersion.value, u256.fromU32(3))) {
-            // Roles PR migration — the dedicated pauser role ships disabled.
-            // StoredAddress reads zero on an unwritten slot, so this seed is
-            // belt-and-suspenders; the governor wires it via `setPauser`.
-            this._pauser.value = Address.zero();
-            // Treasury ships unset → `withdrawFees` is fail-closed until the
-            // governor wires it via `setTreasury`.
-            this._treasury.value = Address.zero();
-            this._storageVersion.value = u256.fromU32(3);
-        }
-        if (u256.lt(this._storageVersion.value, u256.fromU32(4))) {
-            // Roles-mirror PR migration — the dedicated guardian role ships
-            // disabled. StoredAddress reads zero on an unwritten slot, so this
-            // seed is belt-and-suspenders; the governor wires it via
-            // `setGuardian`. `emergencyWithdraw` stays fail-closed (guardian
-            // unset + treasury unset) until both are wired.
-            this._guardian.value = Address.zero();
-            this._storageVersion.value = u256.fromU32(4);
-        }
-        if (u256.lt(this._storageVersion.value, u256.fromU32(5))) {
-            // Trustless stranded-lock refund migration — the per-lock ledger
-            // (`_lockStatus` etc.) is purely additive. Unwritten StoredMapU256
-            // slots read zero (LOCK_STATUS_NONE / zero), which is the correct
-            // "no such lock" base for every lockNonce, so no seeding is
-            // required: locks recorded BEFORE this upgrade simply have no
-            // refund record (NONE) and are unaffected, exactly like the EVM
-            // side where pre-upgrade deposits carry status None and cannot be
-            // refunded through this path (governor `drainInventoryOpNet`
-            // remains their recovery route).
-            this._storageVersion.value = u256.fromU32(5);
-        }
+        // ── Storage-version migration ladder — INTENTIONALLY EMPTY ──
+        // This stack is a FRESH redeploy, not an in-place upgrade of the prior
+        // mainnet depository (#68 Tier C forces fresh non-upgradeable wrappers,
+        // so the whole OPNet stack redeploys). `onDeployment` ships a clean v1
+        // baseline with every role/refund field present, so the historical
+        // v2→v5 migration steps are dead weight and have been removed. The
+        // append-only storage discipline still governs FUTURE upgrades — a
+        // future post-launch upgrade adds `if (version < 2) { … }` blocks here,
+        // starting a fresh ladder from this v1 baseline. Field/pointer order is
+        // unchanged (that order IS the canonical fresh layout); only the dead
+        // historical migration steps are deleted.
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1742,6 +1727,10 @@ export class BridgeDepository extends ReentrancyGuard {
         this._lockAmount.set(nextNonce, received);
         this._lockFee.set(nextNonce, lockFee);
         this._lockMode.set(nextNonce, mode);
+        // Reorg guard — pin the block this lock was recorded at. Bound into the
+        // RefundAuthorization preimage so an attestation can never apply to a
+        // lockNonce re-assigned to a different lock under a deep reorg.
+        this._lockBlock.set(nextNonce, Blockchain.block.numberU256);
 
         // Pack evmRecipient (32B) into a u256 for event encoding.
         const evmRecipU256: u256 = u256.fromUint8ArrayBE(evmRecipient);
@@ -2321,12 +2310,16 @@ export class BridgeDepository extends ReentrancyGuard {
     //  (lockForBridge, modes 1/3/4) gain the SAME user-initiated recovery the
     //  EVM-source locks already have. Two steps, mirroring the EVM lattice:
     //
-    //    1. markLockRefundable(lockNonce, attestationBlob) — permissionless
-    //       with a VALID M-of-N attestation. The signer set attests the EVM
-    //       far-leg was cancelled / never claimed; on success the lock moves
-    //       LOCKED → REFUNDABLE. (Mirror of EVM markDepositRefundable, which
-    //       takes a single EIP-712 sig; here the OPNet M-of-N envelope is the
-    //       analog — same signer set, same trust model as vouchers/burns.)
+    //    1. markLockRefundable(lockNonce, mofnSigBlob) — permissionless with a
+    //       VALID M-of-N signature. The signer set attests the EVM far-leg was
+    //       cancelled / never claimed; on success the lock moves LOCKED →
+    //       REFUNDABLE. (Mirror of EVM markDepositRefundable, which takes a
+    //       single EIP-712 sig; here the OPNet M-of-N envelope is the analog —
+    //       same signer set, same trust model as vouchers/burns.) The 264-byte
+    //       RefundAuthorization preimage is REBUILT from the stored lock record
+    //       (user/token/amount/lockBlock/flowId) + chain data, so the signature
+    //       is bound to the lock's full IDENTITY + a reorg guard — a re-assigned
+    //       nonce or reorged lock can never match.
     //
     //    2. refundLock(lockNonce) — the locker (anyone, but funds go to the
     //       recorded user) reclaims the FULL gross principal. CEI: status →
@@ -2339,35 +2332,35 @@ export class BridgeDepository extends ReentrancyGuard {
      * Mark a stranded lock refundable against an M-of-N attestation.
      * Permissionless-with-valid-sig (mirrors EVM `markDepositRefundable`).
      *
-     * RefundAuthorization preimage (136 bytes — see REFUND_AUTHORIZATION_LEN):
-     *   networkId    u256    32   (0)   — domain separation
-     *   contractSelf Address 32   (32)  — this depository's identity
-     *   selector     u32      4   (64)  — sha256('markLockRefundable(uint256,bytes)')
-     *   lockNonce    u256    32   (68)  — the lock being authorized
-     *   flowId       u256    32   (100) — must equal the recorded lock flowId
-     *   signerEpoch  u32      4   (132) — must equal current _signerEpoch
-     *                             = 136
+     * HARDENED (reorg + identity binding): the 264-byte RefundAuthorization
+     * preimage is REBUILT here from the STORED lock record's fields + chain
+     * data (NOT from caller-supplied bytes), then verified via `_verifyMofN`.
+     * The signer must therefore have signed over the EXACT tuple (networkId,
+     * contractSelf, selector, lockNonce, flowId, user, token, amount,
+     * lockBlockNumber, signerEpoch) for THIS lock. A `lockNonce` re-assigned to
+     * a different lock under a deep reorg, or any field drift, makes the rebuilt
+     * preimage hash to something the signer never signed → ML-DSA verify fails.
+     * See REFUND_AUTHORIZATION_LEN for the byte layout.
+     *
+     * ABI signature stays `markLockRefundable(uint256,bytes)` (selector
+     * 0xcdcd9059 unchanged) — the `bytes` arg is the M-of-N SIG BLOB. (The
+     * preimage is no longer transmitted; it is reconstructed from storage.)
      *
      * Replay-guard: requires status == LOCKED; rejects NONE (no such lock),
-     * REFUNDABLE (already marked), and REFUNDED. The signer-set + epoch
-     * binding is the entire authorization — a bad / empty / wrong-epoch /
-     * wrong-flow / wrong-selector attestation reverts before any state change.
+     * REFUNDABLE (already marked), and REFUNDED. The signer-set + epoch +
+     * identity binding is the entire authorization — a bad / empty /
+     * wrong-epoch / wrong-identity sig reverts before any state change.
      */
     @method(
         { name: 'lockNonce', type: ABIDataTypes.UINT256 },
-        { name: 'attestation', type: ABIDataTypes.BYTES },
+        { name: 'sig', type: ABIDataTypes.BYTES },
     )
     @emit('LockMarkedRefundable')
     public markLockRefundable(calldata: Calldata): BytesWriter {
         this.requireNotPaused();
 
         const lockNonce: u256 = calldata.readU256();
-        const attestation: Uint8Array = calldata.readBytesWithLength();
         const sig: Uint8Array = calldata.readBytesWithLength();
-
-        if (attestation.length != REFUND_AUTHORIZATION_LEN) {
-            throw new Revert('BridgeDepository: bad refund-auth length');
-        }
 
         // Replay / state guard FIRST — cheap reverts before the ML-DSA verify.
         const status: u32 = this._lockStatus.get(lockNonce).toU32();
@@ -2381,42 +2374,38 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: lock not in locked state');
         }
 
-        // Parse + bind the fixed-layout preimage.
-        const networkId: u256 = readU256BE(attestation, 0);
-        if (!u256.eq(networkId, this._networkId.value)) {
-            throw new Revert('BridgeDepository: wrong networkId');
-        }
-        const contractSelf: Address = readAddress(attestation, 32);
-        if (!contractSelf.equals(this.address)) {
-            throw new Revert('BridgeDepository: wrong contractSelf');
-        }
-        const selector: u32 = readU32BE(attestation, 64);
-        if (selector != MARK_LOCK_REFUNDABLE_SELECTOR) {
-            throw new Revert('BridgeDepository: wrong selector');
-        }
-        const parsedLockNonce: u256 = readU256BE(attestation, 68);
-        if (!u256.eq(parsedLockNonce, lockNonce)) {
-            throw new Revert('BridgeDepository: lockNonce mismatch');
-        }
-        // Bind the attestation flowId to the recorded lock flowId so a sig
-        // for one lock can never authorize a different lock's flow.
-        const attFlowId: u256 = readU256BE(attestation, 100);
-        if (!u256.eq(attFlowId, this._lockFlowId.get(lockNonce))) {
-            throw new Revert('BridgeDepository: flowId mismatch');
-        }
-        const sigEpoch: u32 = readU32BE(attestation, 132);
-        if (sigEpoch != this._signerEpoch.value.toU32()) {
-            throw new Revert('BridgeDepository: wrong signerEpoch');
-        }
+        // ── Rebuild the 264-byte RefundAuthorization preimage from the STORED
+        // lock record + chain data. This binds the lock's full identity so an
+        // attestation can only ever apply to the exact lock it was signed for.
+        const flowId: u256 = this._lockFlowId.get(lockNonce);
+        const userU256: u256 = this._lockUser.get(lockNonce);
+        const tokenU256: u256 = this._lockToken.get(lockNonce);
+        const amount: u256 = this._lockAmount.get(lockNonce);
+        const lockBlock: u256 = this._lockBlock.get(lockNonce);
+        const epoch: u256 = this._signerEpoch.value;
+
+        const pre = new BytesWriter(REFUND_AUTHORIZATION_LEN);
+        pre.writeU256(this._networkId.value);          // 0
+        pre.writeAddress(this.address);                // 32
+        pre.writeSelector(MARK_LOCK_REFUNDABLE_SELECTOR); // 64
+        pre.writeU256(lockNonce);                      // 68
+        pre.writeU256(flowId);                         // 100
+        pre.writeU256(userU256);                       // 132 — locker identity
+        pre.writeU256(tokenU256);                      // 164 — canonical token
+        pre.writeU256(amount);                         // 196 — gross
+        pre.writeU256(lockBlock);                      // 228 — reorg guard
+        pre.writeU32(epoch.toU32());                   // 260 — current epoch
+        const preimage: Uint8Array = pre.getBuffer();
 
         // M-of-N verify against the signer set at the current epoch — SAME
-        // verifier the vouchers + confirmBurn use.
-        this._verifyMofN(sig, attestation);
+        // verifier the vouchers + confirmBurn use. The signer's signature must
+        // match the rebuilt preimage exactly (identity + reorg binding).
+        this._verifyMofN(sig, preimage);
 
         // Authorized — move LOCKED → REFUNDABLE.
         this._lockStatus.set(lockNonce, u256.fromU32(LOCK_STATUS_REFUNDABLE));
 
-        this.emitEvent(new LockMarkedRefundable(lockNonce, attFlowId));
+        this.emitEvent(new LockMarkedRefundable(lockNonce, flowId));
         return new BytesWriter(0);
     }
 
@@ -2514,7 +2503,7 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     /**
-     * @view — full lock record for a nonce, packed as 7 × u256 (224 bytes,
+     * @view — full lock record for a nonce, packed as 8 × u256 (256 bytes,
      * length-prefixed BYTES). Order:
      *   [0] status (0 NONE / 1 LOCKED / 2 REFUNDABLE / 3 REFUNDED)
      *   [1] user      (u256 of OPNet identity)
@@ -2523,12 +2512,13 @@ export class BridgeDepository extends ReentrancyGuard {
      *   [4] amount    (gross received at lock time)
      *   [5] fee       (carved lock fee)
      *   [6] mode
+     *   [7] blockNumber (reorg guard — block this lock was recorded at)
      */
     @method({ name: 'lockNonce', type: ABIDataTypes.UINT256 })
     @returns({ name: 'record', type: ABIDataTypes.BYTES })
     public lockRecord(calldata: Calldata): BytesWriter {
         const lockNonce: u256 = calldata.readU256();
-        const buf = new BytesWriter(32 * 7);
+        const buf = new BytesWriter(32 * 8);
         buf.writeU256(this._lockStatus.get(lockNonce));
         buf.writeU256(this._lockUser.get(lockNonce));
         buf.writeU256(this._lockToken.get(lockNonce));
@@ -2536,7 +2526,8 @@ export class BridgeDepository extends ReentrancyGuard {
         buf.writeU256(this._lockAmount.get(lockNonce));
         buf.writeU256(this._lockFee.get(lockNonce));
         buf.writeU256(this._lockMode.get(lockNonce));
-        const r = new BytesWriter(32 + 32 * 7);
+        buf.writeU256(this._lockBlock.get(lockNonce));
+        const r = new BytesWriter(32 + 32 * 8);
         r.writeBytesWithLength(buf.getBuffer());
         return r;
     }

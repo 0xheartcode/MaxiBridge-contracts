@@ -8,8 +8,11 @@
  * SAME trust model that authorizes vouchers + confirmBurn).
  *
  * Two steps:
- *   1. markLockRefundable(lockNonce, attestation) — permissionless with a
- *      valid M-of-N RefundAuthorization. LOCKED → REFUNDABLE.
+ *   1. markLockRefundable(lockNonce, sig) — permissionless with a valid M-of-N
+ *      RefundAuthorization. HARDENED: the contract REBUILDS the 264-byte
+ *      preimage from the stored lock record's IDENTITY (user/token/amount/
+ *      lockBlock) + flowId + chain data, so the signature binds the lock's full
+ *      identity + a reorg guard. LOCKED → REFUNDABLE.
  *   2. refundLock(lockNonce) — returns the FULL gross principal to the
  *      recorded locker; reverses the mode-1 inventory credit + the carved fee
  *      (fee NOT promoted), preserving `inventory + accruedFees == balance`.
@@ -22,9 +25,12 @@
  *   ✓ refundLock before markLockRefundable reverts
  *   ✓ double-refundLock reverts
  *   ✓ markLockRefundable twice reverts (already refundable)
- *   ✓ markLockRefundable with empty / wrong-length attestation reverts
  *   ✓ markLockRefundable with wrong signerEpoch reverts
- *   ✓ markLockRefundable with wrong flowId reverts
+ *   ✓ markLockRefundable with wrong flowId (identity drift) reverts
+ *   ✓ markLockRefundable with wrong user (identity drift) reverts
+ *   ✓ markLockRefundable with wrong amount (identity drift) reverts
+ *   ✓ identity-mismatch / replay: a sig built for lock A is rejected against
+ *     lock B (different record) — the reorg/replay guard
  *   ✓ markLockRefundable with unsigned (garbage) sig reverts
  *   ✓ markLockRefundable / refundLock on non-existent lockNonce reverts
  *
@@ -42,7 +48,7 @@ import { BridgeDepository } from '../contracts/BridgeDepository.js';
 // ─── Constants — must mirror BridgeDepository.ts ──────────────────────────
 const VOUCHER_NETWORK_ID: bigint = 2n;
 const ETH_CHAIN_ID: bigint = 1n;
-const REFUND_AUTHORIZATION_LEN = 136;
+const REFUND_AUTHORIZATION_LEN = 264;
 const MARK_LOCK_REFUNDABLE_SELECTOR: number = 0xcdcd9059;
 
 const FEE_BPS = 50n; // 0.5%
@@ -137,15 +143,24 @@ function writeAddress(buf: Uint8Array, off: number, addr: Address): void {
     for (let i = 0; i < 32; i++) buf[off + i] = bytes[i]!;
 }
 
-// ─── RefundAuthorization preimage (136 bytes) ─────────────────────────────
+// ─── RefundAuthorization preimage (264 bytes) ─────────────────────────────
 // networkId(32) ‖ contractSelf(32) ‖ selector(4) ‖ lockNonce(32) ‖
-// flowId(32) ‖ signerEpoch(4)
+// flowId(32) ‖ user(32) ‖ canonicalToken(32) ‖ amount(32) ‖
+// lockBlockNumber(32) ‖ signerEpoch(4)
+//
+// The CONTRACT rebuilds this exact layout from its stored lock record + chain
+// data; the test signs over the SAME bytes. Identity fields (user/token/amount/
+// lockBlock) come from the on-chain `lockRecord` (see `authFromRecord`).
 interface RefundAuthFields {
     networkId?: bigint;
     contractSelf: Address;
     selector?: number;
     lockNonce: bigint;
     flowId: bigint;
+    user: bigint;
+    token: bigint;
+    amount: bigint;
+    lockBlock: bigint;
     signerEpoch?: number;
 }
 
@@ -156,8 +171,33 @@ function buildRefundAuth(f: RefundAuthFields): { preimage: Uint8Array; hash: Uin
     writeU32BE(buf, 64, f.selector ?? MARK_LOCK_REFUNDABLE_SELECTOR);
     writeU256BE(buf, 68, f.lockNonce);
     writeU256BE(buf, 100, f.flowId);
-    writeU32BE(buf, 132, f.signerEpoch ?? 1);
+    writeU256BE(buf, 132, f.user);
+    writeU256BE(buf, 164, f.token);
+    writeU256BE(buf, 196, f.amount);
+    writeU256BE(buf, 228, f.lockBlock);
+    writeU32BE(buf, 260, f.signerEpoch ?? 1);
     return { preimage: buf, hash: sha256(buf) };
+}
+
+// Build the canonical (matching-the-contract) RefundAuthorization from the
+// on-chain lock record. `rec` is the 8 × u256 lockRecord array:
+//   [0]status [1]user [2]token [3]flowId [4]amount [5]fee [6]mode [7]blockNumber
+function authFromRecord(
+    contractSelf: Address,
+    lockNonce: bigint,
+    rec: bigint[],
+    overrides: Partial<RefundAuthFields> = {},
+): { preimage: Uint8Array; hash: Uint8Array } {
+    return buildRefundAuth({
+        contractSelf,
+        lockNonce,
+        flowId: rec[3]!,
+        user: rec[1]!,
+        token: rec[2]!,
+        amount: rec[4]!,
+        lockBlock: rec[7]!,
+        ...overrides,
+    });
 }
 
 // M=N=1 sig blob — same packer the confirm-burn / voucher tests use.
@@ -272,16 +312,13 @@ await opnet('BridgeDepository.stranded-lock-refund — mode-1 happy path', async
         Assert.expect(rec[6]!).toEqual(1n); // mode
         Assert.expect(await depository.isLockRefundable(lockNonce)).toEqual(false);
 
-        // Mark refundable with a valid M-of-N attestation.
-        const { preimage, hash } = buildRefundAuth({
-            contractSelf: setup.depositoryAddress,
-            lockNonce,
-            flowId,
-        });
+        // Mark refundable with a valid M-of-N attestation — signed over the
+        // identity-bound preimage rebuilt from the on-chain lock record.
+        const { hash } = authFromRecord(setup.depositoryAddress, lockNonce, rec);
         const sig = signAuth(setup.signerWallet, hash);
         // Permissionless — alice (the locker) submits, but anyone could.
         setSender(alice);
-        await depository.markLockRefundable(lockNonce, preimage, sig);
+        await depository.markLockRefundable(lockNonce, sig);
         Assert.expect(await depository.isLockRefundable(lockNonce)).toEqual(true);
 
         const aliceBefore = await setup.wusdc.balanceOf(alice);
@@ -306,13 +343,10 @@ await opnet('BridgeDepository.stranded-lock-refund — mode-1 happy path', async
         const { depository } = setup;
         const flowId = await registerFlow(setup, 1n);
         const lockNonce = await fundLock(setup, flowId, 2_000_000n);
-        const { preimage, hash } = buildRefundAuth({
-            contractSelf: setup.depositoryAddress,
-            lockNonce,
-            flowId,
-        });
+        const rec = await depository.lockRecord(lockNonce);
+        const { hash } = authFromRecord(setup.depositoryAddress, lockNonce, rec);
         setSender(alice);
-        await depository.markLockRefundable(lockNonce, preimage, signAuth(setup.signerWallet, hash));
+        await depository.markLockRefundable(lockNonce, signAuth(setup.signerWallet, hash));
         await depository.refundLock(lockNonce);
         await Assert.expect(async () => {
             await depository.refundLock(lockNonce);
@@ -333,16 +367,13 @@ await opnet('BridgeDepository.stranded-lock-refund — mode-1 happy path', async
         const { depository } = setup;
         const flowId = await registerFlow(setup, 1n);
         const lockNonce = await fundLock(setup, flowId, 2_000_000n);
-        const { preimage, hash } = buildRefundAuth({
-            contractSelf: setup.depositoryAddress,
-            lockNonce,
-            flowId,
-        });
+        const rec = await depository.lockRecord(lockNonce);
+        const { hash } = authFromRecord(setup.depositoryAddress, lockNonce, rec);
         const sig = signAuth(setup.signerWallet, hash);
         setSender(alice);
-        await depository.markLockRefundable(lockNonce, preimage, sig);
+        await depository.markLockRefundable(lockNonce, sig);
         await Assert.expect(async () => {
-            await depository.markLockRefundable(lockNonce, preimage, sig);
+            await depository.markLockRefundable(lockNonce, sig);
         }).toThrow();
     });
 });
@@ -375,13 +406,10 @@ await opnet('BridgeDepository.stranded-lock-refund — mode-3 happy path', async
         Assert.expect(await depository.accruedFees(flowId)).toEqual(fee);
         Assert.expect(await bridgeBalance(setup)).toEqual(amount);
 
-        const { preimage, hash } = buildRefundAuth({
-            contractSelf: setup.depositoryAddress,
-            lockNonce,
-            flowId,
-        });
+        const rec = await depository.lockRecord(lockNonce);
+        const { hash } = authFromRecord(setup.depositoryAddress, lockNonce, rec);
         setSender(alice);
-        await depository.markLockRefundable(lockNonce, preimage, signAuth(setup.signerWallet, hash));
+        await depository.markLockRefundable(lockNonce, signAuth(setup.signerWallet, hash));
 
         const aliceBefore = await setup.wusdc.balanceOf(alice);
         await depository.refundLock(lockNonce);
@@ -403,6 +431,7 @@ await opnet('BridgeDepository.stranded-lock-refund — bad attestations', async 
     let setup: Setup;
     let flowId: bigint;
     let lockNonce: bigint;
+    let rec: bigint[];
 
     vm.beforeEach(async () => {
         Blockchain.dispose();
@@ -413,92 +442,129 @@ await opnet('BridgeDepository.stranded-lock-refund — bad attestations', async 
         setup = await setupContracts();
         flowId = await registerFlow(setup, 1n);
         lockNonce = await fundLock(setup, flowId, 2_000_000n);
+        rec = await setup.depository.lockRecord(lockNonce);
         setSender(alice);
     });
 
     vm.afterEach(() => dispose(setup));
 
-    await vm.it('wrong-length (empty) attestation reverts', async () => {
-        const empty = new Uint8Array(0);
-        const sig = signAuth(setup.signerWallet, sha256(empty));
-        await Assert.expect(async () => {
-            await setup.depository.markLockRefundable(lockNonce, empty, sig);
-        }).toThrow();
-    });
-
-    await vm.it('wrong-length (135) attestation reverts', async () => {
-        const short = new Uint8Array(REFUND_AUTHORIZATION_LEN - 1);
-        writeU256BE(short, 0, VOUCHER_NETWORK_ID);
-        writeAddress(short, 32, setup.depositoryAddress);
-        writeU32BE(short, 64, MARK_LOCK_REFUNDABLE_SELECTOR);
-        const sig = signAuth(setup.signerWallet, sha256(short));
-        await Assert.expect(async () => {
-            await setup.depository.markLockRefundable(lockNonce, short, sig);
-        }).toThrow();
-    });
-
     await vm.it('wrong signerEpoch reverts', async () => {
-        const { preimage, hash } = buildRefundAuth({
-            contractSelf: setup.depositoryAddress,
-            lockNonce,
-            flowId,
+        // Sig over the right identity but epoch 99 — contract rebuilds with the
+        // current epoch (1), so the hashes differ and ML-DSA verify fails.
+        const { hash } = authFromRecord(setup.depositoryAddress, lockNonce, rec, {
             signerEpoch: 99,
         });
         const sig = signAuth(setup.signerWallet, hash);
         await Assert.expect(async () => {
-            await setup.depository.markLockRefundable(lockNonce, preimage, sig);
+            await setup.depository.markLockRefundable(lockNonce, sig);
         }).toThrow();
     });
 
-    await vm.it('wrong flowId reverts', async () => {
-        const { preimage, hash } = buildRefundAuth({
-            contractSelf: setup.depositoryAddress,
-            lockNonce,
+    await vm.it('wrong flowId (identity drift) reverts', async () => {
+        const { hash } = authFromRecord(setup.depositoryAddress, lockNonce, rec, {
             flowId: 0xdeadbeefn,
         });
         const sig = signAuth(setup.signerWallet, hash);
         await Assert.expect(async () => {
-            await setup.depository.markLockRefundable(lockNonce, preimage, sig);
+            await setup.depository.markLockRefundable(lockNonce, sig);
+        }).toThrow();
+    });
+
+    await vm.it('wrong user (identity drift) reverts', async () => {
+        const { hash } = authFromRecord(setup.depositoryAddress, lockNonce, rec, {
+            user: opnetAddrToBigInt(Blockchain.generateRandomAddress()),
+        });
+        const sig = signAuth(setup.signerWallet, hash);
+        await Assert.expect(async () => {
+            await setup.depository.markLockRefundable(lockNonce, sig);
+        }).toThrow();
+    });
+
+    await vm.it('wrong amount (identity drift) reverts', async () => {
+        const { hash } = authFromRecord(setup.depositoryAddress, lockNonce, rec, {
+            amount: 999n,
+        });
+        const sig = signAuth(setup.signerWallet, hash);
+        await Assert.expect(async () => {
+            await setup.depository.markLockRefundable(lockNonce, sig);
+        }).toThrow();
+    });
+
+    await vm.it('wrong lockBlock (reorg-guard drift) reverts', async () => {
+        const { hash } = authFromRecord(setup.depositoryAddress, lockNonce, rec, {
+            lockBlock: (rec[7]! ?? 0n) + 1n,
+        });
+        const sig = signAuth(setup.signerWallet, hash);
+        await Assert.expect(async () => {
+            await setup.depository.markLockRefundable(lockNonce, sig);
         }).toThrow();
     });
 
     await vm.it('wrong selector reverts', async () => {
-        const { preimage, hash } = buildRefundAuth({
-            contractSelf: setup.depositoryAddress,
-            lockNonce,
-            flowId,
+        const { hash } = authFromRecord(setup.depositoryAddress, lockNonce, rec, {
             selector: 0xdeadbeef,
         });
         const sig = signAuth(setup.signerWallet, hash);
         await Assert.expect(async () => {
-            await setup.depository.markLockRefundable(lockNonce, preimage, sig);
+            await setup.depository.markLockRefundable(lockNonce, sig);
         }).toThrow();
     });
 
+    // IDENTITY-MISMATCH / REPLAY GUARD: an attestation signed for lock A's
+    // identity is rejected against lock B (a different record). This is the
+    // exact reorg scenario — a lockNonce re-assigned to a different lock can
+    // never reuse an old signature, because the rebuilt preimage binds the new
+    // record's (user/token/amount/block).
+    await vm.it('identity-mismatch: sig built for lock A rejected against lock B', async () => {
+        // Lock A is `lockNonce` (alice, 2_000_000). Create lock B with a
+        // DIFFERENT amount so its identity tuple differs.
+        setSender(deployer);
+        const lockNonceB = await fundLock(setup, flowId, 3_000_000n);
+        const recB = await setup.depository.lockRecord(lockNonceB);
+        // Sanity — different gross.
+        Assert.expect(rec[4]!).toEqual(2_000_000n);
+        Assert.expect(recB[4]!).toEqual(3_000_000n);
+
+        // Build a VALID sig for lock A's record, but submit it against lock B's
+        // nonce. The contract rebuilds B's identity-bound preimage → mismatch.
+        const { hash: hashA } = authFromRecord(setup.depositoryAddress, lockNonceB, rec);
+        const sigForA = signAuth(setup.signerWallet, hashA);
+        setSender(alice);
+        await Assert.expect(async () => {
+            await setup.depository.markLockRefundable(lockNonceB, sigForA);
+        }).toThrow();
+
+        // And the genuine sig for B's own identity DOES authorize B.
+        const { hash: hashB } = authFromRecord(setup.depositoryAddress, lockNonceB, recB);
+        await setup.depository.markLockRefundable(lockNonceB, signAuth(setup.signerWallet, hashB));
+        Assert.expect(await setup.depository.isLockRefundable(lockNonceB)).toEqual(true);
+    });
+
     await vm.it('garbage (unsigned) sig reverts', async () => {
-        const { preimage } = buildRefundAuth({
-            contractSelf: setup.depositoryAddress,
-            lockNonce,
-            flowId,
-        });
         // A structurally-plausible blob signed over a DIFFERENT hash — the
         // ML-DSA verify fails so validCount stays below threshold.
         const badSig = signAuth(setup.signerWallet, sha256(new Uint8Array([1, 2, 3])));
         await Assert.expect(async () => {
-            await setup.depository.markLockRefundable(lockNonce, preimage, badSig);
+            await setup.depository.markLockRefundable(lockNonce, badSig);
         }).toThrow();
     });
 
     await vm.it('non-existent lockNonce reverts (mark + refund)', async () => {
         const bogus = 0xfffffn;
-        const { preimage, hash } = buildRefundAuth({
+        // No record exists, so we can't read identity — sign over a plausible
+        // preimage; the contract reverts on status NONE before verify anyway.
+        const { hash } = buildRefundAuth({
             contractSelf: setup.depositoryAddress,
             lockNonce: bogus,
             flowId,
+            user: 0n,
+            token: 0n,
+            amount: 0n,
+            lockBlock: 0n,
         });
         const sig = signAuth(setup.signerWallet, hash);
         await Assert.expect(async () => {
-            await setup.depository.markLockRefundable(bogus, preimage, sig);
+            await setup.depository.markLockRefundable(bogus, sig);
         }).toThrow();
         await Assert.expect(async () => {
             await setup.depository.refundLock(bogus);

@@ -757,7 +757,7 @@ export interface IBridgeDepository extends IOP_NETContract {
     emergencyWithdraw(token: Address, amount: bigint): Promise<EmergencyWithdraw>;
     withdrawFees(flowId: bigint, token: Address, amount: bigint): Promise<WithdrawFees>;
     accruedFees(flowId: bigint): Promise<AccruedFees>;
-    markLockRefundable(lockNonce: bigint, attestation: Uint8Array): Promise<MarkLockRefundable>;
+    markLockRefundable(lockNonce: bigint, sig: Uint8Array): Promise<MarkLockRefundable>;
     refundLock(lockNonce: bigint): Promise<RefundLock>;
     lockRecord(lockNonce: bigint): Promise<LockRecord>;
     isLockRefundable(): Promise<IsLockRefundable>;
