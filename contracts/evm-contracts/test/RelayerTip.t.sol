@@ -281,4 +281,62 @@ contract RelayerTipTest is Test {
         vm.expectRevert(BridgeEscrow.FlowNotFound.selector);
         escrow.claim(intent, sig);
     }
+
+    // ───── FINDING-006 regressions (audit 2026-05-26) ──────────────────────
+
+    /// @notice With `tipCapBps == 0`, ANY positive tip must revert. Pre-fix
+    ///         the check used `(tip * 10_000) / amount > cap` which floored
+    ///         to zero whenever `tip * 10_000 < amount`, silently accepting
+    ///         sub-1-bp tips even though governance disabled tipping.
+    function test_Claim_TipNonZero_WithZeroCap_Reverts() public {
+        // Drop the cap to 0 (governance disables tipping for this flow).
+        vm.prank(owner);
+        escrow.setFlowTipCap(flowId, 0);
+
+        // amount = 10_000, tip = 1 — tip * 10_000 / amount = 1 (NOT > 0),
+        // so pre-fix this PASSED. Post-fix the cross-multiply rejects
+        // because `1 * 10_000 > 10_000 * 0`.
+        uint256 amount = 10_000;
+        uint128 tip = 1;
+
+        BridgeEscrow.ReleaseIntent memory intent = _intent(amount, tip, flowId, keccak256("zero-cap-sub-bp"));
+        bytes memory sig = _sign(signerPk, intent);
+
+        vm.expectRevert(BridgeEscrow.TipExceedsFlowCap.selector);
+        escrow.claim(intent, sig);
+    }
+
+    /// @notice Tip exactly equal to the cap must succeed (boundary safety).
+    function test_Claim_TipAtExactCap_Succeeds() public {
+        // cap = 100 bps = 1%. amount = 10_000 → cap exactly = 100.
+        uint256 amount = 10_000;
+        uint128 tip = 100;
+
+        BridgeEscrow.ReleaseIntent memory intent = _intent(amount, tip, flowId, keccak256("at-cap"));
+        bytes memory sig = _sign(signerPk, intent);
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        escrow.claim(intent, sig);
+        assertEq(usdc.balanceOf(bob) - bobBefore, amount - tip, "tip at exact cap allowed");
+    }
+
+    /// @notice Tip > amount must revert before subtraction underflow.
+    ///         Defensive: an honest signer never produces this, but the
+    ///         check makes the invariant exact rather than indirect.
+    function test_Claim_TipGreaterThanAmount_Reverts() public {
+        // amount = 10_000, tip = 10_001 — would underflow `amount - tip`.
+        // We test against a flow whose cap is high enough that the
+        // tip-cap-fail isn't what trips first.
+        vm.prank(owner);
+        escrow.setFlowTipCap(flowId, 200); // = MAX_TIP_BPS
+
+        uint256 amount = 10_000;
+        uint128 tip = 10_001;
+
+        BridgeEscrow.ReleaseIntent memory intent = _intent(amount, tip, flowId, keccak256("tip-gt-amount"));
+        bytes memory sig = _sign(signerPk, intent);
+
+        vm.expectRevert(BridgeEscrow.TipExceedsFlowCap.selector);
+        escrow.claim(intent, sig);
+    }
 }

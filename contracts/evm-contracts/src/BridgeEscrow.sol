@@ -1160,19 +1160,27 @@ contract BridgeEscrow is
             flow.inventory = flow.inventory - grossDst128;
         }
 
-        // 5. tip cap + carve. Status was already enforced above so we drop
-        //    the redundant TipPaidOnInactiveFlow gate; tipped paths still
-        //    surface FlowNotActive on inactive flows. Bps math identical to
-        //    pre-PR γ.1 — uses `amount` (= netDst) as the denominator.
+        // 5. tip cap + carve.
+        //
+        // FINDING-006 (audit 2026-05-26): the pre-fix form was
+        //   bps = tip * 10_000 / amount;  if (bps > tipCapBps) revert;
+        // which floors the ratio. With `tipCapBps == 0` any positive tip
+        // where `tip * 10_000 < amount` passed silently, so governance
+        // could not fully disable tips through a zero cap. Cross-multiply
+        // avoids the rounding entirely:
+        //   tip * 10_000 > amount * tipCapBps  →  revert.
+        // We also explicitly defend `tip <= amount` (the comment-only
+        // invariant becomes a check) so the subtraction below cannot
+        // underflow on a malformed signer-bound intent.
         uint256 recipientAmount = intent.amount;
         uint128 tip = intent.relayerTip;
         if (tip > 0) {
-            uint256 bps = (uint256(tip) * 10_000) / intent.amount;
-            if (bps > uint256(flow.tipCapBps)) revert TipExceedsFlowCap();
+            if (uint256(tip) > intent.amount) revert TipExceedsFlowCap();
+            if (uint256(tip) * 10_000 > intent.amount * uint256(flow.tipCapBps)) {
+                revert TipExceedsFlowCap();
+            }
             unchecked {
-                // tip <= amount enforced indirectly: bps <= MAX_TIP_BPS = 200
-                // (governor-capped at addFlow / setFlowTipCap). 200 bps = 2%
-                // of amount, so tip < amount always. Safe to subtract.
+                // Safe: tip <= amount asserted directly above.
                 recipientAmount = intent.amount - tip;
             }
         }

@@ -1708,12 +1708,18 @@ export class BridgeDepository extends ReentrancyGuard {
 
         let recipientNetAmountRel: u256 = parsed.netAmount;
         if (!parsed.relayerTip.isZero()) {
+            // FINDING-006 (audit 2026-05-26): cross-multiply instead of
+            // floored division so `tipCapBps == 0` cannot still permit a
+            // sub-1-bp tip, and explicitly reject `tip > netAmount` so the
+            // subtraction below cannot underflow on a malformed
+            // signer-bound voucher.
+            if (u256.gt(parsed.relayerTip, parsed.netAmount)) {
+                throw new Revert('BridgeDepository: tip exceeds flow cap');
+            }
             const tipCapBpsRel: u32 = this._flowTipCapBps.get(flowIdRel).toU32();
-            const bpsRel: u256 = SafeMath.div(
-                SafeMath.mul(parsed.relayerTip, u256.fromU32(10000)),
-                parsed.netAmount,
-            );
-            if (u256.gt(bpsRel, u256.fromU32(tipCapBpsRel))) {
+            const tipScaledRel: u256 = SafeMath.mul(parsed.relayerTip, u256.fromU32(10000));
+            const capScaledRel: u256 = SafeMath.mul(parsed.netAmount, u256.fromU32(tipCapBpsRel));
+            if (u256.gt(tipScaledRel, capScaledRel)) {
                 throw new Revert('BridgeDepository: tip exceeds flow cap');
             }
             const relayerRel: Address = Blockchain.tx.sender;
@@ -2690,13 +2696,18 @@ export class BridgeDepository extends ReentrancyGuard {
 
         let recipientNetAmountMint: u256 = parsed.netAmount;
         if (!parsed.relayerTip.isZero()) {
+            // FINDING-006 (audit 2026-05-26): cross-multiply instead of
+            // floored division so `tipCapBps == 0` cannot still permit a
+            // sub-1-bp tip, and explicitly reject `tip > netAmount` so the
+            // subtraction below cannot underflow on a malformed
+            // signer-bound voucher.
+            if (u256.gt(parsed.relayerTip, parsed.netAmount)) {
+                throw new Revert('BridgeDepository: tip exceeds flow cap');
+            }
             const tipCapBpsMint: u32 = this._flowTipCapBps.get(flowIdMint).toU32();
-            // bps = (tip * 10_000) / netDst — integer divide, mirrors EVM.
-            const bpsMint: u256 = SafeMath.div(
-                SafeMath.mul(parsed.relayerTip, u256.fromU32(10000)),
-                parsed.netAmount,
-            );
-            if (u256.gt(bpsMint, u256.fromU32(tipCapBpsMint))) {
+            const tipScaledMint: u256 = SafeMath.mul(parsed.relayerTip, u256.fromU32(10000));
+            const capScaledMint: u256 = SafeMath.mul(parsed.netAmount, u256.fromU32(tipCapBpsMint));
+            if (u256.gt(tipScaledMint, capScaledMint)) {
                 throw new Revert('BridgeDepository: tip exceeds flow cap');
             }
             // Mint tip to tx.sender FIRST, then mint residual to recipient.
