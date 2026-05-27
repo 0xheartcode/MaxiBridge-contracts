@@ -257,6 +257,14 @@ npm run integration:drills             # security drills (replay, rotation, reor
     - **OPNet `WrappedOP20` — burn destination allowlist (M-01):** `burnForRelease` reverts on a `destChainId` not enabled via the new governor `setSupportedDestChain`; a burn to an un-serviced chain can no longer destroy tokens with no release path. Fail-closed — empty until the deploy ceremony populates it.
     - **OPNet `BridgeDepository` — mint inventory (M-02):** `claimMintWithVoucher` no longer caps mint-on-OPNet modes (0/2) against a cumulative `_flowInventory` (no decrement path exists on that side); `dailyLimit` + the wrapped token's `maxSupply` are the bounds.
     - **Server — OPNet reorg invalidation (C-01):** a burn reorged out *after* its withdrawal was signed is pulled from the claimable surface; for any row so invalidated the operator must run `BridgeEscrow.cancelVoucher`.
+14. **Role-lattice parity — OPNet mirrors EVM (same terminology both chains).** The OPNet `BridgeDepository` now exposes the SAME named roles as EVM `BridgeEscrow`, with the same semantics, so the two chains read identically:
+    - **`treasury`** (governor-set via `setTreasury`, `treasury()` view, `TreasurySet` event) — the PINNED sink for BOTH `withdrawFees` AND `emergencyWithdraw`. Fail-closed: a zero treasury blocks both. (Renamed from the interim `_feeRecipient`/`setFeeRecipient`/`FeeRecipientUpdated` — same storage pointer slot.)
+    - **`guardian`** (governor-set via `setGuardian`, `guardian()` view, `GuardianSet` event) — incident-response role. May FREEZE (`setPaused(true)`), `cancelVoucher`, `migrateSignerSet`, and is the SOLE caller of `emergencyWithdraw`. May NOT unpause (H-01 freeze-but-never-thaw). New appended storage slot (`_guardian`).
+    - **`pauser`** (governor-set via `setPauser`) — freeze-only (unchanged from the prior roles PR).
+    - **`emergencyWithdraw(token, amount)`** — `onlyGuardian` + whenPaused (`_paused == true`) + `@nonReentrant`; transfers `amount` of `token` to `treasury` (reverts if treasury unset). The guardian+paused+treasury-pinned drain for custodied pooled/inverse (mode 1/3) balances, sitting ALONGSIDE the routine governor `drainInventoryOpNet` (caller-chosen recipient, left unchanged).
+    - **`withdrawFees(flowId, token, amount)`** — gate widened to `onlyGovernorOrGuardian` (mirrors EVM `onlyOwnerOrGuardian`); still bounded by `_flowAccruedFees`; sweeps to `treasury`.
+    - **pause**: governor / guardian / pauser may FREEZE; **unpause is governor-only** (H-01).
+    - Storage migrated `_storageVersion` 3→4 (seeds `_guardian = zero` in the v(3→4) `onUpdate` block); fresh deploys ship at v4.
 
 ---
 

@@ -630,6 +630,23 @@
             "outputs": []
         },
         {
+            "name": "emergencyWithdraw",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "token",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
             "name": "withdrawFees",
             "type": "Function",
             "payable": false,
@@ -859,13 +876,26 @@
             "outputs": []
         },
         {
-            "name": "setFeeRecipient",
+            "name": "setTreasury",
             "type": "Function",
             "payable": false,
             "onlyOwner": false,
             "inputs": [
                 {
-                    "name": "newRecipient",
+                    "name": "newTreasury",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setGuardian",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newGuardian",
                     "type": "ADDRESS"
                 }
             ],
@@ -928,14 +958,27 @@
             ]
         },
         {
-            "name": "feeRecipient",
+            "name": "treasury",
             "type": "View",
             "payable": false,
             "onlyOwner": false,
             "inputs": [],
             "outputs": [
                 {
-                    "name": "feeRecipient",
+                    "name": "treasury",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
+            "name": "guardian",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "guardian",
                     "type": "ADDRESS"
                 }
             ]
@@ -1363,6 +1406,24 @@
             "type": "Event"
         },
         {
+            "name": "EmergencyWithdrawal",
+            "values": [
+                {
+                    "name": "token",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "treasury",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
             "name": "FeesWithdrawn",
             "values": [
                 {
@@ -1449,14 +1510,28 @@
             "type": "Event"
         },
         {
-            "name": "FeeRecipientUpdated",
+            "name": "TreasurySet",
             "values": [
                 {
-                    "name": "oldRecipient",
+                    "name": "oldTreasury",
                     "type": "ADDRESS"
                 },
                 {
-                    "name": "newRecipient",
+                    "name": "newTreasury",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "GuardianSet",
+            "values": [
+                {
+                    "name": "oldGuardian",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "newGuardian",
                     "type": "ADDRESS"
                 }
             ],

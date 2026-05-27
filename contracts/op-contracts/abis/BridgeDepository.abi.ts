@@ -155,6 +155,15 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'EmergencyWithdrawal',
+        values: [
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'treasury', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'FeesWithdrawn',
         values: [
             { name: 'flowId', type: ABIDataTypes.UINT256 },
@@ -202,10 +211,18 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
-        name: 'FeeRecipientUpdated',
+        name: 'TreasurySet',
         values: [
-            { name: 'oldRecipient', type: ABIDataTypes.ADDRESS },
-            { name: 'newRecipient', type: ABIDataTypes.ADDRESS },
+            { name: 'oldTreasury', type: ABIDataTypes.ADDRESS },
+            { name: 'newTreasury', type: ABIDataTypes.ADDRESS },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'GuardianSet',
+        values: [
+            { name: 'oldGuardian', type: ABIDataTypes.ADDRESS },
+            { name: 'newGuardian', type: ABIDataTypes.ADDRESS },
         ],
         type: BitcoinAbiTypes.Event,
     },
@@ -525,6 +542,15 @@ export const BridgeDepositoryAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
+        name: 'emergencyWithdraw',
+        inputs: [
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
         name: 'withdrawFees',
         inputs: [
             { name: 'flowId', type: ABIDataTypes.UINT256 },
@@ -634,8 +660,14 @@ export const BridgeDepositoryAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
-        name: 'setFeeRecipient',
-        inputs: [{ name: 'newRecipient', type: ABIDataTypes.ADDRESS }],
+        name: 'setTreasury',
+        inputs: [{ name: 'newTreasury', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setGuardian',
+        inputs: [{ name: 'newGuardian', type: ABIDataTypes.ADDRESS }],
         outputs: [],
         type: BitcoinAbiTypes.Function,
     },
@@ -670,10 +702,17 @@ export const BridgeDepositoryAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
-        name: 'feeRecipient',
+        name: 'treasury',
         constant: true,
         inputs: [],
-        outputs: [{ name: 'feeRecipient', type: ABIDataTypes.ADDRESS }],
+        outputs: [{ name: 'treasury', type: ABIDataTypes.ADDRESS }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'guardian',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'guardian', type: ABIDataTypes.ADDRESS }],
         type: BitcoinAbiTypes.Function,
     },
     {

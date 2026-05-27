@@ -29,16 +29,47 @@ export class PauserSet extends NetEvent {
 }
 
 /**
- * Emitted when the dedicated fee-revenue recipient is set/rotated/disabled.
- * `oldRecipient` -> `newRecipient`; a zero `newRecipient` disables fee sweeps.
- * Mirrors the EVM `BridgeEscrow.TreasurySet` role.
+ * Emitted when the dedicated treasury (fee-revenue + emergency-drain sink) is
+ * set/rotated/disabled. `oldTreasury` -> `newTreasury`; a zero `newTreasury`
+ * disables fee sweeps + emergency withdrawals (fail-closed). Mirrors the EVM
+ * `BridgeEscrow.TreasurySet` role — SAME terminology on both chains.
  */
-export class FeeRecipientUpdated extends NetEvent {
-    constructor(oldRecipient: Address, newRecipient: Address) {
+export class TreasurySet extends NetEvent {
+    constructor(oldTreasury: Address, newTreasury: Address) {
         const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2);
-        data.writeAddress(oldRecipient);
-        data.writeAddress(newRecipient);
-        super('FeeRecipientUpdated', data);
+        data.writeAddress(oldTreasury);
+        data.writeAddress(newTreasury);
+        super('TreasurySet', data);
+    }
+}
+
+/**
+ * Emitted when the dedicated guardian (incident-response) role is
+ * set/rotated/disabled. `oldGuardian` -> `newGuardian`; a zero `newGuardian`
+ * disables the role. Mirrors the EVM `BridgeEscrow.GuardianSet` role — SAME
+ * terminology on both chains.
+ */
+export class GuardianSet extends NetEvent {
+    constructor(oldGuardian: Address, newGuardian: Address) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2);
+        data.writeAddress(oldGuardian);
+        data.writeAddress(newGuardian);
+        super('GuardianSet', data);
+    }
+}
+
+/**
+ * Emitted on `emergencyWithdraw` — the guardian drains `amount` of `token`
+ * from the depository to the pinned `treasury` while paused. Mirrors the EVM
+ * `BridgeEscrow.EmergencyWithdrawal(token, treasury, amount)` role.
+ */
+export class EmergencyWithdrawal extends NetEvent {
+    constructor(token: Address, treasury: Address, amount: u256) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32);
+        data.writeAddress(token);
+        data.writeAddress(treasury);
+        data.writeU256(amount);
+        super('EmergencyWithdrawal', data);
     }
 }
 

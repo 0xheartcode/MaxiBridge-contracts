@@ -23,7 +23,9 @@ import { UpdatablePlugin } from '@btc-vision/btc-runtime/runtime/plugins/Updatab
 import {
     GovernorUpdated,
     PauserSet,
-    FeeRecipientUpdated,
+    TreasurySet,
+    GuardianSet,
+    EmergencyWithdrawal,
     WrappedTokenSet,
     SignerRotated,
     Paused,
@@ -390,12 +392,27 @@ export class BridgeDepository extends ReentrancyGuard {
     // disabled until the governor wires it.
     private _pauser: StoredAddress = new StoredAddress(Blockchain.nextPointer);
 
-    // Dedicated fee-revenue sink (mirrors EVM `BridgeEscrow.treasury`).
-    // `withdrawFees` sends accrued fees HERE, never to the governor key — this
-    // separates protocol revenue from the god-key. Fail-closed: a zero slot
-    // blocks fee sweeps until the governor wires it via `setFeeRecipient`.
-    // Appended AFTER `_pauser` to preserve append-only storage discipline.
-    private _feeRecipient: StoredAddress = new StoredAddress(Blockchain.nextPointer);
+    // Dedicated treasury — the PINNED sink for BOTH `withdrawFees` and
+    // `emergencyWithdraw` (mirrors EVM `BridgeEscrow.treasury`, SAME
+    // terminology). Protocol revenue + emergency drains land HERE, never on
+    // the governor key — this separates funds from the god-key. Fail-closed: a
+    // zero slot blocks fee sweeps AND emergency withdrawals until the governor
+    // wires it via `setTreasury`. Appended AFTER `_pauser` to preserve
+    // append-only storage discipline (storage pointer slot unchanged by the
+    // _feeRecipient → _treasury rename).
+    private _treasury: StoredAddress = new StoredAddress(Blockchain.nextPointer);
+
+    // Dedicated guardian — incident-response role (mirrors EVM
+    // `BridgeEscrow.guardian`, SAME terminology). The guardian may FREEZE
+    // (`setPaused(true)`), `cancelVoucher`, run `migrateSignerSet`, and is the
+    // SOLE caller of `emergencyWithdraw` (which additionally requires paused).
+    // It may NOT unpause (H-01 freeze-but-never-thaw). A zero slot disables the
+    // role. Set/rotated by the governor via `setGuardian`.
+    //
+    // Append-only: NEW pointer appended AFTER `_treasury`. `onUpdate` seeds it
+    // to zero on the v(3→4) migration so an in-place upgrade leaves the role
+    // disabled until the governor wires it.
+    private _guardian: StoredAddress = new StoredAddress(Blockchain.nextPointer);
 
     public constructor() {
         super();
@@ -434,9 +451,10 @@ export class BridgeDepository extends ReentrancyGuard {
         this._networkId.value = networkId;
 
         // Fresh deployments ship at the current storage version so no
-        // migration branch runs on a clean deploy. Roles PR → version 3
-        // (v1 baseline, v2 M-of-N seed, v3 dedicated pauser role).
-        this._storageVersion.value = u256.fromU32(3);
+        // migration branch runs on a clean deploy. Roles PR → version 4
+        // (v1 baseline, v2 M-of-N seed, v3 dedicated pauser + treasury,
+        // v4 dedicated guardian + emergencyWithdraw).
+        this._storageVersion.value = u256.fromU32(4);
         // Signer epoch starts at 1 so "epoch 0" is invalid by construction.
         this._signerEpoch.value = u256.One;
     }
@@ -492,10 +510,19 @@ export class BridgeDepository extends ReentrancyGuard {
             // StoredAddress reads zero on an unwritten slot, so this seed is
             // belt-and-suspenders; the governor wires it via `setPauser`.
             this._pauser.value = Address.zero();
-            // Fee recipient ships unset → `withdrawFees` is fail-closed until
-            // the governor wires it via `setFeeRecipient`.
-            this._feeRecipient.value = Address.zero();
+            // Treasury ships unset → `withdrawFees` is fail-closed until the
+            // governor wires it via `setTreasury`.
+            this._treasury.value = Address.zero();
             this._storageVersion.value = u256.fromU32(3);
+        }
+        if (u256.lt(this._storageVersion.value, u256.fromU32(4))) {
+            // Roles-mirror PR migration — the dedicated guardian role ships
+            // disabled. StoredAddress reads zero on an unwritten slot, so this
+            // seed is belt-and-suspenders; the governor wires it via
+            // `setGuardian`. `emergencyWithdraw` stays fail-closed (guardian
+            // unset + treasury unset) until both are wired.
+            this._guardian.value = Address.zero();
+            this._storageVersion.value = u256.fromU32(4);
         }
     }
 
@@ -547,6 +574,37 @@ export class BridgeDepository extends ReentrancyGuard {
         const p = this._pauser.value;
         if (!p.isZero() && sender.equals(p)) return;
         throw new Revert('BridgeDepository: not governor or pauser');
+    }
+
+    /**
+     * Roles-mirror PR — guardian-only (mirrors EVM `onlyGuardian`). The
+     * guardian is the SOLE caller of `emergencyWithdraw`. A zero `_guardian`
+     * slot disables the role (fail-closed — nobody can call).
+     */
+    private onlyGuardian(): void {
+        const g = this._guardian.value;
+        if (g.isZero()) {
+            throw new Revert('BridgeDepository: guardian not set');
+        }
+        if (!Blockchain.tx.sender.equals(g)) {
+            throw new Revert('BridgeDepository: not guardian');
+        }
+    }
+
+    /**
+     * Roles-mirror PR — governor OR guardian (mirrors EVM
+     * `onlyOwnerOrGuardian`). Used for incident-response surfaces that should
+     * stay immediate even once the governor becomes a timelock: `cancelVoucher`
+     * and `withdrawFees`. A zero `_guardian` slot just means only the governor
+     * qualifies.
+     */
+    private onlyGovernorOrGuardian(): void {
+        const sender = Blockchain.tx.sender;
+        const gov = this._governor.value;
+        if (!gov.isZero() && sender.equals(gov)) return;
+        const g = this._guardian.value;
+        if (!g.isZero() && sender.equals(g)) return;
+        throw new Revert('BridgeDepository: not governor or guardian');
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -694,7 +752,9 @@ export class BridgeDepository extends ReentrancyGuard {
      */
     @method({ name: 'voucherId', type: ABIDataTypes.UINT256 })
     public cancelVoucher(calldata: Calldata): BytesWriter {
-        this.onlyGovernor();
+        // Incident-response surface — governor OR guardian (mirrors EVM
+        // `BridgeEscrow.cancelVoucher` onlyOwnerOrGuardian, H-01).
+        this.onlyGovernorOrGuardian();
         const voucherId: u256 = calldata.readU256();
         this._cancelledVouchers.set(voucherId, u256.One);
         return new BytesWriter(0);
@@ -1985,6 +2045,56 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    //  Guardian: emergency withdraw (mirror of EVM
+    //  BridgeEscrow.emergencyWithdraw)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Emergency drain of custodied pooled/inverse (mode 1/3) balances to the
+     * pinned `_treasury`. Mirrors EVM `BridgeEscrow.emergencyWithdraw(token,
+     * amount)` byte-for-byte in semantics:
+     *   - `onlyGuardian` (NOT the governor — incident-response role)
+     *   - whenPaused (`_paused.value == true`)
+     *   - `@nonReentrant`, strict CEI
+     *   - transfers exclusively to `_treasury`; reverts if treasury unset.
+     *
+     * This is the guardian+paused+treasury-pinned emergency path. It sits
+     * ALONGSIDE the routine `drainInventoryOpNet` (governor, caller-chosen
+     * recipient) — neither replaces the other.
+     */
+    @method(
+        { name: 'token', type: ABIDataTypes.ADDRESS },
+        { name: 'amount', type: ABIDataTypes.UINT256 },
+    )
+    @emit('EmergencyWithdrawal')
+    @nonReentrant
+    public emergencyWithdraw(calldata: Calldata): BytesWriter {
+        this.onlyGuardian();
+        if (!this._paused.value) {
+            throw new Revert('BridgeDepository: must pause before emergency withdraw');
+        }
+        const token: Address = calldata.readAddress();
+        const amount: u256 = calldata.readU256();
+        if (token.isZero()) throw new Revert('BridgeDepository: zero token');
+        if (amount.isZero()) throw new Revert('BridgeDepository: zero amount');
+
+        const treasury: Address = this._treasury.value;
+        if (treasury.isZero()) {
+            throw new Revert('BridgeDepository: treasury not set');
+        }
+
+        const transferSelector: u32 = encodeSelector('transfer(address,uint256)');
+        const w = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+        w.writeSelector(transferSelector);
+        w.writeAddress(treasury);
+        w.writeU256(amount);
+        Blockchain.call(token, w);
+
+        this.emitEvent(new EmergencyWithdrawal(token, treasury, amount));
+        return new BytesWriter(0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     //  #62 — non-emergency per-flow fee withdrawal (mirror of EVM
     //  BridgeEscrow.withdrawFees)
     // ═══════════════════════════════════════════════════════════════════════
@@ -2018,7 +2128,9 @@ export class BridgeDepository extends ReentrancyGuard {
     @emit('FeesWithdrawn')
     @nonReentrant
     public withdrawFees(calldata: Calldata): BytesWriter {
-        this.onlyGovernor();
+        // Governor OR guardian (mirrors EVM `BridgeEscrow.withdrawFees`
+        // onlyOwnerOrGuardian).
+        this.onlyGovernorOrGuardian();
         const flowId: u256 = calldata.readU256();
         const token: Address = calldata.readAddress();
         const amount: u256 = calldata.readU256();
@@ -2043,12 +2155,12 @@ export class BridgeDepository extends ReentrancyGuard {
         }
         this._flowAccruedFees.set(flowId, SafeMath.sub(accrued, amount));
 
-        // Recipient = governor (no treasury slot on OPNet).
-        // Dedicated fee sink (mirrors EVM `withdrawFees` -> treasury), NOT the
-        // governor key — keeps protocol revenue off the god-key. Fail-closed.
-        const recipient: Address = this._feeRecipient.value;
+        // Dedicated treasury sink (mirrors EVM `withdrawFees` -> treasury),
+        // NOT the governor key — keeps protocol revenue off the god-key.
+        // Fail-closed: a zero treasury blocks the sweep.
+        const recipient: Address = this._treasury.value;
         if (recipient.isZero()) {
-            throw new Revert('BridgeDepository: fee recipient not set');
+            throw new Revert('BridgeDepository: treasury not set');
         }
 
         const transferSelector: u32 = encodeSelector('transfer(address,uint256)');
@@ -2184,7 +2296,23 @@ export class BridgeDepository extends ReentrancyGuard {
     @method({ name: 'payload', type: ABIDataTypes.BYTES })
     @emit('SignerRotated')
     public migrateSignerSet(calldata: Calldata): BytesWriter {
-        this.onlyGovernorOrAuthority();
+        // Incident-response surface — governor, registered BridgeAuthority,
+        // OR guardian (mirrors EVM `BridgeEscrow.migrateSignerSet`
+        // onlyOwnerOrGuardian, H-01; the BridgeAuthority push path is retained
+        // on top so its cascade keeps working).
+        {
+            const sender = Blockchain.tx.sender;
+            const gov = this._governor.value;
+            const auth = this._authorityAddress.value;
+            const guard = this._guardian.value;
+            if (
+                !(!gov.isZero() && sender.equals(gov)) &&
+                !(!auth.isZero() && sender.equals(auth)) &&
+                !(!guard.isZero() && sender.equals(guard))
+            ) {
+                throw new Revert('BridgeDepository: not governor, authority, or guardian');
+            }
+        }
         const payload: Uint8Array = calldata.readBytesWithLength();
         let off: u32 = 0;
         if (off + 4 > <u32>payload.length) {
@@ -2502,11 +2630,22 @@ export class BridgeDepository extends ReentrancyGuard {
     @emit('Paused', 'Unpaused')
     public setPaused(calldata: Calldata): BytesWriter {
         const paused: boolean = calldata.readBoolean();
-        // Freeze-but-never-thaw (mirrors EVM BridgeEscrow H-01): the pauser and
-        // governor may FREEZE; only the governor may THAW (re-open the bridge).
-        // A compromised pauser/incident key cannot keep the bridge open.
+        // Freeze-but-never-thaw (mirrors EVM BridgeEscrow H-01): the governor,
+        // guardian, and pauser may FREEZE; ONLY the governor may THAW (re-open
+        // the bridge). A compromised pauser/guardian/incident key cannot keep
+        // the bridge open.
         if (paused) {
-            this.onlyGovernorOrPauser();
+            const sender = Blockchain.tx.sender;
+            const gov = this._governor.value;
+            const guard = this._guardian.value;
+            const p = this._pauser.value;
+            if (
+                !(!gov.isZero() && sender.equals(gov)) &&
+                !(!guard.isZero() && sender.equals(guard)) &&
+                !(!p.isZero() && sender.equals(p))
+            ) {
+                throw new Revert('BridgeDepository: not governor, guardian, or pauser');
+            }
         } else {
             this.onlyGovernor();
         }
@@ -2585,20 +2724,41 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     /**
-     * Set/rotate/disable the dedicated fee-revenue recipient. Governor-only.
-     * `withdrawFees` sends accrued fees here (mirrors EVM `setTreasury`), so
-     * protocol revenue lands on a dedicated address rather than the governor
-     * key. A zero address disables fee sweeps (fail-closed).
+     * Set/rotate/disable the dedicated treasury. Governor-only. The treasury
+     * is the PINNED sink for BOTH `withdrawFees` AND `emergencyWithdraw`
+     * (mirrors EVM `BridgeEscrow.setTreasury`, SAME terminology), so protocol
+     * revenue + emergency drains land on a dedicated address rather than the
+     * governor key. A zero address disables fee sweeps + emergency withdrawals
+     * (fail-closed).
      */
-    @method({ name: 'newRecipient', type: ABIDataTypes.ADDRESS })
-    @emit('FeeRecipientUpdated')
+    @method({ name: 'newTreasury', type: ABIDataTypes.ADDRESS })
+    @emit('TreasurySet')
     @nonReentrant
-    public setFeeRecipient(calldata: Calldata): BytesWriter {
+    public setTreasury(calldata: Calldata): BytesWriter {
         this.onlyGovernor();
-        const newRecipient: Address = calldata.readAddress();
-        const old = this._feeRecipient.value;
-        this._feeRecipient.value = newRecipient;
-        this.emitEvent(new FeeRecipientUpdated(old, newRecipient));
+        const newTreasury: Address = calldata.readAddress();
+        const old = this._treasury.value;
+        this._treasury.value = newTreasury;
+        this.emitEvent(new TreasurySet(old, newTreasury));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Set/rotate/disable the dedicated guardian (incident-response) role.
+     * Governor-only. Mirrors EVM `BridgeEscrow.setGuardian`, SAME terminology.
+     * The guardian may FREEZE (`setPaused(true)`), `cancelVoucher`,
+     * `migrateSignerSet`, and is the SOLE caller of `emergencyWithdraw`. It may
+     * NOT unpause. A zero address disables the role.
+     */
+    @method({ name: 'newGuardian', type: ABIDataTypes.ADDRESS })
+    @emit('GuardianSet')
+    @nonReentrant
+    public setGuardian(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const newGuardian: Address = calldata.readAddress();
+        const old = this._guardian.value;
+        this._guardian.value = newGuardian;
+        this.emitEvent(new GuardianSet(old, newGuardian));
         return new BytesWriter(0);
     }
 
@@ -2932,10 +3092,18 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     @view
-    @returns({ name: 'feeRecipient', type: ABIDataTypes.ADDRESS })
-    public feeRecipient(_calldata: Calldata): BytesWriter {
+    @returns({ name: 'treasury', type: ABIDataTypes.ADDRESS })
+    public treasury(_calldata: Calldata): BytesWriter {
         const response = new BytesWriter(ADDRESS_BYTE_LENGTH);
-        response.writeAddress(this._feeRecipient.value);
+        response.writeAddress(this._treasury.value);
+        return response;
+    }
+
+    @view
+    @returns({ name: 'guardian', type: ABIDataTypes.ADDRESS })
+    public guardian(_calldata: Calldata): BytesWriter {
+        const response = new BytesWriter(ADDRESS_BYTE_LENGTH);
+        response.writeAddress(this._guardian.value);
         return response;
     }
 

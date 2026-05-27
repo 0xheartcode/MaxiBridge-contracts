@@ -769,15 +769,59 @@ export class BridgeDepository extends ContractRuntime {
         await this.getResponse(w.getBuffer());
     }
 
-    private readonly setFeeRecipientSelector: number = encodeSelectorWithParams(
-        'setFeeRecipient',
+    private readonly setTreasurySelector: number = encodeSelectorWithParams(
+        'setTreasury',
         ABIDataTypes.ADDRESS,
     );
 
-    public async setFeeRecipient(recipient: Address): Promise<void> {
+    public async setTreasury(treasury: Address): Promise<void> {
         const w = new BinaryWriter();
-        w.writeSelector(this.setFeeRecipientSelector);
-        w.writeAddress(recipient);
+        w.writeSelector(this.setTreasurySelector);
+        w.writeAddress(treasury);
+        await this.getResponse(w.getBuffer());
+    }
+
+    private readonly treasurySelector: number = encodeNumericSelector('treasury()');
+
+    public async treasury(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.treasurySelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
+    }
+
+    private readonly setGuardianSelector: number = encodeSelectorWithParams(
+        'setGuardian',
+        ABIDataTypes.ADDRESS,
+    );
+
+    public async setGuardian(guardian: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setGuardianSelector);
+        w.writeAddress(guardian);
+        await this.getResponse(w.getBuffer());
+    }
+
+    private readonly guardianSelector: number = encodeNumericSelector('guardian()');
+
+    public async guardian(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.guardianSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
+    }
+
+    private readonly emergencyWithdrawSelector: number = encodeSelectorWithParams(
+        'emergencyWithdraw',
+        ABIDataTypes.ADDRESS,
+        ABIDataTypes.UINT256,
+    );
+
+    public async emergencyWithdraw(token: Address, amount: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.emergencyWithdrawSelector);
+        w.writeAddress(token);
+        w.writeU256(amount);
         await this.getResponse(w.getBuffer());
     }
 
