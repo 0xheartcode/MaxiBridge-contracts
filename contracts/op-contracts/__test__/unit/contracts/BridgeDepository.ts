@@ -769,6 +769,18 @@ export class BridgeDepository extends ContractRuntime {
         await this.getResponse(w.getBuffer());
     }
 
+    private readonly setFeeRecipientSelector: number = encodeSelectorWithParams(
+        'setFeeRecipient',
+        ABIDataTypes.ADDRESS,
+    );
+
+    public async setFeeRecipient(recipient: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setFeeRecipientSelector);
+        w.writeAddress(recipient);
+        await this.getResponse(w.getBuffer());
+    }
+
     public async accruedFees(flowId: bigint): Promise<bigint> {
         const w = new BinaryWriter();
         w.writeSelector(this.accruedFeesSelector);

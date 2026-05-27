@@ -859,6 +859,19 @@
             "outputs": []
         },
         {
+            "name": "setFeeRecipient",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newRecipient",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
             "name": "claimMintWithVoucher",
             "type": "Function",
             "payable": false,
@@ -910,6 +923,19 @@
             "outputs": [
                 {
                     "name": "pauser",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
+            "name": "feeRecipient",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "feeRecipient",
                     "type": "ADDRESS"
                 }
             ]
@@ -1417,6 +1443,20 @@
                 },
                 {
                     "name": "newPauser",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "FeeRecipientUpdated",
+            "values": [
+                {
+                    "name": "oldRecipient",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "newRecipient",
                     "type": "ADDRESS"
                 }
             ],

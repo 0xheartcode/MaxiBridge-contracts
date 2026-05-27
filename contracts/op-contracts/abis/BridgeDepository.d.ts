@@ -120,6 +120,10 @@ export type PauserSetEvent = {
     readonly oldPauser: Address;
     readonly newPauser: Address;
 };
+export type FeeRecipientUpdatedEvent = {
+    readonly oldRecipient: Address;
+    readonly newRecipient: Address;
+};
 export type MintedFromVoucherEvent = {
     readonly recipient: Address;
     readonly wrappedToken: Address;
@@ -498,6 +502,11 @@ export type TransferGovernor = CallResult<{}, OPNetEvent<GovernorUpdatedEvent>[]
 export type SetPauser = CallResult<{}, OPNetEvent<PauserSetEvent>[]>;
 
 /**
+ * @description Represents the result of the setFeeRecipient function call.
+ */
+export type SetFeeRecipient = CallResult<{}, OPNetEvent<FeeRecipientUpdatedEvent>[]>;
+
+/**
  * @description Represents the result of the claimMintWithVoucher function call.
  */
 export type ClaimMintWithVoucher = CallResult<{}, OPNetEvent<MintedFromVoucherEvent | RelayerTipPaidEvent>[]>;
@@ -528,6 +537,16 @@ export type Paused = CallResult<
 export type Pauser = CallResult<
     {
         pauser: Address;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the feeRecipient function call.
+ */
+export type FeeRecipient = CallResult<
+    {
+        feeRecipient: Address;
     },
     OPNetEvent<never>[]
 >;
@@ -682,10 +701,12 @@ export interface IBridgeDepository extends IOP_NETContract {
     setGovernor(newGovernor: Address): Promise<SetGovernor>;
     transferGovernor(newGovernor: Address): Promise<TransferGovernor>;
     setPauser(newPauser: Address): Promise<SetPauser>;
+    setFeeRecipient(newRecipient: Address): Promise<SetFeeRecipient>;
     claimMintWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<ClaimMintWithVoucher>;
     governor(): Promise<Governor>;
     paused(): Promise<Paused>;
     pauser(): Promise<Pauser>;
+    feeRecipient(): Promise<FeeRecipient>;
     signerEpoch(): Promise<SignerEpoch>;
     signerHashAtEpoch(): Promise<SignerHashAtEpoch>;
     isVoucherUsed(): Promise<IsVoucherUsed>;

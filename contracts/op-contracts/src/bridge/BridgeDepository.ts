@@ -23,6 +23,7 @@ import { UpdatablePlugin } from '@btc-vision/btc-runtime/runtime/plugins/Updatab
 import {
     GovernorUpdated,
     PauserSet,
+    FeeRecipientUpdated,
     WrappedTokenSet,
     SignerRotated,
     Paused,
@@ -389,6 +390,13 @@ export class BridgeDepository extends ReentrancyGuard {
     // disabled until the governor wires it.
     private _pauser: StoredAddress = new StoredAddress(Blockchain.nextPointer);
 
+    // Dedicated fee-revenue sink (mirrors EVM `BridgeEscrow.treasury`).
+    // `withdrawFees` sends accrued fees HERE, never to the governor key — this
+    // separates protocol revenue from the god-key. Fail-closed: a zero slot
+    // blocks fee sweeps until the governor wires it via `setFeeRecipient`.
+    // Appended AFTER `_pauser` to preserve append-only storage discipline.
+    private _feeRecipient: StoredAddress = new StoredAddress(Blockchain.nextPointer);
+
     public constructor() {
         super();
         // AddressMemoryMap MUST be initialized in the constructor body.
@@ -484,6 +492,9 @@ export class BridgeDepository extends ReentrancyGuard {
             // StoredAddress reads zero on an unwritten slot, so this seed is
             // belt-and-suspenders; the governor wires it via `setPauser`.
             this._pauser.value = Address.zero();
+            // Fee recipient ships unset → `withdrawFees` is fail-closed until
+            // the governor wires it via `setFeeRecipient`.
+            this._feeRecipient.value = Address.zero();
             this._storageVersion.value = u256.fromU32(3);
         }
     }
@@ -2033,7 +2044,12 @@ export class BridgeDepository extends ReentrancyGuard {
         this._flowAccruedFees.set(flowId, SafeMath.sub(accrued, amount));
 
         // Recipient = governor (no treasury slot on OPNet).
-        const recipient: Address = this._governor.value;
+        // Dedicated fee sink (mirrors EVM `withdrawFees` -> treasury), NOT the
+        // governor key — keeps protocol revenue off the god-key. Fail-closed.
+        const recipient: Address = this._feeRecipient.value;
+        if (recipient.isZero()) {
+            throw new Revert('BridgeDepository: fee recipient not set');
+        }
 
         const transferSelector: u32 = encodeSelector('transfer(address,uint256)');
         const w = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
@@ -2568,6 +2584,24 @@ export class BridgeDepository extends ReentrancyGuard {
         return new BytesWriter(0);
     }
 
+    /**
+     * Set/rotate/disable the dedicated fee-revenue recipient. Governor-only.
+     * `withdrawFees` sends accrued fees here (mirrors EVM `setTreasury`), so
+     * protocol revenue lands on a dedicated address rather than the governor
+     * key. A zero address disables fee sweeps (fail-closed).
+     */
+    @method({ name: 'newRecipient', type: ABIDataTypes.ADDRESS })
+    @emit('FeeRecipientUpdated')
+    @nonReentrant
+    public setFeeRecipient(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const newRecipient: Address = calldata.readAddress();
+        const old = this._feeRecipient.value;
+        this._feeRecipient.value = newRecipient;
+        this.emitEvent(new FeeRecipientUpdated(old, newRecipient));
+        return new BytesWriter(0);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     //  User: claim mint with voucher (CEI + nonReentrant)
     // ═══════════════════════════════════════════════════════════════════════
@@ -2894,6 +2928,14 @@ export class BridgeDepository extends ReentrancyGuard {
     public pauser(_calldata: Calldata): BytesWriter {
         const response = new BytesWriter(ADDRESS_BYTE_LENGTH);
         response.writeAddress(this._pauser.value);
+        return response;
+    }
+
+    @view
+    @returns({ name: 'feeRecipient', type: ABIDataTypes.ADDRESS })
+    public feeRecipient(_calldata: Calldata): BytesWriter {
+        const response = new BytesWriter(ADDRESS_BYTE_LENGTH);
+        response.writeAddress(this._feeRecipient.value);
         return response;
     }
 

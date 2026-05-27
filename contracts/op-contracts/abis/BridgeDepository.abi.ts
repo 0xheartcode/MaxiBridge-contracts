@@ -202,6 +202,14 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'FeeRecipientUpdated',
+        values: [
+            { name: 'oldRecipient', type: ABIDataTypes.ADDRESS },
+            { name: 'newRecipient', type: ABIDataTypes.ADDRESS },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'MintedFromVoucher',
         values: [
             { name: 'recipient', type: ABIDataTypes.ADDRESS },
@@ -626,6 +634,12 @@ export const BridgeDepositoryAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
+        name: 'setFeeRecipient',
+        inputs: [{ name: 'newRecipient', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
         name: 'claimMintWithVoucher',
         inputs: [
             { name: 'voucher', type: ABIDataTypes.BYTES },
@@ -653,6 +667,13 @@ export const BridgeDepositoryAbi = [
         constant: true,
         inputs: [],
         outputs: [{ name: 'pauser', type: ABIDataTypes.ADDRESS }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'feeRecipient',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'feeRecipient', type: ABIDataTypes.ADDRESS }],
         type: BitcoinAbiTypes.Function,
     },
     {

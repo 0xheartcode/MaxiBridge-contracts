@@ -28,6 +28,20 @@ export class PauserSet extends NetEvent {
     }
 }
 
+/**
+ * Emitted when the dedicated fee-revenue recipient is set/rotated/disabled.
+ * `oldRecipient` -> `newRecipient`; a zero `newRecipient` disables fee sweeps.
+ * Mirrors the EVM `BridgeEscrow.TreasurySet` role.
+ */
+export class FeeRecipientUpdated extends NetEvent {
+    constructor(oldRecipient: Address, newRecipient: Address) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2);
+        data.writeAddress(oldRecipient);
+        data.writeAddress(newRecipient);
+        super('FeeRecipientUpdated', data);
+    }
+}
+
 export class WrappedTokenSet extends NetEvent {
     constructor(wrappedToken: Address, enabled: bool) {
         const data = new BytesWriter(ADDRESS_BYTE_LENGTH + 1);

@@ -212,8 +212,10 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
         const accruedAfterLock = await depository.accruedFees(flowId);
         Assert.expect(flowAfterLock[16]! + accruedAfterLock).toEqual(balAfterLock);
 
-        // Governor (deployer) sweeps the full accrued fee.
+        // Governor (deployer) sweeps the full accrued fee to the configured
+        // fee recipient (deployer here, for the balance arithmetic below).
         setSender(deployer);
+        await depository.setFeeRecipient(deployer);
         await depository.withdrawFees(flowId, wusdcAddress, accruedAfterLock);
 
         // Post-sweep: balance dropped by fee; inventory unchanged; accrued = 0.
@@ -311,24 +313,41 @@ await opnet('BridgeDepository — #62 — withdrawFees', async (vm: OPNetUnit) =
         return flowId;
     }
 
-    await vm.it('transfers accrued fee to the governor + decrements the accumulator (NOT paused)', async () => {
+    await vm.it('transfers accrued fee to the dedicated feeRecipient (NOT the governor) + decrements (NOT paused)', async () => {
         const { depository, wusdc, wusdcAddress } = setup;
         const flowId = await arrange();
 
         // Bridge is NOT paused — routine sweep must succeed.
         Assert.expect(await depository.paused()).toEqual(false);
 
-        const govBefore = await wusdc.balanceOf(deployer);
+        // Dedicated fee sink, distinct from the governor (deployer).
         setSender(deployer); // governor
+        await depository.setFeeRecipient(alice);
+
+        const sinkBefore = await wusdc.balanceOf(alice);
+        const govBefore = await wusdc.balanceOf(deployer);
         await depository.withdrawFees(flowId, wusdcAddress, 4_000n);
 
         Assert.expect(await depository.accruedFees(flowId)).toEqual(6_000n);
-        Assert.expect(await wusdc.balanceOf(deployer)).toEqual(govBefore + 4_000n);
+        // Fee landed on the feeRecipient, NOT the governor key.
+        Assert.expect(await wusdc.balanceOf(alice)).toEqual(sinkBefore + 4_000n);
+        Assert.expect(await wusdc.balanceOf(deployer)).toEqual(govBefore);
 
         // Sweep the remainder.
         await depository.withdrawFees(flowId, wusdcAddress, 6_000n);
         Assert.expect(await depository.accruedFees(flowId)).toEqual(0n);
-        Assert.expect(await wusdc.balanceOf(deployer)).toEqual(govBefore + 10_000n);
+        Assert.expect(await wusdc.balanceOf(alice)).toEqual(sinkBefore + 10_000n);
+    });
+
+    await vm.it('fee sweep is FAIL-CLOSED when feeRecipient is unset', async () => {
+        const { depository, wusdcAddress } = setup;
+        const flowId = await arrange();
+        // feeRecipient never wired → withdrawFees must revert (no silent
+        // zero-address burn of protocol revenue).
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await depository.withdrawFees(flowId, wusdcAddress, 1_000n);
+        }).toThrow();
     });
 
     await vm.it('reverts when amount > accrued', async () => {
