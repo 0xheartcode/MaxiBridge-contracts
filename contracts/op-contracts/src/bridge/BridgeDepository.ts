@@ -1799,15 +1799,21 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: token not flow canonical');
         }
 
-        // Verify → effect → interaction (CEI). Cap-check + ledger credit
-        // happen before the external transferFrom; a failed transfer
-        // reverts the whole tx, so the ledger can never lead custody.
-        const before: u256 = this._flowInventory.get(flowId);
-        const after: u256 = SafeMath.add(before, amount);
-        if (u256.gt(after, this._flowCap.get(flowId))) {
-            throw new Revert('BridgeDepository: flow cap exceeded');
-        }
-        this._flowInventory.set(flowId, after);
+        // FINDING-005 (audit 2026-05-26): balance-delta the transfer so the
+        // ledger credit equals what the bridge ACTUALLY received. Pre-fix
+        // this credited the caller-supplied `amount`; a non-standard OP20
+        // (fee-on-transfer, rebasing, partial-fill) could leave
+        // `_flowInventory` ahead of physical custody — the same drift class
+        // that lockForBridge's pre-#46 form had. Mirrors the lockForBridge
+        // balance-delta pattern, and is governor-only, so a misconfigured
+        // token surfaces as a revert during provisioning rather than as
+        // silent inventory inflation.
+        const balOfSelector: u32 = encodeSelector('balanceOf(address)');
+
+        const balBeforeW = new BytesWriter(4 + ADDRESS_BYTE_LENGTH);
+        balBeforeW.writeSelector(balOfSelector);
+        balBeforeW.writeAddress(this.address);
+        const balBefore: u256 = Blockchain.call(token, balBeforeW).data.readU256();
 
         const transferFromSelector: u32 = encodeSelector('transferFrom(address,address,uint256)');
         const w = new BytesWriter(4 + ADDRESS_BYTE_LENGTH * 2 + 32);
@@ -1817,8 +1823,24 @@ export class BridgeDepository extends ReentrancyGuard {
         w.writeU256(amount);
         Blockchain.call(token, w);
 
+        const balAfterW = new BytesWriter(4 + ADDRESS_BYTE_LENGTH);
+        balAfterW.writeSelector(balOfSelector);
+        balAfterW.writeAddress(this.address);
+        const balAfter: u256 = Blockchain.call(token, balAfterW).data.readU256();
+
+        const received: u256 = SafeMath.sub(balAfter, balBefore);
+        if (received.isZero()) throw new Revert('BridgeDepository: nothing received');
+
+        // Now credit + cap-check against actual received.
+        const before: u256 = this._flowInventory.get(flowId);
+        const after: u256 = SafeMath.add(before, received);
+        if (u256.gt(after, this._flowCap.get(flowId))) {
+            throw new Revert('BridgeDepository: flow cap exceeded');
+        }
+        this._flowInventory.set(flowId, after);
+
         this.emitEvent(
-            new InventoryProvisionedOpNet(flowId, token, Blockchain.tx.sender, amount),
+            new InventoryProvisionedOpNet(flowId, token, Blockchain.tx.sender, received),
         );
         return new BytesWriter(0);
     }
