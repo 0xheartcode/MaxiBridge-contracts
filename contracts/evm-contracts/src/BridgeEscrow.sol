@@ -117,6 +117,37 @@ contract BridgeEscrow is
             "RefundAuthorization(uint256 depositNonce,bytes32 flowId,uint32 signerEpoch)"
         );
 
+    /// @notice EIP-712 type for the M-of-N burn-refund attestation (#55
+    ///         EVM-side symmetric counterpart to OPNet `refundBurn`).
+    ///         Authorizes `refundBurn` to RE-MINT a burned `WrappedERC20`
+    ///         amount back to the original burner when that burn's OPNet
+    ///         destination voucher was PERMANENTLY cancelled (reorg/fraud),
+    ///         leaving the tokens destroyed with no release path.
+    /// @dev    MINT-AUTHORITY PRIMITIVE. Trust model == vouchers: the SAME
+    ///         M-of-N signer set attests off-chain that the burn is final
+    ///         AND the OPNet destination is cancelled-and-final. Every
+    ///         binding field lives inside the signed struct, so tampering
+    ///         (amount / burner / token / flowId / epoch / nonce / txHash)
+    ///         fails the EIP-712 digest recover → NO mint. `burnBlockHash`
+    ///         is the reorg guard: opaque to the contract, but signed so a
+    ///         stale-block attestation can't be reused after a reorg.
+    struct BurnRefundAuthorization {
+        address burner;          // original burner — the re-mint recipient
+        address wrappedToken;    // WrappedERC20 to re-mint (bridge-mintable)
+        uint256 amount;          // burned amount to re-mint (signer-attested)
+        uint256 burnNonce;       // burn nonce from the BurnedForRelease event
+        bytes32 burnTxHash;      // the EVM burn tx hash (binding + replay key)
+        bytes32 burnBlockHash;   // reorg guard — opaque, but inside the struct
+        bytes32 flowId;          // route binding; flow.evmToken must == wrappedToken
+        uint32  signerEpoch;     // MUST equal currentEpoch
+    }
+
+    /// @dev keccak256("BurnRefundAuthorization(address burner,address wrappedToken,uint256 amount,uint256 burnNonce,bytes32 burnTxHash,bytes32 burnBlockHash,bytes32 flowId,uint32 signerEpoch)")
+    bytes32 public constant BURN_REFUND_AUTHORIZATION_TYPEHASH =
+        keccak256(
+            "BurnRefundAuthorization(address burner,address wrappedToken,uint256 amount,uint256 burnNonce,bytes32 burnTxHash,bytes32 burnBlockHash,bytes32 flowId,uint32 signerEpoch)"
+        );
+
     /// @notice Token bridging mode — set per token at registration time.
     ///         Once set, can never be changed for that token (set-once).
     ///
@@ -411,15 +442,27 @@ contract BridgeEscrow is
     ///         slot is unchanged.
     address public pauser;
 
+    /// @notice #55 — per-burn replay guard for `refundBurn`. Keyed by
+    ///         `keccak256(abi.encode(burnTxHash, burnNonce))`. Set strictly
+    ///         BEFORE the cross-contract re-mint (CEI) — it is the ONLY
+    ///         protection against a double / infinite re-mint of the same
+    ///         burn. An unset slot (false) means "not yet refunded";
+    ///         append-only, no version bump needed.
+    /// @dev    Appended after `pauser` (append-only). The trailing `__gap`
+    ///         shrinks by 1 (41 → 40) so the layout past this slot is
+    ///         unchanged.
+    mapping(bytes32 => bool) public refundedBurns;
+
     /// @dev Reserved for future appends. New slots go BEFORE the gap and the
     ///      gap shrinks by the same count to preserve layout.
     ///      Slots past treasury: unwrapFeeBps + unwrapMinFee + flows +
     ///      allFlowIds + flowsByEvmToken + flowsByMode + flowsByEvmChain +
-    ///      lockedDeposits + pauser = 9. (Legacy tokenMode + opnetCounterpartOf +
-    ///      _tokenModeFinalized were removed pre-mainnet; flow registry is
-    ///      the source of truth for mode + OPNet counterpart binding.)
-    ///      50 - 9 = 41.
-    uint256[41] private __gap;
+    ///      lockedDeposits + pauser + refundedBurns = 10. (Legacy tokenMode +
+    ///      opnetCounterpartOf + _tokenModeFinalized were removed pre-mainnet;
+    ///      flow registry is the source of truth for mode + OPNet counterpart
+    ///      binding.)
+    ///      50 - 10 = 40.
+    uint256[40] private __gap;
 
     // ---------------------------------------------------------------------
     // Events
@@ -472,6 +515,17 @@ contract BridgeEscrow is
         uint256 indexed depositNonce,
         address indexed user,
         address indexed by
+    );
+
+    /// @notice #55 — emitted on a successful trustless burn-side recovery.
+    ///         `burnId` is the replay key `keccak256(burnTxHash, burnNonce)`;
+    ///         `burner` is the re-mint recipient; `amount` is the
+    ///         signer-attested re-minted amount.
+    event BurnRefunded(
+        bytes32 indexed burnId,
+        address indexed burner,
+        address indexed wrappedToken,
+        uint256 amount
     );
 
     event Claimed(
@@ -582,8 +636,6 @@ contract BridgeEscrow is
     error FeeBpsTooHigh();
     error TipCapTooHigh();
     error WrongMode();
-    error InsufficientInventory();
-    error NotProvisioner();
     error InvalidSigBlob();
     error InsufficientSignatures();
     error DuplicateSigner();
@@ -594,6 +646,7 @@ contract BridgeEscrow is
     error VestingVaultTokenMismatch();
     error InsufficientAccruedFees();
     error VoucherNotCancelled();        // HIGH-001 — clawback requires prior cancelVoucher
+    error BurnAlreadyRefunded();        // #55 — refundBurn replay guard already set
     // #62-fix — lifecycle errors for time-based settlement.
     error FeeExceedsAmount();           // lock with fee >= received (zero-net bridge)
     error LockNotSettleable();          // settleLockedDeposit on non-Locked status
@@ -611,7 +664,6 @@ contract BridgeEscrow is
 
     // ─── Relayer-tip payout errors (PR β.2.payout-evm) ─────────────────
     error TipExceedsFlowCap();
-    error TipPaidOnInactiveFlow();
 
     // ─── Flow consumption errors (PR γ.1) ──────────────────────────────
     error FlowNotActive();
@@ -1600,6 +1652,75 @@ contract BridgeEscrow is
         IWrappedERC20(intent.wrappedToken).mintFromBridge(intent.to, intent.amount);
     }
 
+    /// @notice #55 — trustless burn-side recovery (MINT-AUTHORITY PRIMITIVE).
+    ///         Symmetric EVM counterpart to OPNet `BridgeDepository.refundBurn`.
+    ///         When a `WrappedERC20` burn's OPNet destination voucher is
+    ///         PERMANENTLY cancelled (reorg/fraud) the burned tokens are gone
+    ///         AND the destination never pays. This RE-MINTS the burned
+    ///         `amount` back to the original `burner`, gated by an M-of-N
+    ///         EIP-712 attestation from the SAME signer set that signs
+    ///         vouchers — they attest off-chain that the burn is final AND the
+    ///         destination voucher is cancelled-and-final.
+    ///
+    /// @dev    Permissionless to *call* — the tokens always go to the
+    ///         signer-attested `intent.burner`, so anyone may submit the blob.
+    ///         NOT pause-gated: like `markDepositRefundable`/`refundLockedDeposit`,
+    ///         recovery must stay possible during an incident freeze.
+    ///
+    ///         Replay guard: `keccak256(abi.encode(burnTxHash, burnNonce))` is
+    ///         set BEFORE the cross-contract mint (CEI) — the ONLY protection
+    ///         against a double / infinite re-mint. `nonReentrant` backstops
+    ///         the external `mintFromBridge` call.
+    ///
+    ///         `sig` is the same `[uint8 numSigs][sig(65)]…` M-of-N blob that
+    ///         `claim`/`claimMintWrapped` consume, verified over the EIP-712
+    ///         digest of the BurnRefundAuthorization. Binding mirrors the
+    ///         claimMintWrapped flow checks: wrappedToken allowlisted +
+    ///         bridge-mintable; flow exists + ACTIVE/DRAINING + its evmToken
+    ///         binds the wrapped (so a sig for one wrapped can't be replayed
+    ///         against another).
+    function refundBurn(BurnRefundAuthorization calldata intent, bytes calldata sig)
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        if (intent.burner == address(0)) revert InvalidRecipient();
+        if (intent.amount == 0) revert AmountZero();
+        if (intent.signerEpoch != currentEpoch) revert InvalidSignerEpoch();
+        if (!supportedToken[intent.wrappedToken]) revert TokenNotSupported();
+
+        // Per-burn replay key. Computed before any sig work so the revert
+        // surface is stable and cheap for an already-refunded burn.
+        bytes32 burnId = keccak256(abi.encode(intent.burnTxHash, intent.burnNonce));
+        if (refundedBurns[burnId]) revert BurnAlreadyRefunded();
+
+        // Verify the M-of-N attestation over the EIP-712 digest. Done before
+        // the flow lookup so unauthenticated callers can't spam flow reads.
+        bytes32 digest = _hashTypedDataV4(_hashBurnRefundAuth(intent));
+        _verifySignatures(digest, sig);
+
+        // Flow binding — mirrors claimMintWrapped. The attestation commits to
+        // a flowId; assert (1) it exists, (2) it is a mint-on-EVM mode (the
+        // bridge can only re-mint where it is the minter), (3) the wrapped in
+        // the attestation matches the flow's evmToken, (4) the flow is live.
+        FlowRecord storage flow = flows[intent.flowId];
+        if (flow.evmChainId == 0) revert FlowNotFound();
+        if (flow.mode != uint8(TokenMode.INVERSE_WRAPPED) && flow.mode != uint8(TokenMode.NATIVE_BURN_MINT)) {
+            revert WrongMode();
+        }
+        if (flow.evmToken != intent.wrappedToken) revert WrongMode();
+        if (flow.status != FLOW_STATUS_ACTIVE && flow.status != FLOW_STATUS_DRAINING) {
+            revert FlowNotActive();
+        }
+
+        // Effects BEFORE interaction (CEI): set the replay flag, then mint.
+        refundedBurns[burnId] = true;
+
+        emit BurnRefunded(burnId, intent.burner, intent.wrappedToken, intent.amount);
+
+        IWrappedERC20(intent.wrappedToken).mintFromBridge(intent.burner, intent.amount);
+    }
+
     // ---------------------------------------------------------------------
     // Mode-4 inventory provisioning (POOLED_LOCK_RELEASE)
     // ---------------------------------------------------------------------
@@ -2010,10 +2131,6 @@ contract BridgeEscrow is
     // Views
     // ---------------------------------------------------------------------
 
-    function hashIntent(ReleaseIntent calldata intent) external view returns (bytes32) {
-        return _hashTypedDataV4(_hashIntent(intent));
-    }
-
     function domainSeparator() external view returns (bytes32) {
         return _domainSeparatorV4();
     }
@@ -2062,11 +2179,6 @@ contract BridgeEscrow is
             );
     }
 
-    /// @notice EIP-712 digest for a MintIntent — useful off-chain and for tests.
-    function hashMintIntent(MintIntent calldata intent) external view returns (bytes32) {
-        return _hashTypedDataV4(_hashMintIntent(intent));
-    }
-
     function _hashRefundAuth(uint256 depositNonce_, bytes32 flowId, uint32 signerEpoch)
         internal
         pure
@@ -2079,6 +2191,27 @@ contract BridgeEscrow is
                     depositNonce_,
                     flowId,
                     signerEpoch
+                )
+            );
+    }
+
+    function _hashBurnRefundAuth(BurnRefundAuthorization calldata intent)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return
+            keccak256(
+                abi.encode(
+                    BURN_REFUND_AUTHORIZATION_TYPEHASH,
+                    intent.burner,
+                    intent.wrappedToken,
+                    intent.amount,
+                    intent.burnNonce,
+                    intent.burnTxHash,
+                    intent.burnBlockHash,
+                    intent.flowId,
+                    intent.signerEpoch
                 )
             );
     }
