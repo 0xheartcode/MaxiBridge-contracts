@@ -1160,6 +1160,23 @@ contract BridgeEscrow is
             flow.inventory = flow.inventory - grossDst128;
         }
 
+        // FINDING-004 (audit 2026-05-26): accrue the release-side fee.
+        // The inventory was decremented by gross, but only
+        // `intent.amount` (= net) leaves the bridge to the recipient and
+        // `tip` to the relayer. The remainder `gross - net = fee`
+        // stays in the bridge's balance. Pre-fix this delta was never
+        // recorded anywhere, so `withdrawFees` couldn't sweep it and the
+        // per-flow invariant `inventory + accruedFees == bridge.balance`
+        // drifted upward on every release.
+        // `intent.amount > intent.grossSrcAmount` is rejected earlier
+        // (AmountExceedsGross), so the subtraction is safe.
+        uint256 feePortion = uint256(intent.grossSrcAmount) - intent.amount;
+        if (feePortion > 0) {
+            // grossDst128 is uint128, feePortion <= grossDst128, so the
+            // cast back to uint128 below is safe.
+            flow.accruedFees = uint128(uint256(flow.accruedFees) + feePortion);
+        }
+
         // 5. tip cap + carve.
         //
         // FINDING-006 (audit 2026-05-26): the pre-fix form was

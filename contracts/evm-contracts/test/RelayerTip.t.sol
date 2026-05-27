@@ -282,6 +282,74 @@ contract RelayerTipTest is Test {
         escrow.claim(intent, sig);
     }
 
+    // ───── FINDING-004 regression (audit 2026-05-26) ───────────────────────
+
+    /// @notice Release-side fee (gross - net) must be accrued into
+    ///         flow.accruedFees so withdrawFees can sweep it. Pre-fix the
+    ///         fee portion was decremented from inventory but never
+    ///         recorded anywhere, drifting the per-flow invariant
+    ///         (inventory + accruedFees vs. bridge.balanceOf(token)).
+    function test_Claim_ReleaseFee_AccruedIntoFlow() public {
+        // grossSrcAmount = 10_000, amount (net) = 9_950 → fee = 50.
+        uint256 gross = 10_000;
+        uint256 net = 9_950;
+        uint256 expectedFee = gross - net;
+
+        BridgeEscrow.FlowRecord memory fBefore = escrow.getFlow(flowId);
+        uint256 balBefore = usdc.balanceOf(address(escrow));
+        uint128 invBefore = fBefore.inventory;
+        uint128 accruedBefore = fBefore.accruedFees;
+
+        BridgeEscrow.ReleaseIntent memory intent = BridgeEscrow.ReleaseIntent({
+            token: address(usdc),
+            to: bob,
+            amount: net,
+            srcChainId: EXPECTED_OPNET_CHAIN_ID,
+            opnetTxHash: keccak256("release-fee"),
+            opnetEventIndex: 0,
+            burnNonce: 1,
+            signerEpoch: escrow.currentEpoch(),
+            opnetNonce: keccak256("release-fee-nonce"),
+            grossSrcAmount: gross,
+            relayerTip: 0,
+            flowId: flowId
+        });
+        bytes memory sig = _sign(signerPk, intent);
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        escrow.claim(intent, sig);
+
+        BridgeEscrow.FlowRecord memory fAfter = escrow.getFlow(flowId);
+
+        // Recipient receives only net.
+        assertEq(usdc.balanceOf(bob) - bobBefore, net, "recipient gets net");
+        // Bridge balance dropped by exactly net (the fee stayed in the bridge).
+        assertEq(balBefore - usdc.balanceOf(address(escrow)), net, "bridge balance dropped by net only");
+        // Inventory decremented by gross.
+        assertEq(uint256(invBefore) - uint256(fAfter.inventory), gross, "inventory decremented by gross");
+        // accruedFees incremented by exactly the fee — this is the fix.
+        assertEq(uint256(fAfter.accruedFees) - uint256(accruedBefore), expectedFee, "accruedFees += fee");
+
+        // Per-flow invariant after the release:
+        //   delta(bridge_balance) = -net
+        //   delta(inventory)      = -gross
+        //   delta(accruedFees)    = +fee   (fee = gross - net)
+        //   delta(inventory + accruedFees) = -gross + fee = -net == delta(bridge_balance)
+        int256 dInv = int256(uint256(fAfter.inventory)) - int256(uint256(invBefore));
+        int256 dAccrued = int256(uint256(fAfter.accruedFees)) - int256(uint256(accruedBefore));
+        int256 dBal = int256(usdc.balanceOf(address(escrow))) - int256(balBefore);
+        assertEq(dInv + dAccrued, dBal, "inventory + accruedFees delta == bridge balance delta");
+    }
+
+    /// @notice Zero-fee voucher (gross == amount) does not bump accruedFees.
+    function test_Claim_ReleaseFee_ZeroFee_NoAccrual() public {
+        uint128 accruedBefore = escrow.getFlow(flowId).accruedFees;
+        BridgeEscrow.ReleaseIntent memory intent = _intent(10_000, 0, flowId, keccak256("zero-fee"));
+        bytes memory sig = _sign(signerPk, intent);
+        escrow.claim(intent, sig);
+        assertEq(escrow.getFlow(flowId).accruedFees, accruedBefore, "no fee -> no accrual");
+    }
+
     // ───── FINDING-006 regressions (audit 2026-05-26) ──────────────────────
 
     /// @notice With `tipCapBps == 0`, ANY positive tip must revert. Pre-fix

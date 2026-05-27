@@ -1717,6 +1717,23 @@ export class BridgeDepository extends ReentrancyGuard {
             SafeMath.sub(inventoryRelBefore, parsed.grossAmount),
         );
 
+        // FINDING-004 (audit 2026-05-26): accrue the release-side fee.
+        // Inventory was decremented by gross, but only `parsed.netAmount`
+        // leaves the bridge (split into recipient + tip). The remainder
+        // `parsed.feeAmount` (= gross - net, validated at the head of this
+        // function) stays in the bridge's balance. Pre-fix this delta was
+        // never recorded anywhere, so `withdrawFees` couldn't sweep it
+        // and the per-flow invariant
+        // `_flowInventory + _flowAccruedFees == bridge balance` drifted
+        // upward on every release.
+        if (!parsed.feeAmount.isZero()) {
+            const accruedBeforeRel: u256 = this._flowAccruedFees.get(flowIdRel);
+            this._flowAccruedFees.set(
+                flowIdRel,
+                SafeMath.add(accruedBeforeRel, parsed.feeAmount),
+            );
+        }
+
         let recipientNetAmountRel: u256 = parsed.netAmount;
         if (!parsed.relayerTip.isZero()) {
             // FINDING-006 (audit 2026-05-26): cross-multiply instead of

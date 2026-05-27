@@ -692,6 +692,115 @@ await opnet('BridgeDepository — #44 — lockForBridge → claimReleaseWithVouc
             }).toThrow();
         });
 
+        // ───── FINDING-004 regression (audit 2026-05-26) ──────────────────
+        //
+        // claimReleaseWithVoucher decrements inventory by gross and transfers
+        // only net to the recipient. Pre-fix the `parsed.feeAmount` portion
+        // sat in custody but was never recorded in `_flowAccruedFees`, so
+        // `withdrawFees` couldn't sweep it and the per-flow invariant
+        // `_flowInventory + _flowAccruedFees ↔ bridge balance` drifted
+        // upward by exactly the fee on every release.
+
+        await vm.it('FINDING-004: release accrues parsed.feeAmount into _flowAccruedFees', async () => {
+            const { depository, wusdc, wusdcAddress, depositoryAddress, signerWallet } = setup;
+            const releaseSrcBridge = Blockchain.generateRandomAddress();
+            const releaseSrcToken = Blockchain.generateRandomAddress();
+            await depository.setTokenMode(wusdcAddress, 1n, MODE1_EVM_COUNTERPART);
+            const flowId = await registerFlow(setup, {
+                mode: 1n,
+                sourceBridgeAddr: releaseSrcBridge,
+                sourceTokenAddr: releaseSrcToken,
+            });
+
+            // Lock so the release has inventory + fees to draw from. feeBps
+            // defaults to 50; lock 4_000_000 → inventory net = 3_980_000,
+            // _flowAccruedFees from the lock side = 20_000.
+            setSender(depositoryAddress);
+            await wusdc.mintTo(alice, 4_000_000n);
+            await wusdc.increaseAllowance(alice, depositoryAddress, 4_000_000n);
+            const evmRecipient = new Uint8Array(32);
+            for (let i = 12; i < 32; i++) evmRecipient[i] = 0xab;
+            setSender(alice);
+            await depository.lockForBridge(flowId, wusdcAddress, 4_000_000n, evmRecipient, 1);
+
+            const accruedAfterLock = await depository.accruedFees(flowId);
+            const inventoryAfterLock = (await depository.getFlow(flowId))[16]!;
+            const balAfterLock = await wusdc.balanceOf(depositoryAddress);
+            // Invariant on the lock side: inventory + accrued == bridge balance.
+            Assert.expect(inventoryAfterLock + accruedAfterLock).toEqual(balAfterLock);
+
+            // Now do a release with a non-zero fee. gross=1_000_000, fee=5_000,
+            // net=995_000. Pre-fix accrued stays at 20_000 (drift!); post-fix
+            // accrued bumps to 25_000.
+            const release = buildVoucher({
+                contractSelf: depositoryAddress,
+                selector: releaseSelector(),
+                recipient: alice,
+                sourceBridgeAddr: releaseSrcBridge,
+                sourceTokenAddr: releaseSrcToken,
+                sourceTxHash: 0x9001n,
+                sourceLogIndex: 0,
+                wrappedToken: wusdcAddress,
+                grossAmount: 1_000_000n,
+                feeAmount: 5_000n,
+                netAmount: 995_000n,
+                voucherId: 0x9001n,
+            });
+            await depository.claimReleaseWithVoucher(release.preimage, signVoucher(signerWallet, release.hash));
+
+            const accruedAfterRelease = await depository.accruedFees(flowId);
+            const inventoryAfterRelease = (await depository.getFlow(flowId))[16]!;
+            const balAfterRelease = await wusdc.balanceOf(depositoryAddress);
+
+            // accruedFees must have bumped by exactly the release fee.
+            Assert.expect(accruedAfterRelease - accruedAfterLock).toEqual(5_000n);
+            // Inventory decremented by gross (1_000_000).
+            Assert.expect(inventoryAfterLock - inventoryAfterRelease).toEqual(1_000_000n);
+            // Bridge balance dropped by net only (995_000).
+            Assert.expect(balAfterLock - balAfterRelease).toEqual(995_000n);
+            // Per-flow invariant still holds after the release.
+            Assert.expect(inventoryAfterRelease + accruedAfterRelease).toEqual(balAfterRelease);
+        });
+
+        await vm.it('FINDING-004: release with feeAmount=0 does not bump accruedFees', async () => {
+            const { depository, wusdc, wusdcAddress, depositoryAddress, signerWallet } = setup;
+            const releaseSrcBridge = Blockchain.generateRandomAddress();
+            const releaseSrcToken = Blockchain.generateRandomAddress();
+            await depository.setTokenMode(wusdcAddress, 1n, MODE1_EVM_COUNTERPART);
+            const flowId = await registerFlow(setup, {
+                mode: 1n,
+                sourceBridgeAddr: releaseSrcBridge,
+                sourceTokenAddr: releaseSrcToken,
+            });
+            setSender(depositoryAddress);
+            await wusdc.mintTo(alice, 4_000_000n);
+            await wusdc.increaseAllowance(alice, depositoryAddress, 4_000_000n);
+            const evmRecipient = new Uint8Array(32);
+            for (let i = 12; i < 32; i++) evmRecipient[i] = 0xab;
+            setSender(alice);
+            await depository.lockForBridge(flowId, wusdcAddress, 4_000_000n, evmRecipient, 1);
+            const accruedBefore = await depository.accruedFees(flowId);
+
+            // Zero-fee release: gross == net.
+            const release = buildVoucher({
+                contractSelf: depositoryAddress,
+                selector: releaseSelector(),
+                recipient: alice,
+                sourceBridgeAddr: releaseSrcBridge,
+                sourceTokenAddr: releaseSrcToken,
+                sourceTxHash: 0x9002n,
+                sourceLogIndex: 0,
+                wrappedToken: wusdcAddress,
+                grossAmount: 1_000_000n,
+                feeAmount: 0n,
+                netAmount: 1_000_000n,
+                voucherId: 0x9002n,
+            });
+            await depository.claimReleaseWithVoucher(release.preimage, signVoucher(signerWallet, release.hash));
+
+            Assert.expect(await depository.accruedFees(flowId)).toEqual(accruedBefore);
+        });
+
         await vm.it('lockForBridge rejects an unknown flowId before any token moves', async () => {
             const { depository, wusdc, wusdcAddress, depositoryAddress } = setup;
             await depository.setTokenMode(wusdcAddress, 1n, MODE1_EVM_COUNTERPART);
