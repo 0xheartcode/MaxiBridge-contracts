@@ -48,6 +48,7 @@ import {
     FeesWithdrawn,
     LockMarkedRefundable,
     LockRefunded,
+    BurnRefunded,
 } from './events';
 
 /**
@@ -209,6 +210,66 @@ const LOCK_STATUS_NONE: u32 = 0;
 const LOCK_STATUS_LOCKED: u32 = 1;
 const LOCK_STATUS_REFUNDABLE: u32 = 2;
 const LOCK_STATUS_REFUNDED: u32 = 3;
+
+/**
+ * Trustless BURN-side recovery (re-mint) — closes the recovery gap for
+ * burn-initiated OPNet legs (mode 0 reverse: burn wUSDC → EVM release; mode 2
+ * OPNet→EVM). A user burns wrapped tokens via `WrappedOP20.burnForRelease`
+ * expecting the EVM destination to release. Normally the EVM voucher is
+ * always-claimable (no deadline) so no recovery is needed. The GAP this closes:
+ * if the EVM destination voucher is PERMANENTLY cancelled (reorg / fraud), the
+ * burned tokens are gone AND the destination never pays → the burner needs the
+ * burned amount RE-MINTED.
+ *
+ * ⚠️ MINT-AUTHORITY PRIMITIVE — a wrong guard mints tokens from thin air.
+ * The trust model is IDENTICAL to vouchers: the M-of-N signer set attests
+ * off-chain facts. The signer set signs a `BurnRefundAuthorization` ONLY after
+ * confirming, off-chain, BOTH (a) the burn is on-chain & final AND (b) the EVM
+ * destination voucher is cancelled-and-final.
+ *
+ * The burn happens on the TOKEN (`WrappedOP20.burnForRelease`), not the
+ * depository, so the depository has NO native burn record. The M-of-N
+ * attestation is therefore SELF-CONTAINED — it carries every field needed to
+ * rebuild the preimage + bound the re-mint. The depository never reads a stored
+ * burn record (it has none); it trusts the attestation exactly as it trusts a
+ * voucher's `netAmount`.
+ *
+ * BurnRefundAuthorization preimage — 296 bytes total. The attestation IS this
+ * signed preimage (mirrors the 252-byte BurnAttestation / `confirmBurn` shape):
+ * built off-chain by the signer, parsed at fixed offsets on-chain, and the
+ * M-of-N sig is verified over these exact bytes (no rebuild step). Layout:
+ *   networkId       u256    32   (0)    — domain separation (1=mainnet/2=testnet)
+ *   contractSelf    Address 32   (32)   — this depository's identity
+ *   selector        u32      4   (64)   — sha256('refundBurn(bytes,bytes)') = 0xbe782e17
+ *   burner          u256    32   (68)   — OPNet identity of the original burner;
+ *                                         the re-mint recipient
+ *   wrappedToken    u256    32   (100)  — OPNet identity of the wrapped token to
+ *                                         re-mint (wUSDC/wUSDT)
+ *   amount          u256    32   (132)  — burned amount to re-mint (signer-attested,
+ *                                         same trust as a voucher netAmount)
+ *   burnNonce       u256    32   (164)  — burn id from the BurnedForRelease event
+ *   burnTxHash      u256    32   (196)  — the OPNet burn tx hash (binding + replay key)
+ *   burnBlock       u256    32   (228)  — burn block number-or-hash; REORG GUARD,
+ *                                         mirrors the voucher path's sourceBlockHash
+ *   flowId          u256    32   (260)  — route binding; flow's opnetToken must
+ *                                         == wrappedToken (mirrors the claim path)
+ *   signerEpoch     u32      4   (292)  — MUST equal current _signerEpoch
+ *                                = 296
+ *
+ * Every identity field is inside the signed bytes, so any tampering (amount /
+ * burner / token / flowId / epoch / burnNonce / burnTxHash) makes the ML-DSA
+ * verify fail → NO mint. The on-chain replay key is sha256(burnTxHash‖burnNonce).
+ */
+const BURN_REFUND_AUTHORIZATION_LEN: i32 = 296;
+
+/**
+ * SHA-256 selector of `refundBurn(bytes,bytes)` first 4 bytes — bound into the
+ * BurnRefundAuthorization preimage so an authorization can only ever be
+ * consumed by this method on this contract. Asserted against the OPNet
+ * transform's emitted selector at build time (see CLAUDE.md §8). If a future
+ * rebuild changes the signature this MUST be regenerated.
+ */
+const REFUND_BURN_SELECTOR: u32 = 0xbe782e17;
 
 /**
  * BridgeDepository — mint authority for WrappedOP20.
@@ -522,6 +583,21 @@ export class BridgeDepository extends ReentrancyGuard {
     private _lockFee: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
     private _lockMode: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
     private _lockBlock: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+
+    // ─── Trustless burn-side recovery replay guard (#55) ───────────────
+    // burnId → u256.One once that burn has been re-minted via `refundBurn`.
+    // burnId = sha256(burnTxHash(32) ‖ burnNonce(32)) — globally-unique per
+    // burn (the (txHash, nonce) tuple is unique even if a bare nonce could
+    // ever collide across a deep reorg). This map is the ONLY thing
+    // preventing a double / infinite re-mint of the same burn, so it is set
+    // BEFORE the cross-contract mint (CEI) and an already-set slot reverts.
+    //
+    // Append-only: NEW pointer appended AFTER `_lockBlock` to preserve the
+    // append-only storage discipline (Five Upgrade Commandments). An unwritten
+    // StoredMapU256 slot reads zero — the correct "not yet refunded" base, so
+    // NO storage-version bump / onUpdate seeding is required (a clean +1 was
+    // considered and rejected: the map defaults safely).
+    private _refundedBurns: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
     public constructor() {
         super();
@@ -2543,6 +2619,185 @@ export class BridgeDepository extends ReentrancyGuard {
         return r;
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    //  #55 — Trustless burn-side recovery (attested re-mint)
+    //
+    //  ⚠️ MINT-AUTHORITY PRIMITIVE. A wrong guard mints from thin air. This is
+    //  the burn-initiated counterpart of the stranded-lock refund: a user who
+    //  burned wUSDC via `WrappedOP20.burnForRelease` expecting an EVM release
+    //  gets the burned amount RE-MINTED to them iff the EVM destination voucher
+    //  was permanently cancelled (reorg/fraud).
+    //
+    //  The burn lives on the TOKEN, not here, so the attestation is fully
+    //  self-contained (carries burner/token/amount/burnNonce/burnTxHash/
+    //  burnBlock/flowId). Trust model == vouchers: the M-of-N signer set signs
+    //  the BurnRefundAuthorization only after confirming the burn is final AND
+    //  the EVM dest voucher is cancelled-and-final.
+    //
+    //  Scope: OPNet only. The symmetric EVM-side burn recovery (re-mint
+    //  WrappedERC20 via BridgeEscrow for modes 1/2) is a SEPARATE follow-up.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Re-mint a permanently-cancelled burn's principal back to the original
+     * burner, gated by an M-of-N BurnRefundAuthorization attestation.
+     * Permissionless-with-valid-sig (anyone may submit; funds go ONLY to the
+     * signer-attested `burner`).
+     *
+     * The 296-byte preimage is REBUILT here from the caller-supplied
+     * attestation fields (the depository has NO stored burn record — the burn
+     * happened on the token), then verified via `_verifyMofN` against the
+     * CURRENT epoch signer set. Because the burner / token / amount / burnNonce
+     * / burnTxHash / burnBlock / flowId / epoch are ALL inside the signed
+     * preimage, the signer's signature binds the FULL identity + a reorg guard:
+     * any tampered field makes the rebuilt preimage hash to something the signer
+     * never signed → ML-DSA verify fails (no mint).
+     *
+     * Attestation calldata (`bytes` arg) layout — read in order, all big-endian:
+     *   burner       u256  (OPNet identity of the burner / re-mint recipient)
+     *   wrappedToken u256  (OPNet identity of the wrapped token to re-mint)
+     *   amount       u256  (burned amount — signer-attested, == voucher trust)
+     *   burnNonce    u256  (burn id from BurnedForRelease)
+     *   burnTxHash   u256  (OPNet burn tx hash)
+     *   burnBlock    u256  (reorg guard)
+     *   flowId       u256  (route binding; flow's opnetToken must == wrappedToken)
+     *   signerEpoch  u32   (MUST equal current _signerEpoch — bumped on rotation)
+     *                  = 7×32 + 4 = 228 attestation bytes.
+     *
+     * CEI + @nonReentrant + per-burn replay guard. The replay key
+     * `burnId = sha256(burnTxHash ‖ burnNonce)` is set to One BEFORE the mint;
+     * an already-set slot reverts. This guard is the ENTIRE protection against
+     * a double / infinite re-mint — make sure it stays airtight.
+     */
+    @method(
+        { name: 'attestation', type: ABIDataTypes.BYTES },
+        { name: 'mldsaSig', type: ABIDataTypes.BYTES },
+    )
+    @emit('BurnRefunded')
+    @nonReentrant
+    public refundBurn(calldata: Calldata): BytesWriter {
+        this.requireNotPaused();
+
+        // The attestation IS the signed 296-byte preimage (built off-chain by
+        // the signer, mirroring confirmBurn's attestation-is-preimage shape).
+        // We parse it at FIXED offsets, validate the domain/selector/epoch
+        // bindings, then verify the M-of-N sig over the attestation bytes
+        // directly — no rebuild step, so the on-wire bytes and the signed bytes
+        // are provably identical.
+        const attestation: Uint8Array = calldata.readBytesWithLength();
+        const sig: Uint8Array = calldata.readBytesWithLength();
+
+        if (attestation.length != BURN_REFUND_AUTHORIZATION_LEN) {
+            throw new Revert('BridgeDepository: bad burn-refund attestation length');
+        }
+
+        // ── Domain separation — networkId + contractSelf + selector. These
+        // bind the attestation to THIS contract on THIS network + this method,
+        // so a sig is never replayable cross-network / cross-contract / cross-
+        // method (mirrors confirmBurn + the voucher preimage).
+        const networkId: u256 = readU256BE(attestation, 0);
+        if (!u256.eq(networkId, this._networkId.value)) {
+            throw new Revert('BridgeDepository: wrong networkId');
+        }
+        const contractSelf: Address = readAddress(attestation, 32);
+        if (!contractSelf.equals(this.address)) {
+            throw new Revert('BridgeDepository: wrong contractSelf');
+        }
+        const selector: u32 = readU32BE(attestation, 64);
+        if (selector != REFUND_BURN_SELECTOR) {
+            throw new Revert('BridgeDepository: wrong selector');
+        }
+
+        const burnerU256: u256 = readU256BE(attestation, 68);
+        const wrappedTokenU256: u256 = readU256BE(attestation, 100);
+        const amount: u256 = readU256BE(attestation, 132);
+        const burnNonce: u256 = readU256BE(attestation, 164);
+        const burnTxHash: u256 = readU256BE(attestation, 196);
+        // burnBlock @ 228 — reorg guard, opaque to the contract (bound only
+        // because it's inside the signed preimage; the signer used it to pin
+        // the burn to a final block before signing).
+        const flowId: u256 = readU256BE(attestation, 260);
+        const sigEpoch: u32 = readU32BE(attestation, 292);
+
+        if (amount.isZero()) {
+            throw new Revert('BridgeDepository: zero refund amount');
+        }
+
+        // ── Epoch binding — the attestation's signerEpoch MUST equal the
+        // current epoch. Rotating the signer set instantly invalidates any
+        // un-consumed burn-refund attestation (same model as vouchers).
+        if (!u256.eq(u256.fromU32(sigEpoch), this._signerEpoch.value)) {
+            throw new Revert('BridgeDepository: wrong signerEpoch');
+        }
+
+        // ── Per-burn replay guard FIRST (cheap revert before the ML-DSA
+        // verify). burnId = sha256(burnTxHash ‖ burnNonce) — globally unique
+        // per burn (the tuple is unique even if a bare nonce could ever collide
+        // under a deep reorg). This is the ONLY thing preventing a double /
+        // infinite re-mint of the same burn, so it is checked here and SET
+        // below strictly BEFORE the external mint (CEI).
+        const burnId: u256 = _burnRefundId(burnTxHash, burnNonce);
+        if (!this._refundedBurns.get(burnId).isZero()) {
+            throw new Revert('BridgeDepository: burn already refunded');
+        }
+
+        // ── wrappedToken must be an allowlisted wrapped token (mint target) —
+        // the contract never mints an unregistered token.
+        const wrappedToken: Address = _u256ToOpnetAddr(wrappedTokenU256);
+        if (this._wrappedTokens.get(wrappedToken).isZero()) {
+            throw new Revert('BridgeDepository: unknown wrappedToken');
+        }
+
+        // ── flowId binding — mirror the claim path: flow must exist + be
+        // ACTIVE + its opnetToken must equal the wrappedToken being re-minted,
+        // so a mint/burn token live in >1 flow binds to the right route.
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        if (this._flowStatus.get(flowId).toU32() != FLOW_STATUS_ACTIVE) {
+            throw new Revert('BridgeDepository: flow not active');
+        }
+        if (!u256.eq(this._flowOpnetToken.get(flowId), wrappedTokenU256)) {
+            throw new Revert('BridgeDepository: flow token mismatch');
+        }
+
+        // ── M-of-N verify over the attestation bytes — SAME verifier the
+        // vouchers + lock-refund + confirmBurn use. A bad / empty / wrong-epoch
+        // / tampered-identity attestation fails here BEFORE any state change or
+        // mint (every identity field is inside the signed bytes).
+        this._verifyMofN(sig, attestation);
+
+        // ── EFFECTS (CEI) — mark the burn refunded BEFORE the external mint so
+        // a re-entrant token (or a repeated call) cannot double-mint. This is
+        // the single most important line in this method.
+        this._refundedBurns.set(burnId, u256.One);
+
+        // ── INTERACTION — re-mint exactly `amount` of the wrapped token to the
+        // attested burner. The bridge is the minter. `amount` is signer-
+        // attested (same trust as a voucher's netAmount).
+        const burner: Address = _u256ToOpnetAddr(burnerU256);
+        const mintSelector: u32 = encodeSelector('mintTo(address,uint256)');
+        const mintCalldata = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+        mintCalldata.writeSelector(mintSelector);
+        mintCalldata.writeAddress(burner);
+        mintCalldata.writeU256(amount);
+        Blockchain.call(wrappedToken, mintCalldata);
+
+        this.emitEvent(new BurnRefunded(burnId, burner, wrappedToken, amount));
+        return new BytesWriter(0);
+    }
+
+    @view
+    @returns({ name: 'refunded', type: ABIDataTypes.BOOL })
+    public isBurnRefunded(calldata: Calldata): BytesWriter {
+        const burnTxHash: u256 = calldata.readU256();
+        const burnNonce: u256 = calldata.readU256();
+        const burnId: u256 = _burnRefundId(burnTxHash, burnNonce);
+        const r = new BytesWriter(1);
+        r.writeBoolean(!this._refundedBurns.get(burnId).isZero());
+        return r;
+    }
+
     /**
      * Add a signer pubkey hash to the authorized set. Does NOT bump the
      * epoch — vouchers signed by the prior set remain valid (any sig from
@@ -3681,6 +3936,20 @@ function buildBurnReplayKey(
     buf.writeU256(depositId);
     buf.writeU256(evmTxHash);
     buf.writeU32(evmLogIndex);
+    return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
+}
+
+/**
+ * #55 — per-burn replay key for the trustless burn-side recovery (`refundBurn`).
+ * `burnId = sha256(burnTxHash(32) ‖ burnNonce(32))`. The (txHash, nonce) tuple
+ * is globally unique per burn, so this key cannot collide across burns even if
+ * a bare nonce could ever be re-assigned under a deep reorg. The SAME derivation
+ * is used by the `isBurnRefunded` view, so off-chain callers can pre-check.
+ */
+function _burnRefundId(burnTxHash: u256, burnNonce: u256): u256 {
+    const buf = new BytesWriter(32 + 32);
+    buf.writeU256(burnTxHash);
+    buf.writeU256(burnNonce);
     return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
 }
 

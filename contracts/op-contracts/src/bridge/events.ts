@@ -423,3 +423,27 @@ export class LockRefunded extends NetEvent {
         super('LockRefunded', data);
     }
 }
+
+// ─── #55 — Trustless burn-side recovery (attested re-mint) ───────────────
+
+/**
+ * Emitted when a permanently-cancelled burn's principal is RE-MINTED to the
+ * original burner via a valid M-of-N BurnRefundAuthorization (`refundBurn`).
+ * The burn-initiated counterpart of `LockRefunded`. `burnId` is the per-burn
+ * replay key sha256(burnTxHash‖burnNonce); `amount` is the signer-attested
+ * burned amount minted back to `burner`.
+ *
+ * ⚠️ This event marks a MINT-AUTHORITY action gated by M-of-N attestation +
+ * a per-burn replay guard. Indexers should reconcile it against the cancelled
+ * EVM destination voucher.
+ */
+export class BurnRefunded extends NetEvent {
+    constructor(burnId: u256, burner: Address, wrappedToken: Address, amount: u256) {
+        const data = new BytesWriter(32 + ADDRESS_BYTE_LENGTH * 2 + 32);
+        data.writeU256(burnId);
+        data.writeAddress(burner);
+        data.writeAddress(wrappedToken);
+        data.writeU256(amount);
+        super('BurnRefunded', data);
+    }
+}

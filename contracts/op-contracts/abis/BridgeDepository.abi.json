@@ -747,6 +747,36 @@
             ]
         },
         {
+            "name": "refundBurn",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "attestation",
+                    "type": "BYTES"
+                },
+                {
+                    "name": "mldsaSig",
+                    "type": "BYTES"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "isBurnRefunded",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "refunded",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
             "name": "addSignerToSet",
             "type": "Function",
             "payable": false,
@@ -1537,6 +1567,28 @@
                 },
                 {
                     "name": "token",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "BurnRefunded",
+            "values": [
+                {
+                    "name": "burnId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "burner",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "wrappedToken",
                     "type": "ADDRESS"
                 },
                 {

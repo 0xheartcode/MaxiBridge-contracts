@@ -964,7 +964,19 @@ await opnet('BridgeDepository — roles (transferGovernor + pauser)', async (vm:
         // Address.dead() is the all-zero address in the test transaction lib
         // (Address.zero() is not a function here — see authority.ts note).
         await depository.setPauser(Address.dead());
-        Assert.expect((await depository.pauser()).isZero()).toEqual(true);
+        // `.isZero()` is not a runtime method on the Address returned by the
+        // test transaction lib (it's a 32-byte buffer) — compare bytewise to
+        // Address.dead() instead (mirrors upgrade-authority.ts isZeroAddr).
+        const pauserAddr = (await depository.pauser()) as unknown as Uint8Array;
+        const deadAddr = Address.dead() as unknown as Uint8Array;
+        let pauserIsZero = true;
+        for (let i = 0; i < 32; i++) {
+            if (pauserAddr[i] !== deadAddr[i]) {
+                pauserIsZero = false;
+                break;
+            }
+        }
+        Assert.expect(pauserIsZero).toEqual(true);
 
         // Disabled pauser can no longer pause.
         setSender(bob);

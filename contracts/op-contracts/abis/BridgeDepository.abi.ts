@@ -193,6 +193,16 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'BurnRefunded',
+        values: [
+            { name: 'burnId', type: ABIDataTypes.UINT256 },
+            { name: 'burner', type: ABIDataTypes.ADDRESS },
+            { name: 'wrappedToken', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'BurnConfirmed',
         values: [
             { name: 'flowId', type: ABIDataTypes.UINT256 },
@@ -610,6 +620,22 @@ export const BridgeDepositoryAbi = [
         constant: true,
         inputs: [],
         outputs: [{ name: 'refundable', type: ABIDataTypes.BOOL }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'refundBurn',
+        inputs: [
+            { name: 'attestation', type: ABIDataTypes.BYTES },
+            { name: 'mldsaSig', type: ABIDataTypes.BYTES },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'isBurnRefunded',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'refunded', type: ABIDataTypes.BOOL }],
         type: BitcoinAbiTypes.Function,
     },
     {

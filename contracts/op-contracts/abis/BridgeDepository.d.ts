@@ -119,6 +119,12 @@ export type LockRefundedEvent = {
     readonly token: Address;
     readonly amount: bigint;
 };
+export type BurnRefundedEvent = {
+    readonly burnId: bigint;
+    readonly burner: Address;
+    readonly wrappedToken: Address;
+    readonly amount: bigint;
+};
 export type BurnConfirmedEvent = {
     readonly flowId: bigint;
     readonly depositId: bigint;
@@ -461,6 +467,21 @@ export type IsLockRefundable = CallResult<
 >;
 
 /**
+ * @description Represents the result of the refundBurn function call.
+ */
+export type RefundBurn = CallResult<{}, OPNetEvent<BurnRefundedEvent>[]>;
+
+/**
+ * @description Represents the result of the isBurnRefunded function call.
+ */
+export type IsBurnRefunded = CallResult<
+    {
+        refunded: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
  * @description Represents the result of the addSignerToSet function call.
  */
 export type AddSignerToSet = CallResult<{}, OPNetEvent<never>[]>;
@@ -761,6 +782,8 @@ export interface IBridgeDepository extends IOP_NETContract {
     refundLock(lockNonce: bigint): Promise<RefundLock>;
     lockRecord(lockNonce: bigint): Promise<LockRecord>;
     isLockRefundable(): Promise<IsLockRefundable>;
+    refundBurn(attestation: Uint8Array, mldsaSig: Uint8Array): Promise<RefundBurn>;
+    isBurnRefunded(): Promise<IsBurnRefunded>;
     addSignerToSet(pubKeyHash: bigint): Promise<AddSignerToSet>;
     removeSignerFromSet(pubKeyHash: bigint): Promise<RemoveSignerFromSet>;
     setRequiredSignatures(threshold: bigint): Promise<SetRequiredSignatures>;

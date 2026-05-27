@@ -818,6 +818,42 @@ export class BridgeDepository extends ContractRuntime {
         return r.readBoolean();
     }
 
+    // ─── #55 — trustless burn-side recovery (attested re-mint) ──────────
+
+    private readonly refundBurnSelector: number = encodeSelectorWithParams(
+        'refundBurn',
+        ABIDataTypes.BYTES,
+        ABIDataTypes.BYTES,
+    );
+    private readonly isBurnRefundedSelector: number = encodeNumericSelector(
+        'isBurnRefunded()',
+    );
+
+    // The attestation IS the signed 296-byte preimage; only it + the M-of-N
+    // sig blob are sent on the wire (ABI signature `refundBurn(bytes,bytes)`).
+    public async refundBurn(
+        attestation: Uint8Array,
+        mldsaSig: Uint8Array,
+    ): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.refundBurnSelector);
+        w.writeBytesWithLength(attestation);
+        w.writeBytesWithLength(mldsaSig);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async isBurnRefunded(
+        burnTxHash: bigint,
+        burnNonce: bigint,
+    ): Promise<boolean> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.isBurnRefundedSelector);
+        w.writeU256(burnTxHash);
+        w.writeU256(burnNonce);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readBoolean();
+    }
+
     // ─── #62 — per-flow fee accounting + withdrawFees ─────────────────
 
     private readonly withdrawFeesSelector: number = encodeSelectorWithParams(
