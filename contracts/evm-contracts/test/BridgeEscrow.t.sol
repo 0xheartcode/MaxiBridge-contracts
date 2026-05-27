@@ -876,7 +876,7 @@ contract BridgeEscrowTest is Test {
     }
 
     // =====================================================================
-    // Phase 1 — set-once treasury + guardian
+    // Roles PR — owner-rotatable treasury + guardian + dedicated pauser
     // =====================================================================
 
     function test_SetTreasury_Succeeds() public {
@@ -887,11 +887,13 @@ contract BridgeEscrowTest is Test {
         assertEq(escrow.treasury(), treasuryAddr);
     }
 
-    function test_SetTreasury_OnlyOnceReverts() public {
+    /// @dev Roles PR — set-once revert removed; owner may now rotate.
+    function test_SetTreasury_OwnerCanRotate() public {
         vm.startPrank(owner);
         escrow.setTreasury(treasuryAddr);
-        vm.expectRevert(BridgeEscrow.TreasuryAlreadySet.selector);
+        assertEq(escrow.treasury(), treasuryAddr);
         escrow.setTreasury(address(0xDEAD));
+        assertEq(escrow.treasury(), address(0xDEAD));
         vm.stopPrank();
     }
 
@@ -907,17 +909,28 @@ contract BridgeEscrowTest is Test {
         escrow.setTreasury(treasuryAddr);
     }
 
+    /// @dev Rotation is owner-gated — a non-owner cannot re-point treasury.
+    function test_SetTreasury_RotateOnlyOwnerReverts() public {
+        vm.prank(owner);
+        escrow.setTreasury(treasuryAddr);
+        vm.prank(alice);
+        vm.expectRevert();
+        escrow.setTreasury(address(0xDEAD));
+    }
+
     function test_SetGuardian_Succeeds() public {
         vm.prank(owner);
         escrow.setGuardian(guardian);
         assertEq(escrow.guardian(), guardian);
     }
 
-    function test_SetGuardian_OnlyOnceReverts() public {
+    /// @dev Roles PR — set-once revert removed; owner may now rotate.
+    function test_SetGuardian_OwnerCanRotate() public {
         vm.startPrank(owner);
         escrow.setGuardian(guardian);
-        vm.expectRevert(BridgeEscrow.GuardianAlreadySet.selector);
+        assertEq(escrow.guardian(), guardian);
         escrow.setGuardian(address(0xDEAD));
+        assertEq(escrow.guardian(), address(0xDEAD));
         vm.stopPrank();
     }
 
@@ -925,6 +938,91 @@ contract BridgeEscrowTest is Test {
         vm.prank(owner);
         vm.expectRevert(BridgeEscrow.ZeroAddress.selector);
         escrow.setGuardian(address(0));
+    }
+
+    function test_SetGuardian_RotateOnlyOwnerReverts() public {
+        vm.prank(owner);
+        escrow.setGuardian(guardian);
+        vm.prank(alice);
+        vm.expectRevert();
+        escrow.setGuardian(address(0xDEAD));
+    }
+
+    // =====================================================================
+    // Roles PR — dedicated pauser role
+    // =====================================================================
+
+    address internal pauserAddr = address(0xBA5E);
+
+    function test_SetPauser_Succeeds() public {
+        vm.prank(owner);
+        vm.expectEmit(true, false, false, false);
+        emit BridgeEscrow.PauserSet(pauserAddr);
+        escrow.setPauser(pauserAddr);
+        assertEq(escrow.pauser(), pauserAddr);
+    }
+
+    function test_SetPauser_OnlyOwnerReverts() public {
+        vm.prank(alice);
+        vm.expectRevert();
+        escrow.setPauser(pauserAddr);
+    }
+
+    /// @dev Zero address is allowed — it disables the role.
+    function test_SetPauser_ZeroAllowed() public {
+        vm.startPrank(owner);
+        escrow.setPauser(pauserAddr);
+        escrow.setPauser(address(0));
+        assertEq(escrow.pauser(), address(0));
+        vm.stopPrank();
+    }
+
+    function test_Pauser_CanPause() public {
+        vm.prank(owner);
+        escrow.setPauser(pauserAddr);
+        vm.prank(pauserAddr);
+        escrow.pause();
+        assertTrue(escrow.paused());
+    }
+
+    /// @dev Pauser can freeze but NOT thaw — unpause is owner/guardian only.
+    function test_Pauser_CannotUnpause() public {
+        vm.prank(owner);
+        escrow.setPauser(pauserAddr);
+        vm.prank(pauserAddr);
+        escrow.pause();
+        vm.prank(pauserAddr);
+        vm.expectRevert(BridgeEscrow.NotGuardian.selector);
+        escrow.unpause();
+    }
+
+    /// @dev Pauser is scoped to pause() only — no other privileged surface.
+    function test_Pauser_CannotCallOtherPrivilegedFns() public {
+        vm.prank(owner);
+        escrow.setPauser(pauserAddr);
+        vm.prank(pauserAddr);
+        vm.expectRevert(BridgeEscrow.NotGuardian.selector);
+        escrow.cancelVoucher(bytes32(uint256(1)));
+    }
+
+    function test_Pause_GuardianStillCanPause() public {
+        vm.prank(owner);
+        escrow.setGuardian(guardian);
+        vm.prank(guardian);
+        escrow.pause();
+        assertTrue(escrow.paused());
+    }
+
+    function test_Pause_OwnerStillCanPause() public {
+        vm.prank(owner);
+        escrow.pause();
+        assertTrue(escrow.paused());
+    }
+
+    function test_Pause_RandomAddressReverts() public {
+        vm.prank(alice);
+        vm.expectRevert(BridgeEscrow.NotGuardian.selector);
+        escrow.pause();
     }
 
     // =====================================================================

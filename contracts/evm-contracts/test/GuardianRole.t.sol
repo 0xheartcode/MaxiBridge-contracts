@@ -203,18 +203,18 @@ contract GuardianRoleTest is Test {
     // guardian CANNOT call owner-exclusive calls — OZ Ownable revert
     // -----------------------------------------------------------------
 
-    function test_Guardian_CannotUnpause() public {
+    /// @dev Roles PR — `unpause` is now owner OR guardian (was owner-only).
+    ///      The dedicated pauser role can freeze but never thaw; guardian can
+    ///      do both as part of the incident-response surface.
+    function test_Guardian_CanUnpause() public {
         _installGuardian();
-        // Pause first so unpause has a state to act on — proves the
-        // revert is the access gate, not a PausableUpgradeable state error.
         vm.prank(guardian);
         escrow.pause();
+        assertTrue(escrow.paused());
 
         vm.prank(guardian);
-        vm.expectRevert(
-            abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, guardian)
-        );
         escrow.unpause();
+        assertFalse(escrow.paused());
     }
 
     function test_Guardian_CannotAddSigner() public {

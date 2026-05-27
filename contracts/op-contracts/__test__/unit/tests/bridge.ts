@@ -861,6 +861,111 @@ await opnet('BridgeDepository — pause gate', async (vm: OPNetUnit) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// 10b. Roles PR — transferGovernor + dedicated pauser role
+// ════════════════════════════════════════════════════════════════════════════
+
+await opnet('BridgeDepository — roles (transferGovernor + pauser)', async (vm: OPNetUnit) => {
+    let setup: BridgeSetup;
+
+    vm.beforeEach(async () => {
+        Blockchain.dispose();
+        Blockchain.clearContracts();
+        await Blockchain.init();
+        setSender(deployer);
+        setup = await setupContracts();
+    });
+
+    vm.afterEach(() => disposeSetup(setup));
+
+    await vm.it('transferGovernor: only governor may call', async () => {
+        const { depository } = setup;
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.transferGovernor(bob);
+        }).toThrow();
+    });
+
+    await vm.it('transferGovernor: changes governor; old governor loses access', async () => {
+        const { depository } = setup;
+
+        setSender(deployer);
+        await depository.transferGovernor(bob);
+        Assert.expect((await depository.governor()).equals(bob)).toEqual(true);
+
+        // Old governor (deployer) can no longer pause.
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await depository.setPaused(true);
+        }).toThrow();
+
+        // New governor can.
+        setSender(bob);
+        await depository.setPaused(true);
+        Assert.expect(await depository.paused()).toEqual(true);
+    });
+
+    await vm.it('transferGovernor: zero address reverts', async () => {
+        const { depository } = setup;
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await depository.transferGovernor(Address.dead());
+        }).toThrow();
+    });
+
+    await vm.it('setPauser: only governor may set', async () => {
+        const { depository } = setup;
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.setPauser(bob);
+        }).toThrow();
+    });
+
+    await vm.it('pauser can pause + unpause but not other governor ops', async () => {
+        const { depository } = setup;
+
+        setSender(deployer);
+        await depository.setPauser(bob);
+        Assert.expect((await depository.pauser()).equals(bob)).toEqual(true);
+
+        // Pauser flips the pause flag.
+        setSender(bob);
+        await depository.setPaused(true);
+        Assert.expect(await depository.paused()).toEqual(true);
+        await depository.setPaused(false);
+        Assert.expect(await depository.paused()).toEqual(false);
+
+        // Pauser has NO other governor surface — e.g. setGovernor.
+        setSender(bob);
+        await Assert.expect(async () => {
+            await depository.setGovernor(alice);
+        }).toThrow();
+
+        // ...nor transferGovernor.
+        setSender(bob);
+        await Assert.expect(async () => {
+            await depository.transferGovernor(alice);
+        }).toThrow();
+    });
+
+    await vm.it('setPauser(zero) disables the role', async () => {
+        const { depository } = setup;
+
+        setSender(deployer);
+        await depository.setPauser(bob);
+        // Address.dead() is the all-zero address in the test transaction lib
+        // (Address.zero() is not a function here — see authority.ts note).
+        await depository.setPauser(Address.dead());
+        Assert.expect((await depository.pauser()).isZero()).toEqual(true);
+
+        // Disabled pauser can no longer pause.
+        setSender(bob);
+        await Assert.expect(async () => {
+            await depository.setPaused(true);
+        }).toThrow();
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // 11. Upgrade-flow: deploy v1 → populate → deploy v2 → every view unchanged
 //
 // We simulate the "deploy v2 as update" path by re-initializing the contract

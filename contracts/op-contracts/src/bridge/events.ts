@@ -15,6 +15,19 @@ export class GovernorUpdated extends NetEvent {
     }
 }
 
+/**
+ * Roles PR — emitted when the dedicated pause role is set/rotated/disabled.
+ * `oldPauser` -> `newPauser`; a zero `newPauser` disables the role.
+ */
+export class PauserSet extends NetEvent {
+    constructor(oldPauser: Address, newPauser: Address) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2);
+        data.writeAddress(oldPauser);
+        data.writeAddress(newPauser);
+        super('PauserSet', data);
+    }
+}
+
 export class WrappedTokenSet extends NetEvent {
     constructor(wrappedToken: Address, enabled: bool) {
         const data = new BytesWriter(ADDRESS_BYTE_LENGTH + 1);

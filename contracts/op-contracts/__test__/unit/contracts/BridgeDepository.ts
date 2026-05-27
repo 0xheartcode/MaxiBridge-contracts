@@ -30,6 +30,15 @@ export class BridgeDepository extends ContractRuntime {
         'setGovernor',
         ABIDataTypes.ADDRESS,
     );
+    private readonly transferGovernorSelector: number = encodeSelectorWithParams(
+        'transferGovernor',
+        ABIDataTypes.ADDRESS,
+    );
+    private readonly setPauserSelector: number = encodeSelectorWithParams(
+        'setPauser',
+        ABIDataTypes.ADDRESS,
+    );
+    private readonly pauserSelector: number = encodeNumericSelector('pauser()');
 
     private readonly claimMintWithVoucherSelector: number = encodeSelectorWithParams(
         'claimMintWithVoucher',
@@ -147,6 +156,27 @@ export class BridgeDepository extends ContractRuntime {
         w.writeSelector(this.setGovernorSelector);
         w.writeAddress(addr);
         await this.getResponse(w.getBuffer());
+    }
+
+    public async transferGovernor(addr: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.transferGovernorSelector);
+        w.writeAddress(addr);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async setPauser(addr: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setPauserSelector);
+        w.writeAddress(addr);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async pauser(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.pauserSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
     }
 
     public async claimMintWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<void> {

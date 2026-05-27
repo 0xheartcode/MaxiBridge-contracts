@@ -22,6 +22,7 @@ import { UpdatablePlugin } from '@btc-vision/btc-runtime/runtime/plugins/Updatab
 
 import {
     GovernorUpdated,
+    PauserSet,
     WrappedTokenSet,
     SignerRotated,
     Paused,
@@ -376,6 +377,18 @@ export class BridgeDepository extends ReentrancyGuard {
     // it ships baked into v1 storage, but the ordering rule still holds).
     private _flowAccruedFees: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
+    // ─── Roles PR — dedicated pause role ───────────────────────────────
+    // Address allowed to flip the pause flag in addition to the governor.
+    // May ONLY pause/unpause via `setPaused` — no other governor surface.
+    // Zero (default) disables the role. Set/rotated by the governor via
+    // `setPauser`.
+    //
+    // Append-only: declared as the LAST storage slot to preserve the
+    // upgrade discipline (Five Upgrade Commandments). `onUpdate` seeds it to
+    // zero on the v(2→3) migration so an in-place upgrade leaves the role
+    // disabled until the governor wires it.
+    private _pauser: StoredAddress = new StoredAddress(Blockchain.nextPointer);
+
     public constructor() {
         super();
         // AddressMemoryMap MUST be initialized in the constructor body.
@@ -412,8 +425,10 @@ export class BridgeDepository extends ReentrancyGuard {
         }
         this._networkId.value = networkId;
 
-        // Storage version 1 for fresh v1 deployments.
-        this._storageVersion.value = u256.One;
+        // Fresh deployments ship at the current storage version so no
+        // migration branch runs on a clean deploy. Roles PR → version 3
+        // (v1 baseline, v2 M-of-N seed, v3 dedicated pauser role).
+        this._storageVersion.value = u256.fromU32(3);
         // Signer epoch starts at 1 so "epoch 0" is invalid by construction.
         this._signerEpoch.value = u256.One;
     }
@@ -464,6 +479,13 @@ export class BridgeDepository extends ReentrancyGuard {
             // separate `setAuthorityAddress` call after upgrade.
             this._storageVersion.value = u256.fromU32(2);
         }
+        if (u256.lt(this._storageVersion.value, u256.fromU32(3))) {
+            // Roles PR migration — the dedicated pauser role ships disabled.
+            // StoredAddress reads zero on an unwritten slot, so this seed is
+            // belt-and-suspenders; the governor wires it via `setPauser`.
+            this._pauser.value = Address.zero();
+            this._storageVersion.value = u256.fromU32(3);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -500,6 +522,20 @@ export class BridgeDepository extends ReentrancyGuard {
         const auth = this._authorityAddress.value;
         if (!auth.isZero() && sender.equals(auth)) return;
         throw new Revert('BridgeDepository: not governor or authority');
+    }
+
+    /**
+     * Roles PR — pause path. Accepts the governor OR the dedicated `_pauser`
+     * role. Scoped to `setPaused` only — the pauser has no other governor
+     * surface. A zero `_pauser` slot disables the role.
+     */
+    private onlyGovernorOrPauser(): void {
+        const sender = Blockchain.tx.sender;
+        const gov = this._governor.value;
+        if (!gov.isZero() && sender.equals(gov)) return;
+        const p = this._pauser.value;
+        if (!p.isZero() && sender.equals(p)) return;
+        throw new Revert('BridgeDepository: not governor or pauser');
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -2449,7 +2485,7 @@ export class BridgeDepository extends ReentrancyGuard {
     @method({ name: 'paused', type: ABIDataTypes.BOOL })
     @emit('Paused', 'Unpaused')
     public setPaused(calldata: Calldata): BytesWriter {
-        this.onlyGovernor();
+        this.onlyGovernorOrPauser();
         const paused: boolean = calldata.readBoolean();
         this._paused.value = paused;
         if (paused) {
@@ -2483,6 +2519,45 @@ export class BridgeDepository extends ReentrancyGuard {
         const old = this._governor.value;
         this._governor.value = newGovernor;
         this.emitEvent(new GovernorUpdated(old, newGovernor));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Roles PR — strict governor handoff. Unlike `setGovernor` (which also
+     * accepts the registered BridgeAuthority to keep its cascade workable),
+     * `transferGovernor` is gated `onlyGovernor`: only the CURRENT governor
+     * may name its successor. After this lands the old governor immediately
+     * loses every `onlyGovernor`-gated surface.
+     */
+    @method({ name: 'newGovernor', type: ABIDataTypes.ADDRESS })
+    @emit('GovernorUpdated')
+    @nonReentrant
+    public transferGovernor(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const newGovernor: Address = calldata.readAddress();
+        if (newGovernor.isZero()) {
+            throw new Revert('BridgeDepository: zero governor');
+        }
+        const old = this._governor.value;
+        this._governor.value = newGovernor;
+        this.emitEvent(new GovernorUpdated(old, newGovernor));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Roles PR — set/rotate/disable the dedicated pause role. Governor-only.
+     * A zero address disables the role. The pauser may flip the pause flag
+     * via `setPaused` but has NO other governor surface.
+     */
+    @method({ name: 'newPauser', type: ABIDataTypes.ADDRESS })
+    @emit('PauserSet')
+    @nonReentrant
+    public setPauser(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const newPauser: Address = calldata.readAddress();
+        const old = this._pauser.value;
+        this._pauser.value = newPauser;
+        this.emitEvent(new PauserSet(old, newPauser));
         return new BytesWriter(0);
     }
 
@@ -2804,6 +2879,14 @@ export class BridgeDepository extends ReentrancyGuard {
     public paused(_calldata: Calldata): BytesWriter {
         const response = new BytesWriter(1);
         response.writeBoolean(this._paused.value);
+        return response;
+    }
+
+    @view
+    @returns({ name: 'pauser', type: ABIDataTypes.ADDRESS })
+    public pauser(_calldata: Calldata): BytesWriter {
+        const response = new BytesWriter(ADDRESS_BYTE_LENGTH);
+        response.writeAddress(this._pauser.value);
         return response;
     }
 
