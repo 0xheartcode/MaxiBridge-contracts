@@ -1351,6 +1351,60 @@ await opnet('BridgeDepository — #68 Tier B flowId route binding', async (vm: O
         Assert.expect(await wusdc.balanceOf(alice)).toEqual(fields.netAmount);
     });
 
+    // ─── FINDING-003 regression (audit 2026-05-26) ──────────────────────
+    //
+    // The early gate validates `parsed.flowId` (token binding + mode + status)
+    // but the subsequent effects (status/minAmount/dailyLimit/inventory/tip)
+    // use a flowId recomputed from the voucher's source-chain fields. Pre-fix
+    // the two flow ids were not asserted equal, so a signer that named one
+    // flow in `parsed.flowId` could end up mutating a DIFFERENT flow.
+
+    await vm.it('FINDING-003: parsed.flowId ≠ recomputed flowId reverts on mint path', async () => {
+        const { depository, signerWallet } = setup;
+        // Register a SECOND mode-0 flow on the same wrappedToken but a
+        // different (sourceBridge, sourceToken) pair. Both flows are valid
+        // routes for wUSDC mint; the voucher names flow A in parsed.flowId
+        // while its source fields recompute to flow B.
+        const altBridge = Blockchain.generateRandomAddress();
+        const altToken = Blockchain.generateRandomAddress();
+        setSender(deployer);
+        const flowB = await registerFlowFor(setup, {
+            mode: 0n,
+            sourceBridgeAddr: altBridge,
+            sourceTokenAddr: altToken,
+            wrappedToken: setup.wusdcAddress,
+        });
+        // Sanity — the test only matters if the two flow ids differ.
+        Assert.expect(flowB !== setup.defaultFlowId).toEqual(true);
+
+        const fields = {
+            ...defaultFields(setup, alice),
+            // parsed.flowId binds to the DEFAULT route (flow A).
+            flowId: setup.defaultFlowId,
+            // Source fields belong to the ALT route (flow B). Without the
+            // FINDING-003 assertion the contract would consume flow B's
+            // status/limits/inventory while the signer attested to flow A.
+            sourceBridgeAddr: altBridge,
+            sourceTokenAddr: altToken,
+        };
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        }).toThrow();
+    });
+
+    await vm.it('FINDING-003: parsed.flowId == recomputed flowId still mints (no false positive)', async () => {
+        // The default happy path uses parsed.flowId == _flowIdFromVoucher(...).
+        // This test confirms the new assertion doesn't break the canonical case.
+        const { depository, wusdc, signerWallet } = setup;
+        const fields = defaultFields(setup, alice);
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(alice);
+        await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        Assert.expect(await wusdc.balanceOf(alice)).toEqual(fields.netAmount);
+    });
+
     await vm.it('mode-3 flow rejected on the mint path (not mintable mode)', async () => {
         const { depository, signerWallet } = setup;
         // Register a POOLED_LOCK_RELEASE (mode 3) flow on a distinct route,

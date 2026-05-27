@@ -1667,6 +1667,17 @@ export class BridgeDepository extends ReentrancyGuard {
             this.address,
             parsed.wrappedToken,
         );
+        // FINDING-003 (audit 2026-05-26): the early gate above validated
+        // `parsed.flowId` (token binding, mode, status). All subsequent
+        // effects (status/minAmount/dailyLimit/inventory/tip) read storage
+        // keyed by `flowIdRel`, the value recomputed from the voucher's
+        // source-chain fields. If those two flow ids disagree the contract
+        // would mutate a DIFFERENT flow than the one the signer attested
+        // to. Require equality so every effect is provably governed by the
+        // signed flowId.
+        if (!u256.eq(flowIdRel, parsed.flowId)) {
+            throw new Revert('BridgeDepository: voucher flowId mismatch');
+        }
         if (this._flowExists.get(flowIdRel).isZero()) {
             throw new Revert('BridgeDepository: flow not registered');
         }
@@ -2648,6 +2659,14 @@ export class BridgeDepository extends ReentrancyGuard {
             this.address,
             parsed.wrappedToken,
         );
+        // FINDING-003 (audit 2026-05-26): require the recomputed flowId
+        // to equal `parsed.flowId` so every downstream effect on
+        // `flowIdMint` (status/minAmount/dailyLimit/inventory/tip) is
+        // provably the flow the signer signed for. See the matching gate
+        // in claimReleaseWithVoucher for rationale.
+        if (!u256.eq(flowIdMint, parsed.flowId)) {
+            throw new Revert('BridgeDepository: voucher flowId mismatch');
+        }
         if (this._flowExists.get(flowIdMint).isZero()) {
             throw new Revert('BridgeDepository: flow not registered');
         }
