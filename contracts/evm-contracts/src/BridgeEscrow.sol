@@ -1731,7 +1731,14 @@ contract BridgeEscrow is
             revert WrongMode();
         }
         if (flow.evmToken != intent.wrappedToken) revert WrongMode();
-        if (flow.status != FLOW_STATUS_ACTIVE && flow.status != FLOW_STATUS_DRAINING) {
+        // M-3 (audit 2026-05-27) — tighten to ACTIVE-only. A DRAINING flow is
+        // intentionally winding down (no new locks/mints, see L214); allowing
+        // `refundBurn` against a DRAINING flow lets a (potentially compromised)
+        // signer set continue minting into a route that was deliberately
+        // marked for shutdown. Recovery for a burn whose flow has gone DRAINING
+        // is an operator decision — resume the flow briefly, refund, then
+        // re-drain.
+        if (flow.status != FLOW_STATUS_ACTIVE) {
             revert FlowNotActive();
         }
 

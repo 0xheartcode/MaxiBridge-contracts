@@ -646,6 +646,27 @@ export class BridgeDepository extends ReentrancyGuard {
         this._storageVersion.value = u256.fromU32(1);
         // Signer epoch starts at 1 so "epoch 0" is invalid by construction.
         this._signerEpoch.value = u256.One;
+
+        // A-4 (audit 2026-05-27) — runtime guard against selector-constant
+        // drift. The hardcoded selectors above are baked into signed preimages
+        // (mark-lock-refundable, refund-burn, confirm-burn) and the voucher
+        // method dispatch. If a maintainer mutates the constant without
+        // updating the matching `methodName(...)` string (or vice versa),
+        // every attestation silently mismatches the contract's REBUILT
+        // preimage hash and reverts with cryptic errors. Pay the gas once
+        // at deploy to surface drift loud at the ceremony.
+        if (encodeSelector('claimMintWithVoucher(bytes,bytes)') != CLAIM_MINT_WITH_VOUCHER_SELECTOR) {
+            throw new Revert('BridgeDepository: CLAIM_MINT_WITH_VOUCHER_SELECTOR drift');
+        }
+        if (encodeSelector('confirmBurn(uint256,bytes,bytes)') != CONFIRM_BURN_SELECTOR) {
+            throw new Revert('BridgeDepository: CONFIRM_BURN_SELECTOR drift');
+        }
+        if (encodeSelector('markLockRefundable(uint256,bytes)') != MARK_LOCK_REFUNDABLE_SELECTOR) {
+            throw new Revert('BridgeDepository: MARK_LOCK_REFUNDABLE_SELECTOR drift');
+        }
+        if (encodeSelector('refundBurn(bytes,bytes)') != REFUND_BURN_SELECTOR) {
+            throw new Revert('BridgeDepository: REFUND_BURN_SELECTOR drift');
+        }
     }
 
     public override onUpdate(calldata: Calldata): void {
@@ -855,8 +876,17 @@ export class BridgeDepository extends ReentrancyGuard {
                 this._signerCount.value = SafeMath.sub(this._signerCount.value, u256.One);
             }
         }
-        this._signerKeyHashSet.set(newHash, u256.One);
-        this._signerCount.value = SafeMath.add(this._signerCount.value, u256.One);
+        // M-1 (audit 2026-05-27) — gate the count increment so re-rotating to
+        // a hash that is ALREADY in the set (e.g. one previously added via
+        // `addSignerToSet` / `migrateSignerSet`) does not inflate
+        // `_signerCount` past the true set cardinality. Pre-fix the counter
+        // could drift higher than the actual count and let `setRequiredSignatures`
+        // accept an impossible threshold (bricks the M-of-N path). Matches the
+        // idiom in `addSignerToSet`.
+        if (this._signerKeyHashSet.get(newHash).isZero()) {
+            this._signerKeyHashSet.set(newHash, u256.One);
+            this._signerCount.value = SafeMath.add(this._signerCount.value, u256.One);
+        }
         if (this._requiredSignatures.value.isZero()) {
             this._requiredSignatures.value = u256.One;
         }

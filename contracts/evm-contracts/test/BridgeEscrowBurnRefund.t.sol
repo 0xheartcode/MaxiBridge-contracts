@@ -272,6 +272,22 @@ contract BridgeEscrowBurnRefundTest is Test {
         _assertNoMint(a);
     }
 
+    /// M-3 (audit 2026-05-27) — refundBurn now rejects DRAINING flows. A
+    /// DRAINING flow is intentionally winding down (no new locks/mints); a
+    /// compromised signer set must NOT be able to keep minting into a route
+    /// the operator already marked for shutdown.
+    function test_refundBurn_flowDraining_reverts() public {
+        vm.prank(owner);
+        escrow.drainFlow(wmotoFlowId); // FLOW_STATUS_DRAINING
+
+        BridgeEscrow.BurnRefundAuthorization memory a = _auth(100e6);
+        bytes memory sig = _signAuth(signerPk, a);
+
+        vm.expectRevert(BridgeEscrow.FlowNotActive.selector);
+        escrow.refundBurn(a, sig);
+        _assertNoMint(a);
+    }
+
     function test_refundBurn_zeroAmount_reverts() public {
         BridgeEscrow.BurnRefundAuthorization memory a = _auth(0);
         bytes memory sig = _signAuth(signerPk, a);
