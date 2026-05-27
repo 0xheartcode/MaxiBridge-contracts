@@ -16,12 +16,12 @@ function emergencyWithdraw(
 //        ^ onlyGuardian (msg.sender check, not modifier)
 ```
 
-Funds always go to the **set-once** `treasury` slot; the destination is no longer caller-controlled. Emits `EmergencyWithdraw(token indexed, treasury indexed, amount, by indexed)`.
+Funds always go to the `treasury` slot; the destination is never caller-controlled. Emits `EmergencyWithdraw(token indexed, treasury indexed, amount, by indexed)`.
 
 Three independent guards now apply:
 1. `whenPaused` — the contract MUST be paused via the owner pipeline first; the guardian alone cannot drain a live bridge.
-2. `msg.sender == guardian` — the guardian role is set ONCE via `setGuardian(address)` (set-once; reverts on second call).
-3. `treasury != address(0)` — the destination is set ONCE via `setTreasury(address)`. Drain attempts before treasury is set revert with `TreasuryNotSet()`.
+2. `msg.sender == guardian` — the guardian role is set via `setGuardian(address)` (**owner-rotatable**, not set-once).
+3. `treasury != address(0)` — the destination is set via `setTreasury(address)` (**owner-rotatable**). Drain attempts before treasury is set revert with `TreasuryNotSet()`.
 
 Useful for:
 - Migrating escrowed funds before a contract upgrade
@@ -33,12 +33,12 @@ NOT useful for:
 ### Pre-flight (one-time, after every fresh deploy)
 
 ```bash
-# Set the guardian (set-once — pick an EOA on an independent device, paged)
+# Set the guardian (owner-rotatable — pick an EOA on an independent device, paged)
 cast send $EVM_BRIDGE_ESCROW \
   "setGuardian(address)" $GUARDIAN_ADDR \
   --private-key $OWNER_KEY --rpc-url $EVM_RPC_URL
 
-# Set the treasury (set-once — pick the prod Safe address)
+# Set the treasury (owner-rotatable — pick the prod Safe address)
 cast send $EVM_BRIDGE_ESCROW \
   "setTreasury(address)" $TREASURY_ADDR \
   --private-key $OWNER_KEY --rpc-url $EVM_RPC_URL

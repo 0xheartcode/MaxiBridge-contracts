@@ -53,7 +53,7 @@ Used by `BridgeDepository.claimMintWithVoucher`. The contract hashes the preimag
 | `grossDstAmount` | 32B | Destination-side gross (= grossSrcAmount until decimal-aware AmountPolicy lands) |
 | `feeDstAmount` | 32B | 0.5% fee on destination side |
 | `netDstAmount` | 32B | Amount minted to recipient |
-| `relayerTip` | 16B | Permissionless tip (signed over; payout in a future PR) |
+| `relayerTip` | 16B | Permissionless tip — PAID OUT on claim (mint-split on OPNet, transfer-carve on EVM; both emit `RelayerTipPaid`; capped per-flow by `tipCapBps`) |
 | `signerEpoch` | 4B | Must equal current on-chain epoch |
 | `voucherId` | 32B | Unpredictable server nonce — per-voucher replay guard |
 | `flowId` | 32B | Flow binding (#68) — appended last; the depository routes the claim by `_flowMode[flowId]`, not by `_tokenMode` |
@@ -237,9 +237,15 @@ release-claim:
 | burn wrapped | `WrappedERC20.burnForRelease` | `WrappedOP20.burnForRelease` |
 | provision pool | `provisionInventory` | `provisionInventoryOpNet` |
 | drain pool | `drainFlow` | `drainInventoryOpNet` |
+| lock-refund (stranded lock → return principal) | `markDepositRefundable` + `refundLockedDeposit` | `markLockRefundable` + `refundLock` |
+| burn-refund (re-mint after dest cancelled) | `refundBurn` | `refundBurn` |
+| roles | `setTreasury` / `setGuardian` / `setPauser` / `emergencyWithdraw` / `withdrawFees` | `setTreasury` / `setGuardian` / `setPauser` / `emergencyWithdraw` / `withdrawFees` |
 
-**The transfer surface is symmetric and every mode is bidirectional.** Two deliberate
-asymmetries remain, each with a reason:
+**The transfer AND recovery surfaces are now symmetric, and every mode is bidirectional.**
+The lock-refund pair and the `refundBurn` re-mint exist on BOTH chains; the role lattice
+(rotatable treasury/guardian, freeze-only pauser, treasury-pinned emergency drain) is
+mirrored. `refundBurn` is a mint-authority primitive on both sides → **dedicated re-audit
+before mainnet.** Two deliberate asymmetries remain, each with a reason:
 
 - **Signature scheme** — EVM verifies EIP-712 **ECDSA**; OPNet verifies a 540-byte
   **ML-DSA** voucher. Intrinsic to the two L1s. A side effect: the OPNet function name
@@ -247,12 +253,10 @@ asymmetries remain, each with a reason:
   so OPNet names are verbose (`…WithVoucher`/`…ForBridge`) and can't be renamed freely;
   EVM's EIP-712 binds the struct not the function name, so EVM names are terser
   (`claim`, `lock`). Cosmetic divergence, real cause.
-- **Cross-chain attestation** differs in *shape*: OPNet `confirmBurn` (positive
-  burn attestation for inverse/pooled inventory accounting, #44) has no direct EVM
-  twin; EVM instead carries `markDepositRefundable` + `refundLockedDeposit` (a
-  negative "voucher cancelled → refund the stranded lock" attestation). Both chains
-  have *an* attestation primitive, but they serve different recovery flows. This is
-  the one spot worth a deliberate parity review (tracked alongside #32).
+- **`confirmBurn`** — OPNet's positive burn attestation for inverse/pooled inventory
+  accounting (#44) has no EVM twin; EVM's inventory accounting is local to `claim`. This
+  is an accounting-shape difference, not a recovery gap (the recovery primitives above
+  are fully mirrored).
 
 When the indexer processes a deposit or withdrawal event it resolves the flow's mode (via the flowId on the source event, falling back to the on-chain mode view) and stores `token_mode`, `source_event_type`, and `dest_method` on the DB row. The dApp reads `dest_method` from the status API and calls the correct claim function — `ClaimButton` never hard-codes a function name.
 
