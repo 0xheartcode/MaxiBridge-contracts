@@ -1,7 +1,7 @@
 {
   "storage": [
     {
-      "astId": 7226,
+      "astId": 50661,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "currentEpoch",
       "offset": 0,
@@ -9,7 +9,7 @@
       "type": "t_uint32"
     },
     {
-      "astId": 7229,
+      "astId": 50664,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "depositNonce",
       "offset": 0,
@@ -17,7 +17,7 @@
       "type": "t_uint256"
     },
     {
-      "astId": 7234,
+      "astId": 50669,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "supportedToken",
       "offset": 0,
@@ -25,7 +25,7 @@
       "type": "t_mapping(t_address,t_bool)"
     },
     {
-      "astId": 7239,
+      "astId": 50674,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "signaturesUsed",
       "offset": 0,
@@ -33,7 +33,7 @@
       "type": "t_mapping(t_bytes32,t_bool)"
     },
     {
-      "astId": 7246,
+      "astId": 50681,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "usedSourceEvent",
       "offset": 0,
@@ -41,7 +41,7 @@
       "type": "t_mapping(t_bytes32,t_mapping(t_uint32,t_bool))"
     },
     {
-      "astId": 7251,
+      "astId": 50686,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "cancelledVouchers",
       "offset": 0,
@@ -49,7 +49,7 @@
       "type": "t_mapping(t_bytes32,t_bool)"
     },
     {
-      "astId": 7254,
+      "astId": 50689,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "expectedOpnetChainId",
       "offset": 0,
@@ -57,7 +57,7 @@
       "type": "t_uint256"
     },
     {
-      "astId": 7259,
+      "astId": 50694,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "isSigner",
       "offset": 0,
@@ -65,7 +65,7 @@
       "type": "t_mapping(t_address,t_bool)"
     },
     {
-      "astId": 7262,
+      "astId": 50697,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "signerCount",
       "offset": 0,
@@ -73,7 +73,7 @@
       "type": "t_uint256"
     },
     {
-      "astId": 7265,
+      "astId": 50700,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "signerThreshold",
       "offset": 0,
@@ -81,7 +81,7 @@
       "type": "t_uint256"
     },
     {
-      "astId": 7268,
+      "astId": 50703,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "guardian",
       "offset": 0,
@@ -89,7 +89,7 @@
       "type": "t_address"
     },
     {
-      "astId": 7271,
+      "astId": 50706,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "treasury",
       "offset": 0,
@@ -97,7 +97,7 @@
       "type": "t_address"
     },
     {
-      "astId": 7274,
+      "astId": 50709,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "unwrapFeeBps",
       "offset": 0,
@@ -105,7 +105,7 @@
       "type": "t_uint256"
     },
     {
-      "astId": 7279,
+      "astId": 50714,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "unwrapMinFee",
       "offset": 0,
@@ -113,15 +113,15 @@
       "type": "t_mapping(t_address,t_uint256)"
     },
     {
-      "astId": 7285,
+      "astId": 50720,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "flows",
       "offset": 0,
       "slot": "14",
-      "type": "t_mapping(t_bytes32,t_struct(FlowRecord)7223_storage)"
+      "type": "t_mapping(t_bytes32,t_struct(FlowRecord)50658_storage)"
     },
     {
-      "astId": 7289,
+      "astId": 50724,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "allFlowIds",
       "offset": 0,
@@ -129,7 +129,7 @@
       "type": "t_array(t_bytes32)dyn_storage"
     },
     {
-      "astId": 7295,
+      "astId": 50730,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "flowsByEvmToken",
       "offset": 0,
@@ -137,7 +137,7 @@
       "type": "t_mapping(t_address,t_array(t_bytes32)dyn_storage)"
     },
     {
-      "astId": 7301,
+      "astId": 50736,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "flowsByMode",
       "offset": 0,
@@ -145,7 +145,7 @@
       "type": "t_mapping(t_uint8,t_array(t_bytes32)dyn_storage)"
     },
     {
-      "astId": 7307,
+      "astId": 50742,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "flowsByEvmChain",
       "offset": 0,
@@ -153,20 +153,28 @@
       "type": "t_mapping(t_uint64,t_array(t_bytes32)dyn_storage)"
     },
     {
-      "astId": 7337,
+      "astId": 50772,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "lockedDeposits",
       "offset": 0,
       "slot": "19",
-      "type": "t_mapping(t_uint256,t_struct(LockRecord)7331_storage)"
+      "type": "t_mapping(t_uint256,t_struct(LockRecord)50766_storage)"
     },
     {
-      "astId": 7342,
+      "astId": 50775,
+      "contract": "src/BridgeEscrow.sol:BridgeEscrow",
+      "label": "pauser",
+      "offset": 0,
+      "slot": "20",
+      "type": "t_address"
+    },
+    {
+      "astId": 50780,
       "contract": "src/BridgeEscrow.sol:BridgeEscrow",
       "label": "__gap",
       "offset": 0,
-      "slot": "20",
-      "type": "t_array(t_uint256)42_storage"
+      "slot": "21",
+      "type": "t_array(t_uint256)41_storage"
     }
   ],
   "types": {
@@ -181,10 +189,10 @@
       "numberOfBytes": "32",
       "base": "t_bytes32"
     },
-    "t_array(t_uint256)42_storage": {
+    "t_array(t_uint256)41_storage": {
       "encoding": "inplace",
-      "label": "uint256[42]",
-      "numberOfBytes": "1344",
+      "label": "uint256[41]",
+      "numberOfBytes": "1312",
       "base": "t_uint256"
     },
     "t_bool": {
@@ -197,7 +205,7 @@
       "label": "bytes32",
       "numberOfBytes": "32"
     },
-    "t_enum(DepositStatus)7314": {
+    "t_enum(DepositStatus)50749": {
       "encoding": "inplace",
       "label": "enum BridgeEscrow.DepositStatus",
       "numberOfBytes": "1"
@@ -237,19 +245,19 @@
       "numberOfBytes": "32",
       "value": "t_mapping(t_uint32,t_bool)"
     },
-    "t_mapping(t_bytes32,t_struct(FlowRecord)7223_storage)": {
+    "t_mapping(t_bytes32,t_struct(FlowRecord)50658_storage)": {
       "encoding": "mapping",
       "key": "t_bytes32",
       "label": "mapping(bytes32 => struct BridgeEscrow.FlowRecord)",
       "numberOfBytes": "32",
-      "value": "t_struct(FlowRecord)7223_storage"
+      "value": "t_struct(FlowRecord)50658_storage"
     },
-    "t_mapping(t_uint256,t_struct(LockRecord)7331_storage)": {
+    "t_mapping(t_uint256,t_struct(LockRecord)50766_storage)": {
       "encoding": "mapping",
       "key": "t_uint256",
       "label": "mapping(uint256 => struct BridgeEscrow.LockRecord)",
       "numberOfBytes": "32",
-      "value": "t_struct(LockRecord)7331_storage"
+      "value": "t_struct(LockRecord)50766_storage"
     },
     "t_mapping(t_uint32,t_bool)": {
       "encoding": "mapping",
@@ -272,13 +280,13 @@
       "numberOfBytes": "32",
       "value": "t_array(t_bytes32)dyn_storage"
     },
-    "t_struct(FlowRecord)7223_storage": {
+    "t_struct(FlowRecord)50658_storage": {
       "encoding": "inplace",
       "label": "struct BridgeEscrow.FlowRecord",
       "numberOfBytes": "320",
       "members": [
         {
-          "astId": 7184,
+          "astId": 50619,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "mode",
           "offset": 0,
@@ -286,7 +294,7 @@
           "type": "t_uint8"
         },
         {
-          "astId": 7186,
+          "astId": 50621,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "status",
           "offset": 1,
@@ -294,7 +302,7 @@
           "type": "t_uint8"
         },
         {
-          "astId": 7188,
+          "astId": 50623,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "evmChainId",
           "offset": 2,
@@ -302,7 +310,7 @@
           "type": "t_uint64"
         },
         {
-          "astId": 7190,
+          "astId": 50625,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "evmBridge",
           "offset": 10,
@@ -310,7 +318,7 @@
           "type": "t_address"
         },
         {
-          "astId": 7192,
+          "astId": 50627,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "evmToken",
           "offset": 0,
@@ -318,7 +326,7 @@
           "type": "t_address"
         },
         {
-          "astId": 7194,
+          "astId": 50629,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "evmDecimals",
           "offset": 20,
@@ -326,7 +334,7 @@
           "type": "t_uint8"
         },
         {
-          "astId": 7196,
+          "astId": 50631,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "opnetDecimals",
           "offset": 21,
@@ -334,7 +342,7 @@
           "type": "t_uint8"
         },
         {
-          "astId": 7198,
+          "astId": 50633,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "opnetBridge",
           "offset": 0,
@@ -342,7 +350,7 @@
           "type": "t_bytes32"
         },
         {
-          "astId": 7200,
+          "astId": 50635,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "opnetToken",
           "offset": 0,
@@ -350,7 +358,7 @@
           "type": "t_bytes32"
         },
         {
-          "astId": 7202,
+          "astId": 50637,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "feeBps",
           "offset": 0,
@@ -358,7 +366,7 @@
           "type": "t_uint16"
         },
         {
-          "astId": 7204,
+          "astId": 50639,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "minFee",
           "offset": 2,
@@ -366,7 +374,7 @@
           "type": "t_uint128"
         },
         {
-          "astId": 7206,
+          "astId": 50641,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "minAmount",
           "offset": 0,
@@ -374,7 +382,7 @@
           "type": "t_uint128"
         },
         {
-          "astId": 7208,
+          "astId": 50643,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "cap",
           "offset": 16,
@@ -382,7 +390,7 @@
           "type": "t_uint128"
         },
         {
-          "astId": 7210,
+          "astId": 50645,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "dailyLimit",
           "offset": 0,
@@ -390,7 +398,7 @@
           "type": "t_uint128"
         },
         {
-          "astId": 7212,
+          "astId": 50647,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "mintedToday",
           "offset": 16,
@@ -398,7 +406,7 @@
           "type": "t_uint128"
         },
         {
-          "astId": 7214,
+          "astId": 50649,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "lastWindowStart",
           "offset": 0,
@@ -406,7 +414,7 @@
           "type": "t_uint64"
         },
         {
-          "astId": 7216,
+          "astId": 50651,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "inventory",
           "offset": 8,
@@ -414,7 +422,7 @@
           "type": "t_uint128"
         },
         {
-          "astId": 7218,
+          "astId": 50653,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "tipCapBps",
           "offset": 24,
@@ -422,7 +430,7 @@
           "type": "t_uint16"
         },
         {
-          "astId": 7220,
+          "astId": 50655,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "vestingVault",
           "offset": 0,
@@ -430,7 +438,7 @@
           "type": "t_address"
         },
         {
-          "astId": 7222,
+          "astId": 50657,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "accruedFees",
           "offset": 0,
@@ -439,13 +447,13 @@
         }
       ]
     },
-    "t_struct(LockRecord)7331_storage": {
+    "t_struct(LockRecord)50766_storage": {
       "encoding": "inplace",
       "label": "struct BridgeEscrow.LockRecord",
       "numberOfBytes": "160",
       "members": [
         {
-          "astId": 7317,
+          "astId": 50752,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "user",
           "offset": 0,
@@ -453,7 +461,7 @@
           "type": "t_address"
         },
         {
-          "astId": 7319,
+          "astId": 50754,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "lockedAt",
           "offset": 20,
@@ -461,15 +469,15 @@
           "type": "t_uint64"
         },
         {
-          "astId": 7322,
+          "astId": 50757,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "status",
           "offset": 28,
           "slot": "0",
-          "type": "t_enum(DepositStatus)7314"
+          "type": "t_enum(DepositStatus)50749"
         },
         {
-          "astId": 7324,
+          "astId": 50759,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "amount",
           "offset": 0,
@@ -477,7 +485,7 @@
           "type": "t_uint128"
         },
         {
-          "astId": 7326,
+          "astId": 50761,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "token",
           "offset": 0,
@@ -485,7 +493,7 @@
           "type": "t_address"
         },
         {
-          "astId": 7328,
+          "astId": 50763,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "flowId",
           "offset": 0,
@@ -493,7 +501,7 @@
           "type": "t_bytes32"
         },
         {
-          "astId": 7330,
+          "astId": 50765,
           "contract": "src/BridgeEscrow.sol:BridgeEscrow",
           "label": "fee",
           "offset": 0,

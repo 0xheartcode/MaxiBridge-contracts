@@ -97,6 +97,11 @@ export type InventoryDrainedOpNetEvent = {
     readonly by: Address;
     readonly amount: bigint;
 };
+export type EmergencyWithdrawalEvent = {
+    readonly token: Address;
+    readonly treasury: Address;
+    readonly amount: bigint;
+};
 export type FeesWithdrawnEvent = {
     readonly flowId: bigint;
     readonly token: Address;
@@ -115,6 +120,18 @@ export type UnpausedEvent = {};
 export type GovernorUpdatedEvent = {
     readonly oldGov: Address;
     readonly newGov: Address;
+};
+export type PauserSetEvent = {
+    readonly oldPauser: Address;
+    readonly newPauser: Address;
+};
+export type TreasurySetEvent = {
+    readonly oldTreasury: Address;
+    readonly newTreasury: Address;
+};
+export type GuardianSetEvent = {
+    readonly oldGuardian: Address;
+    readonly newGuardian: Address;
 };
 export type MintedFromVoucherEvent = {
     readonly recipient: Address;
@@ -384,6 +401,11 @@ export type ProvisionInventoryOpNet = CallResult<{}, OPNetEvent<InventoryProvisi
 export type DrainInventoryOpNet = CallResult<{}, OPNetEvent<InventoryDrainedOpNetEvent>[]>;
 
 /**
+ * @description Represents the result of the emergencyWithdraw function call.
+ */
+export type EmergencyWithdraw = CallResult<{}, OPNetEvent<EmergencyWithdrawalEvent>[]>;
+
+/**
  * @description Represents the result of the withdrawFees function call.
  */
 export type WithdrawFees = CallResult<{}, OPNetEvent<FeesWithdrawnEvent>[]>;
@@ -484,6 +506,26 @@ export type SetPaused = CallResult<{}, OPNetEvent<PausedEvent | UnpausedEvent>[]
 export type SetGovernor = CallResult<{}, OPNetEvent<GovernorUpdatedEvent>[]>;
 
 /**
+ * @description Represents the result of the transferGovernor function call.
+ */
+export type TransferGovernor = CallResult<{}, OPNetEvent<GovernorUpdatedEvent>[]>;
+
+/**
+ * @description Represents the result of the setPauser function call.
+ */
+export type SetPauser = CallResult<{}, OPNetEvent<PauserSetEvent>[]>;
+
+/**
+ * @description Represents the result of the setTreasury function call.
+ */
+export type SetTreasury = CallResult<{}, OPNetEvent<TreasurySetEvent>[]>;
+
+/**
+ * @description Represents the result of the setGuardian function call.
+ */
+export type SetGuardian = CallResult<{}, OPNetEvent<GuardianSetEvent>[]>;
+
+/**
  * @description Represents the result of the claimMintWithVoucher function call.
  */
 export type ClaimMintWithVoucher = CallResult<{}, OPNetEvent<MintedFromVoucherEvent | RelayerTipPaidEvent>[]>;
@@ -504,6 +546,36 @@ export type Governor = CallResult<
 export type Paused = CallResult<
     {
         paused: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the pauser function call.
+ */
+export type Pauser = CallResult<
+    {
+        pauser: Address;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the treasury function call.
+ */
+export type Treasury = CallResult<
+    {
+        treasury: Address;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the guardian function call.
+ */
+export type Guardian = CallResult<
+    {
+        guardian: Address;
     },
     OPNetEvent<never>[]
 >;
@@ -642,6 +714,7 @@ export interface IBridgeDepository extends IOP_NETContract {
         amount: bigint,
         recipient: Address,
     ): Promise<DrainInventoryOpNet>;
+    emergencyWithdraw(token: Address, amount: bigint): Promise<EmergencyWithdraw>;
     withdrawFees(flowId: bigint, token: Address, amount: bigint): Promise<WithdrawFees>;
     accruedFees(flowId: bigint): Promise<AccruedFees>;
     addSignerToSet(pubKeyHash: bigint): Promise<AddSignerToSet>;
@@ -656,9 +729,16 @@ export interface IBridgeDepository extends IOP_NETContract {
     isSignerAuthorized(): Promise<IsSignerAuthorized>;
     setPaused(paused: boolean): Promise<SetPaused>;
     setGovernor(newGovernor: Address): Promise<SetGovernor>;
+    transferGovernor(newGovernor: Address): Promise<TransferGovernor>;
+    setPauser(newPauser: Address): Promise<SetPauser>;
+    setTreasury(newTreasury: Address): Promise<SetTreasury>;
+    setGuardian(newGuardian: Address): Promise<SetGuardian>;
     claimMintWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<ClaimMintWithVoucher>;
     governor(): Promise<Governor>;
     paused(): Promise<Paused>;
+    pauser(): Promise<Pauser>;
+    treasury(): Promise<Treasury>;
+    guardian(): Promise<Guardian>;
     signerEpoch(): Promise<SignerEpoch>;
     signerHashAtEpoch(): Promise<SignerHashAtEpoch>;
     isVoucherUsed(): Promise<IsVoucherUsed>;

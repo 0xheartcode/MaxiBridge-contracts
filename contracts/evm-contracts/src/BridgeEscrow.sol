@@ -283,12 +283,20 @@ contract BridgeEscrow is
     /// @notice Required number of distinct valid signatures to claim.
     uint256 public signerThreshold;
 
-    /// @notice Guardian — gates `emergencyWithdraw` (alongside `whenPaused`).
-    ///         Set-once via `setGuardian`.
+    /// @notice Guardian — gates `emergencyWithdraw` (alongside `whenPaused`)
+    ///         and shares the incident-response surface (`pause`,
+    ///         `cancelVoucher`, `removeSigner`, `migrateSignerSet`).
+    /// @dev    Owner-rotatable via `setGuardian` (was set-once pre-roles PR).
+    ///         On mainnet `owner` is the 7-day TimelockController, so guardian
+    ///         rotation is timelock-gated — an instant-EOA owner reintroduces
+    ///         the hot-key risk this role exists to mitigate (re-audit gate).
     address public guardian;
 
-    /// @notice Set-once destination for `emergencyWithdraw`. Once non-zero,
-    ///         cannot be changed — prevents redirection by a compromised owner.
+    /// @notice Destination for `emergencyWithdraw` drains.
+    /// @dev    Owner-rotatable via `setTreasury` (was set-once pre-roles PR).
+    ///         On mainnet `owner` is the 7-day TimelockController, so treasury
+    ///         rotation is timelock-gated; with an instant-EOA owner a
+    ///         compromised key could redirect emergency drains (re-audit gate).
     address public treasury;
 
     /// @notice Unwrap fee, bps (1 bp = 0.01%). Charged on the OPNet→EVM
@@ -395,15 +403,23 @@ contract BridgeEscrow is
     ///         `refundLockedDeposit`. Permissionless refund path.
     mapping(uint256 => LockRecord) public lockedDeposits;
 
+    /// @notice Dedicated pause role. May call `pause()` (alongside owner +
+    ///         guardian) but NOT `unpause()` or any other privileged fn.
+    ///         Owner-rotatable via `setPauser`; zero address = disabled.
+    /// @dev    Roles PR — appended after `lockedDeposits` (append-only). The
+    ///         trailing `__gap` shrinks by 1 (42 → 41) so the layout past this
+    ///         slot is unchanged.
+    address public pauser;
+
     /// @dev Reserved for future appends. New slots go BEFORE the gap and the
     ///      gap shrinks by the same count to preserve layout.
     ///      Slots past treasury: unwrapFeeBps + unwrapMinFee + flows +
     ///      allFlowIds + flowsByEvmToken + flowsByMode + flowsByEvmChain +
-    ///      lockedDeposits = 8. (Legacy tokenMode + opnetCounterpartOf +
+    ///      lockedDeposits + pauser = 9. (Legacy tokenMode + opnetCounterpartOf +
     ///      _tokenModeFinalized were removed pre-mainnet; flow registry is
     ///      the source of truth for mode + OPNet counterpart binding.)
-    ///      50 - 8 = 42.
-    uint256[42] private __gap;
+    ///      50 - 9 = 41.
+    uint256[41] private __gap;
 
     // ---------------------------------------------------------------------
     // Events
@@ -482,6 +498,8 @@ contract BridgeEscrow is
 
     event TreasurySet(address indexed treasury);
     event GuardianSet(address indexed guardian);
+    /// @notice Emitted when the dedicated pause role is set/rotated/disabled.
+    event PauserSet(address indexed pauser);
 
     /// @notice Emitted when accrued source-side fees for a flow are
     ///         withdrawn (always to the set-once `treasury`). Non-emergency
@@ -556,9 +574,7 @@ contract BridgeEscrow is
     error AlreadyClaimed();
     error SourceEventAlreadyUsed();
     error InvalidSignature();
-    error TreasuryAlreadySet();
     error TreasuryNotSet();
-    error GuardianAlreadySet();
     error NotGuardian();
     error NotASigner();
     error AlreadyASigner();
@@ -1439,23 +1455,47 @@ contract BridgeEscrow is
         emit SupportedTokenUpdated(token, enabled);
     }
 
-    function pause() external onlyOwnerOrGuardian {
+    /// @notice Protective freeze. Callable by owner, guardian, OR the
+    ///         dedicated `pauser` role — the widest incident-response surface.
+    ///         `unpause` deliberately stays narrower (owner/guardian only).
+    function pause() external {
+        if (msg.sender != owner() && msg.sender != guardian && msg.sender != pauser) {
+            revert NotGuardian();
+        }
         _pause();
     }
 
+    /// @notice Resume. OWNER-ONLY (audit H-01). The guardian and `pauser`
+    ///         roles can freeze for incident response but must never re-open
+    ///         the bridge — resumption is a deliberate governance decision
+    ///         (timelock-gated on mainnet), so a compromised incident-response
+    ///         key cannot thaw a legitimate freeze.
     function unpause() external onlyOwner {
         _unpause();
     }
 
+    /// @notice Set/rotate/disable the dedicated pause role.
+    /// @dev    Owner-only (timelock-gated on mainnet). Zero address disables.
+    function setPauser(address newPauser) external onlyOwner {
+        pauser = newPauser;
+        emit PauserSet(newPauser);
+    }
+
+    /// @notice Set or rotate the emergency-drain destination.
+    /// @dev    Owner-rotatable (was set-once pre-roles PR). On mainnet `owner`
+    ///         is the 7-day TimelockController, so rotation is timelock-gated.
+    ///         With an instant-EOA owner this reintroduces a hot-key-drain
+    ///         redirection risk — re-audit before mainnet.
     function setTreasury(address newTreasury) external onlyOwner {
-        if (treasury != address(0)) revert TreasuryAlreadySet();
         if (newTreasury == address(0)) revert ZeroAddress();
         treasury = newTreasury;
         emit TreasurySet(newTreasury);
     }
 
+    /// @notice Set or rotate the guardian (incident-response co-signer).
+    /// @dev    Owner-rotatable (was set-once pre-roles PR). Timelock-gated on
+    ///         mainnet; instant-EOA owner reintroduces hot-key risk — re-audit.
     function setGuardian(address newGuardian) external onlyOwner {
-        if (guardian != address(0)) revert GuardianAlreadySet();
         if (newGuardian == address(0)) revert ZeroAddress();
         guardian = newGuardian;
         emit GuardianSet(newGuardian);

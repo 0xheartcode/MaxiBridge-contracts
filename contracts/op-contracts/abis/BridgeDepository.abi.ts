@@ -155,6 +155,15 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'EmergencyWithdrawal',
+        values: [
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'treasury', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'FeesWithdrawn',
         values: [
             { name: 'flowId', type: ABIDataTypes.UINT256 },
@@ -190,6 +199,30 @@ export const BridgeDepositoryEvents = [
         values: [
             { name: 'oldGov', type: ABIDataTypes.ADDRESS },
             { name: 'newGov', type: ABIDataTypes.ADDRESS },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'PauserSet',
+        values: [
+            { name: 'oldPauser', type: ABIDataTypes.ADDRESS },
+            { name: 'newPauser', type: ABIDataTypes.ADDRESS },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'TreasurySet',
+        values: [
+            { name: 'oldTreasury', type: ABIDataTypes.ADDRESS },
+            { name: 'newTreasury', type: ABIDataTypes.ADDRESS },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'GuardianSet',
+        values: [
+            { name: 'oldGuardian', type: ABIDataTypes.ADDRESS },
+            { name: 'newGuardian', type: ABIDataTypes.ADDRESS },
         ],
         type: BitcoinAbiTypes.Event,
     },
@@ -509,6 +542,15 @@ export const BridgeDepositoryAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
+        name: 'emergencyWithdraw',
+        inputs: [
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
         name: 'withdrawFees',
         inputs: [
             { name: 'flowId', type: ABIDataTypes.UINT256 },
@@ -606,6 +648,30 @@ export const BridgeDepositoryAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
+        name: 'transferGovernor',
+        inputs: [{ name: 'newGovernor', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setPauser',
+        inputs: [{ name: 'newPauser', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setTreasury',
+        inputs: [{ name: 'newTreasury', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'setGuardian',
+        inputs: [{ name: 'newGuardian', type: ABIDataTypes.ADDRESS }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
         name: 'claimMintWithVoucher',
         inputs: [
             { name: 'voucher', type: ABIDataTypes.BYTES },
@@ -626,6 +692,27 @@ export const BridgeDepositoryAbi = [
         constant: true,
         inputs: [],
         outputs: [{ name: 'paused', type: ABIDataTypes.BOOL }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'pauser',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'pauser', type: ABIDataTypes.ADDRESS }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'treasury',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'treasury', type: ABIDataTypes.ADDRESS }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'guardian',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'guardian', type: ABIDataTypes.ADDRESS }],
         type: BitcoinAbiTypes.Function,
     },
     {

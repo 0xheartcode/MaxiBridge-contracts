@@ -30,6 +30,15 @@ export class BridgeDepository extends ContractRuntime {
         'setGovernor',
         ABIDataTypes.ADDRESS,
     );
+    private readonly transferGovernorSelector: number = encodeSelectorWithParams(
+        'transferGovernor',
+        ABIDataTypes.ADDRESS,
+    );
+    private readonly setPauserSelector: number = encodeSelectorWithParams(
+        'setPauser',
+        ABIDataTypes.ADDRESS,
+    );
+    private readonly pauserSelector: number = encodeNumericSelector('pauser()');
 
     private readonly claimMintWithVoucherSelector: number = encodeSelectorWithParams(
         'claimMintWithVoucher',
@@ -147,6 +156,27 @@ export class BridgeDepository extends ContractRuntime {
         w.writeSelector(this.setGovernorSelector);
         w.writeAddress(addr);
         await this.getResponse(w.getBuffer());
+    }
+
+    public async transferGovernor(addr: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.transferGovernorSelector);
+        w.writeAddress(addr);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async setPauser(addr: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setPauserSelector);
+        w.writeAddress(addr);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async pauser(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.pauserSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
     }
 
     public async claimMintWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<void> {
@@ -734,6 +764,62 @@ export class BridgeDepository extends ContractRuntime {
         const w = new BinaryWriter();
         w.writeSelector(this.withdrawFeesSelector);
         w.writeU256(flowId);
+        w.writeAddress(token);
+        w.writeU256(amount);
+        await this.getResponse(w.getBuffer());
+    }
+
+    private readonly setTreasurySelector: number = encodeSelectorWithParams(
+        'setTreasury',
+        ABIDataTypes.ADDRESS,
+    );
+
+    public async setTreasury(treasury: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setTreasurySelector);
+        w.writeAddress(treasury);
+        await this.getResponse(w.getBuffer());
+    }
+
+    private readonly treasurySelector: number = encodeNumericSelector('treasury()');
+
+    public async treasury(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.treasurySelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
+    }
+
+    private readonly setGuardianSelector: number = encodeSelectorWithParams(
+        'setGuardian',
+        ABIDataTypes.ADDRESS,
+    );
+
+    public async setGuardian(guardian: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setGuardianSelector);
+        w.writeAddress(guardian);
+        await this.getResponse(w.getBuffer());
+    }
+
+    private readonly guardianSelector: number = encodeNumericSelector('guardian()');
+
+    public async guardian(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.guardianSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
+    }
+
+    private readonly emergencyWithdrawSelector: number = encodeSelectorWithParams(
+        'emergencyWithdraw',
+        ABIDataTypes.ADDRESS,
+        ABIDataTypes.UINT256,
+    );
+
+    public async emergencyWithdraw(token: Address, amount: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.emergencyWithdrawSelector);
         w.writeAddress(token);
         w.writeU256(amount);
         await this.getResponse(w.getBuffer());
