@@ -750,6 +750,71 @@ export class BridgeDepository extends ContractRuntime {
         await this.getResponse(w.getBuffer());
     }
 
+    // ─── Trustless stranded-lock refund ───────────────────────────────
+
+    private readonly markLockRefundableSelector: number = encodeSelectorWithParams(
+        'markLockRefundable',
+        ABIDataTypes.UINT256,
+        ABIDataTypes.BYTES,
+    );
+    private readonly refundLockSelector: number = encodeSelectorWithParams(
+        'refundLock',
+        ABIDataTypes.UINT256,
+    );
+    private readonly lockRecordSelector: number = encodeSelectorWithParams(
+        'lockRecord',
+        ABIDataTypes.UINT256,
+    );
+    private readonly isLockRefundableSelector: number = encodeNumericSelector(
+        'isLockRefundable()',
+    );
+
+    public async markLockRefundable(
+        lockNonce: bigint,
+        attestation: Uint8Array,
+        mldsaSig: Uint8Array,
+    ): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.markLockRefundableSelector);
+        w.writeU256(lockNonce);
+        w.writeBytesWithLength(attestation);
+        w.writeBytesWithLength(mldsaSig);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async refundLock(lockNonce: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.refundLockSelector);
+        w.writeU256(lockNonce);
+        await this.getResponse(w.getBuffer());
+    }
+
+    // Returns [status, user, token, flowId, amount, fee, mode] as 7 × u256.
+    public async lockRecord(lockNonce: bigint): Promise<bigint[]> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.lockRecordSelector);
+        w.writeU256(lockNonce);
+        const r = await this.getResponse(w.getBuffer());
+        const blob = r.readBytesWithLength();
+        const out: bigint[] = [];
+        for (let i = 0; i < 7; i++) {
+            let v = 0n;
+            for (let j = 0; j < 32; j++) {
+                v = (v << 8n) | BigInt(blob[i * 32 + j]!);
+            }
+            out.push(v);
+        }
+        return out;
+    }
+
+    public async isLockRefundable(lockNonce: bigint): Promise<boolean> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.isLockRefundableSelector);
+        w.writeU256(lockNonce);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readBoolean();
+    }
+
     // ─── #62 — per-flow fee accounting + withdrawFees ─────────────────
 
     private readonly withdrawFeesSelector: number = encodeSelectorWithParams(

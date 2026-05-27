@@ -388,3 +388,38 @@ export class BurnConfirmed extends NetEvent {
         super('BurnConfirmed', data);
     }
 }
+
+// ─── Trustless stranded-lock refund (mirror of EVM BridgeEscrow) ────────
+
+/**
+ * Emitted when a stranded OPNet-source lock is marked refundable via a valid
+ * M-of-N attestation (`markLockRefundable`). The lock moves LOCKED →
+ * REFUNDABLE; the recorded locker may then call `refundLock`. Mirrors the EVM
+ * `BridgeEscrow.DepositMarkedRefundable`.
+ */
+export class LockMarkedRefundable extends NetEvent {
+    constructor(lockNonce: u256, flowId: u256) {
+        const data = new BytesWriter(32 + 32);
+        data.writeU256(lockNonce);
+        data.writeU256(flowId);
+        super('LockMarkedRefundable', data);
+    }
+}
+
+/**
+ * Emitted when a refundable lock's full gross principal is returned to the
+ * recorded locker (`refundLock`). Mirrors the EVM
+ * `BridgeEscrow.LockRefunded`. `amount` is the gross `received` recorded at
+ * lock time (the fee is reversed from accrual, not promoted, so the user gets
+ * the entire locked amount back).
+ */
+export class LockRefunded extends NetEvent {
+    constructor(lockNonce: u256, user: Address, token: Address, amount: u256) {
+        const data = new BytesWriter(32 + ADDRESS_BYTE_LENGTH * 2 + 32);
+        data.writeU256(lockNonce);
+        data.writeAddress(user);
+        data.writeAddress(token);
+        data.writeU256(amount);
+        super('LockRefunded', data);
+    }
+}

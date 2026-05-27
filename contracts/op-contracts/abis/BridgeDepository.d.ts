@@ -109,6 +109,16 @@ export type FeesWithdrawnEvent = {
     readonly by: Address;
     readonly amount: bigint;
 };
+export type LockMarkedRefundableEvent = {
+    readonly lockNonce: bigint;
+    readonly flowId: bigint;
+};
+export type LockRefundedEvent = {
+    readonly lockNonce: bigint;
+    readonly user: Address;
+    readonly token: Address;
+    readonly amount: bigint;
+};
 export type BurnConfirmedEvent = {
     readonly flowId: bigint;
     readonly depositId: bigint;
@@ -421,6 +431,36 @@ export type AccruedFees = CallResult<
 >;
 
 /**
+ * @description Represents the result of the markLockRefundable function call.
+ */
+export type MarkLockRefundable = CallResult<{}, OPNetEvent<LockMarkedRefundableEvent>[]>;
+
+/**
+ * @description Represents the result of the refundLock function call.
+ */
+export type RefundLock = CallResult<{}, OPNetEvent<LockRefundedEvent>[]>;
+
+/**
+ * @description Represents the result of the lockRecord function call.
+ */
+export type LockRecord = CallResult<
+    {
+        record: Uint8Array;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the isLockRefundable function call.
+ */
+export type IsLockRefundable = CallResult<
+    {
+        refundable: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
  * @description Represents the result of the addSignerToSet function call.
  */
 export type AddSignerToSet = CallResult<{}, OPNetEvent<never>[]>;
@@ -717,6 +757,10 @@ export interface IBridgeDepository extends IOP_NETContract {
     emergencyWithdraw(token: Address, amount: bigint): Promise<EmergencyWithdraw>;
     withdrawFees(flowId: bigint, token: Address, amount: bigint): Promise<WithdrawFees>;
     accruedFees(flowId: bigint): Promise<AccruedFees>;
+    markLockRefundable(lockNonce: bigint, attestation: Uint8Array): Promise<MarkLockRefundable>;
+    refundLock(lockNonce: bigint): Promise<RefundLock>;
+    lockRecord(lockNonce: bigint): Promise<LockRecord>;
+    isLockRefundable(): Promise<IsLockRefundable>;
     addSignerToSet(pubKeyHash: bigint): Promise<AddSignerToSet>;
     removeSignerFromSet(pubKeyHash: bigint): Promise<RemoveSignerFromSet>;
     setRequiredSignatures(threshold: bigint): Promise<SetRequiredSignatures>;

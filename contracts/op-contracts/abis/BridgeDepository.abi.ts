@@ -175,6 +175,24 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'LockMarkedRefundable',
+        values: [
+            { name: 'lockNonce', type: ABIDataTypes.UINT256 },
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'LockRefunded',
+        values: [
+            { name: 'lockNonce', type: ABIDataTypes.UINT256 },
+            { name: 'user', type: ABIDataTypes.ADDRESS },
+            { name: 'token', type: ABIDataTypes.ADDRESS },
+            { name: 'amount', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'BurnConfirmed',
         values: [
             { name: 'flowId', type: ABIDataTypes.UINT256 },
@@ -564,6 +582,34 @@ export const BridgeDepositoryAbi = [
         name: 'accruedFees',
         inputs: [{ name: 'flowId', type: ABIDataTypes.UINT256 }],
         outputs: [{ name: 'accrued', type: ABIDataTypes.UINT256 }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'markLockRefundable',
+        inputs: [
+            { name: 'lockNonce', type: ABIDataTypes.UINT256 },
+            { name: 'attestation', type: ABIDataTypes.BYTES },
+        ],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'refundLock',
+        inputs: [{ name: 'lockNonce', type: ABIDataTypes.UINT256 }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'lockRecord',
+        inputs: [{ name: 'lockNonce', type: ABIDataTypes.UINT256 }],
+        outputs: [{ name: 'record', type: ABIDataTypes.BYTES }],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'isLockRefundable',
+        constant: true,
+        inputs: [],
+        outputs: [{ name: 'refundable', type: ABIDataTypes.BOOL }],
         type: BitcoinAbiTypes.Function,
     },
     {
