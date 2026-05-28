@@ -230,7 +230,39 @@ ML-DSA sigs are ~4840 chars. Default `multipart` silently truncates to 4KB, corr
 
 ## 18. Audit findings status
 
-Two Codex audits run:
+> **Current security model**: `docs/SECURITY.md` is the durable, evergreen threat-model
+> doc (defense-in-depth layers, M-of-N model, residual risks). This section is the
+> historical findings log; SECURITY.md is the standing reference the audits check against.
+
+### Audit timeline
+
+| Date | Audit | Artifact |
+|---|---|---|
+| pre-launch | Codex plan-level (25 findings) | `/tmp/bridge-audit-output.txt` |
+| pre-launch | Codex shipped-code (1 HIGH, 3 MED, 4 LOW) | `/tmp/bridge-shipped-audit-output.txt` |
+| pre-launch | scripts-dev consistency (2 BLOCKER, 3 HIGH, 2 MED) | conversation history; key items in §17 |
+| 2026-05-19 | Full-codebase security audit | `docs/SECURITY-AUDIT-2026-05-19.md` |
+| 2026-05-25 | Security audit (Mode-4 clawback, fee accounting, burn-index, decimals) | `docs/SECURITY-AUDIT-2026-05-25.md` |
+| 2026-05-27 | refundBurn + roles + ops + governance multi-agent review (Opus ×3 + Codex second-pass) | `docs/AUDIT-RESULTS-2026-05-27.md` |
+
+### 2026-05-27 audit — status
+
+No CRITICAL. Findings split across four PRs (target `dev`):
+
+- **PR #97** — refundBurn mint-authority hardening: H-1 (EVM rate-limit), H-2 (OPNet mode check), A-1 (OPNet rate-limit), M-4 (burnId binds wrappedToken+burner). + 6 new tests.
+- **PR #98** — privileged ops scripts: H-4/H-5/H-6 (typed-confirmation gates), M-6 (isSignerAuthorized pre-flight), M-7 (wire mainnet guard), M-8 (addressToBytes32 assert), A-3 partial (refuse when threshold > 1).
+- **PR #99** — governance: H-3 (role-rotation events carry old+new; 7-day→3-day docs), M-2 (transferGovernor docstring), M-5 (refundBurn pause-gate docstring), A-2 (markLockRefundable not pause-gated).
+- **PR #100** — non-blocking hygiene: M-1 (rotateSigner counter inflation), M-3 (refundBurn reject DRAINING), A-4 (selector-constant runtime asserts).
+
+**Still deferred** (need design / out-of-band work, tracked in `docs/AUDIT-RESULTS-2026-05-27.md`):
+- 🟨 **A-3 full** — multi-signer gather for ops/recovery scripts (CLI / file / interactive — design call).
+- 🟨 **H-3 full** — explicit 2-step treasury/guardian accept (only material if EOA owners are ever used; the 3-day timelock is the staging step today).
+- 🟨 **A-5** — `_lockBlock` reorg guard uses block number not block hash (needs OPNet runtime block-hash check).
+- 🟨 **Pre-mainnet** — diff on-chain v1 storage layout vs current impl out-of-band before the upgrade ceremony.
+
+### Earlier audits
+
+Two pre-launch Codex audits run:
 1. **Plan-level** (before code): 25 findings (6 CRITICAL, 8 HIGH, 7 MEDIUM, 4 LOW). Full output at `/tmp/bridge-audit-output.txt`.
 2. **Shipped-code** (post-implementation): 1 HIGH, 3 MEDIUM, 4 LOW. Full output at `/tmp/bridge-shipped-audit-output.txt`.
 

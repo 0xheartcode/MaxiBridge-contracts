@@ -180,6 +180,36 @@ route's mode is read from `_flowMode[flowId]` on BOTH chains (#68 N:M), *not* fr
 per-token stamp. Every mode is **bidirectional**, and one `(evmToken, opnetToken)`
 pair can back several modes at once.
 
+### Why exactly five
+
+The modes are not arbitrary — they enumerate every legal combination of **what kind
+of asset lives on each chain**, plus one payout variant. For any side, the bridge
+either **custodies** the real asset (lock/release moves it in and out of escrow) or
+holds **mint** authority over a wrapped representation (mint/burn creates/destroys
+supply). Two chains × two roles = four combinations, and mode 4 layers a payout shape
+on top of mode 3:
+
+```
+Asset NATIVE to one chain (bridge can't mint it — e.g. canonical USDC, MOTO)?
+├── native to EVM   → mode 0  WRAPPED            (EVM custody / OPNet mint)
+└── native to OPNet → mode 1  INVERSE_WRAPPED     (OPNet custody / EVM mint)
+
+Asset is dual-chain native (bridge holds mint authority on BOTH)?
+└── supply MOVES between chains, burn-here = mint-there → mode 2  NATIVE_BURN_MINT
+
+Fixed supply, pre-funded reserves on each side, NO minting?
+├── pay destination all-at-once → mode 3  POOLED_LOCK_RELEASE
+└── destination drips over time → mode 4  POOLED_LOCK_VEST  (= mode 3 + VestingVault)
+```
+
+You don't "pick mode 2" for an existing token — it requires deploying a token whose
+mint authority is handed to the bridge on both chains. Custody modes (0/1) are forced
+by *where the issuance authority already lives* (you can't mint canonical USDC). Pooled
+modes (3/4) are for projects that want one fixed supply shared across chains. Mode 4 is
+the only "payout shape" distinction rather than a custody distinction — it exists as a
+separate mode (not a flag on 3) because its `claim` leg calls `VestingVault.depositFor`
+instead of a plain transfer: different external interface, different clawback semantics.
+
 ### Custody vs mint is PER-MODE, not per-chain
 
 "Which chain holds the real asset (lock / pool = **custody**) vs which issues a
@@ -257,6 +287,38 @@ before mainnet.** Two deliberate asymmetries remain, each with a reason:
   accounting (#44) has no EVM twin; EVM's inventory accounting is local to `claim`. This
   is an accounting-shape difference, not a recovery gap (the recovery primitives above
   are fully mirrored).
+
+### Mode selection & routing — who decides, and how
+
+The mode is a property of the **flow** (a route), not the token, and it's chosen at
+flow-registration time:
+
+- **Governance decides which flows exist.** Only the governor can call `addFlow`
+  (`BridgeEscrow.addFlow(FlowAddParams{ mode, … })` on EVM,
+  `BridgeDepository.addFlow({ mode, … })` on OPNet), which returns
+  `flowId = keccak256(identity tuple)`. The two sides must agree on the mode or the
+  route's `claim` reverts. **Mode is immutable for a given `flowId`** — there is no
+  `setFlowMode`. To "change a token's mode" you register a new flow and drain the old
+  one (`drainFlow` → DRAINING, no new locks/mints), or leave both live.
+- **The user picks the flow, from a curated menu.** Each transfer carries a `flowId`;
+  the user (really, the dApp) selects from the flows governance already registered for
+  that exact token pair. This is *not* a free choice — an unregistered `flowId`, a
+  token-binding mismatch, an inactive/paused/draining flow, or an over-cap/over-limit
+  transfer all revert. The `flowId` is also baked into the **signed voucher preimage**
+  and recomputed + asserted on claim (FINDING-003), so a user can't repoint a
+  server-signed voucher at a different flow. Think "pick a lane at a toll booth someone
+  else built and approved," not "decide the rules."
+- **N:M routing.** Because the mode lives on the flow, one `(evmToken, opnetToken)`
+  pair can back *several* flows of different modes simultaneously (e.g. MOTO with both
+  a pooled mode-3 route and a vesting mode-4 route); the user picks per transfer. In the
+  common case a pair has exactly one flow and the dApp fills the `flowId` in silently —
+  no mode picker is shown.
+- **Operator responsibility.** Because users select from whatever is registered and
+  `ACTIVE`, a misconfigured flow is a *live* flow the moment it's added. That's why
+  `addFlow` is governor-only, why mode-4 flows defensively reject claims until
+  `setFlowVestingVault` is wired, and why each custody-side flow must be separately
+  funded via `provisionInventory*` (a mode-3 flow with zero inventory rejects every
+  claim even if a sibling flow on the same pair is healthy).
 
 When the indexer processes a deposit or withdrawal event it resolves the flow's mode (via the flowId on the source event, falling back to the on-chain mode view) and stores `token_mode`, `source_event_type`, and `dest_method` on the DB row. The dApp reads `dest_method` from the status API and calls the correct claim function — `ClaimButton` never hard-codes a function name.
 
