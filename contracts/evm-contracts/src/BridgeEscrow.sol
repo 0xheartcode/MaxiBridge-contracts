@@ -463,8 +463,10 @@ contract BridgeEscrow is
     address public pauser;
 
     /// @notice #55 — per-burn replay guard for `refundBurn`. Keyed by
-    ///         `keccak256(abi.encode(burnTxHash, burnNonce))`. Set strictly
-    ///         BEFORE the cross-contract re-mint (CEI) — it is the ONLY
+    ///         `keccak256(abi.encode(wrappedToken, burner, burnTxHash, burnNonce))`
+    ///         (M-4 — `burnNonce` is per-`WrappedERC20`, so the token + burner
+    ///         are bound in to keep the key collision-free across wrappeds).
+    ///         Set strictly BEFORE the cross-contract re-mint (CEI) — it is the ONLY
     ///         protection against a double / infinite re-mint of the same
     ///         burn. An unset slot (false) means "not yet refunded";
     ///         append-only, no version bump needed.
@@ -538,7 +540,8 @@ contract BridgeEscrow is
     );
 
     /// @notice #55 — emitted on a successful trustless burn-side recovery.
-    ///         `burnId` is the replay key `keccak256(burnTxHash, burnNonce)`;
+    ///         `burnId` is the replay key
+    ///         `keccak256(wrappedToken, burner, burnTxHash, burnNonce)` (M-4);
     ///         `burner` is the re-mint recipient; `amount` is the
     ///         signer-attested re-minted amount.
     event BurnRefunded(
@@ -1699,18 +1702,19 @@ contract BridgeEscrow is
     ///         `refundBurn` is a MINT primitive and pause halts mint authority
     ///         system-wide (mirrors OPNet `requireNotPaused`).
     ///
-    ///         Replay guard: `keccak256(abi.encode(burnTxHash, burnNonce))` is
-    ///         set BEFORE the cross-contract mint (CEI) — the ONLY protection
-    ///         against a double / infinite re-mint. `nonReentrant` backstops
+    ///         Replay guard:
+    ///         `keccak256(abi.encode(wrappedToken, burner, burnTxHash, burnNonce))`
+    ///         (M-4) is set BEFORE the cross-contract mint (CEI) — the ONLY
+    ///         protection against a double / infinite re-mint. `nonReentrant` backstops
     ///         the external `mintFromBridge` call.
     ///
     ///         `sig` is the same `[uint8 numSigs][sig(65)]…` M-of-N blob that
     ///         `claim`/`claimMintWrapped` consume, verified over the EIP-712
     ///         digest of the BurnRefundAuthorization. Binding mirrors the
     ///         claimMintWrapped flow checks: wrappedToken allowlisted +
-    ///         bridge-mintable; flow exists + ACTIVE/DRAINING + its evmToken
-    ///         binds the wrapped (so a sig for one wrapped can't be replayed
-    ///         against another).
+    ///         bridge-mintable; flow exists + ACTIVE only (M-3 — DRAINING
+    ///         rejected) + its evmToken binds the wrapped (so a sig for one
+    ///         wrapped can't be replayed against another).
     function refundBurn(BurnRefundAuthorization calldata intent, bytes calldata sig)
         external
         nonReentrant
