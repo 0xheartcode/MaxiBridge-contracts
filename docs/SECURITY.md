@@ -1,13 +1,12 @@
 # MaxiBridge — Security Model & Threat Defenses
 
 This is the **durable, evergreen** description of how the bridge defends itself. It is
-the model that the dated point-in-time audits (`docs/SECURITY-AUDIT-YYYY-MM-DD.md`)
-check *against*. When an audit closes a finding, the corresponding guardrail here should
-already describe the intended behavior; when this doc and an audit disagree, the audit
-is the newer truth and this doc should be reconciled.
+the model that point-in-time audits check *against*. When an audit closes a finding, the
+corresponding guardrail here should already describe the intended behavior; when this doc
+and an audit disagree, the audit is the newer truth and this doc should be reconciled.
 
 - **System overview / how it works**: `docs/ARCHITECTURE.md`
-- **Latest audit**: `docs/SECURITY-AUDIT-2026-05-25.md` + `docs/AUDIT-RESULTS-2026-05-27.md`
+- **Audits**: external audit pending; prior internal review records are in git history.
 - **Incident procedures**: `docs/RUNBOOK.md`
 
 The bridge is **defense-in-depth** — almost every exploit has to defeat several

@@ -149,7 +149,6 @@ Bridge-Monorepo/
 │   ├── REFERENCE.md          # extended ref (deploy/upgrade procedures, gotchas, audit status)
 │   ├── TERMS.md              # DRAFT T&C for frontend modal (legal review required)
 │   ├── TESTNET-SMOKE-TEST.md # 12-section end-to-end walkthrough — START HERE for testnet runs
-│   ├── SECURITY-AUDIT-2026-05-19.md  # full-codebase security audit + remediation status
 │   ├── DEFERRED-WORK.md      # genuinely-open follow-ups (GitHub issues #32–#39)
 │   ├── FUTURE-UX-IMPROVEMENTS.md  # elective, additive UX/capability backlog
 │   └── runbooks/
@@ -254,7 +253,7 @@ npm run integration:drills             # security drills (replay, rotation, reor
 10. **Voucher cancellation on `BridgeDepository`** (Phase 1.6). `cancelVoucher(uint256)` (governor-only, idempotent) + `_cancelledVouchers` map; `claimMintWithVoucher` rejects cancelled vouchers before the standard replay guard. Mirrors EVM `BridgeEscrow.cancelVoucher(bytes32)`.
 11. **Deterministic CREATE2 deploy** (Phase 2.1). `scripts/src/deploy/evm-deploy-create2.ts` deploys **both** the implementation and the ERC1967 proxy via the canonical Arachnid factory `0x4e59b44847b379578588920cA78FbF26c0B4956C` (proxy salt `keccak256("opnet-bridge-escrow-v1")`, impl salt `keccak256("opnet-bridge-escrow-impl-v1")`). The impl has no constructor args so its address is chain-stable — required because the impl address is embedded in the proxy initcode. **Caveat:** the proxy's `initData` calls `initialize(...)` whose args include the per-chain USDC/USDT addresses, so the proxy address is identical only across chains with matching `initialize` args; full cross-chain parity needs the token list moved out of `initialize` (tracked with multi-chain work, #33).
 12. **Independent watchdog** (Phase 2.3). `bridge-watchdog/` is a separate Node service that polls EVM escrow balances + OPNet wrapped totalSupply directly, raises Slack/Telegram alerts, and can fire `/api/admin/pause` on critical divergence. Hard-clamps crit-bps to `[10, 500]` so a hostile config cannot disable detection.
-13. **2026-05 audit hardening** (PR #58 — full detail + deferred items in `docs/SECURITY-AUDIT-2026-05-19.md`). Behavioural changes layered on the above:
+13. **2026-05 audit hardening** (PR #58 — full detail in the PR; internal audit records live in git history, external audit pending). Behavioural changes layered on the above:
     - **EVM `BridgeEscrow` — guardian incident-response (H-01):** `pause`, `cancelVoucher`, `removeSigner`, `migrateSignerSet` are gated `onlyOwnerOrGuardian` (were `onlyOwner`) so incident response stays immediate once `owner` becomes the 3-day Timelock. `unpause` / `addSigner` / `setThreshold` / upgrades stay owner-only.
     - **OPNet `WrappedOP20` — burn destination allowlist (M-01):** `burnForRelease` reverts on a `destChainId` not enabled via the new governor `setSupportedDestChain`; a burn to an un-serviced chain can no longer destroy tokens with no release path. Fail-closed — empty until the deploy ceremony populates it.
     - **OPNet `BridgeDepository` — mint inventory (M-02):** `claimMintWithVoucher` no longer caps mint-on-OPNet modes (0/2) against a cumulative `_flowInventory` (no decrement path exists on that side); `dailyLimit` + the wrapped token's `maxSupply` are the bounds.
