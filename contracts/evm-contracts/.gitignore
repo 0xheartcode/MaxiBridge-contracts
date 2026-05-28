@@ -1,5 +1,6 @@
 cache/
 out/
 broadcast/
+sizes.json
 .env
 .env.local
