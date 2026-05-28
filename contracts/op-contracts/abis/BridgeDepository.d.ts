@@ -342,6 +342,11 @@ export type ResumeFlow = CallResult<{}, OPNetEvent<FlowStatusChangedEvent>[]>;
 export type DrainFlow = CallResult<{}, OPNetEvent<FlowStatusChangedEvent>[]>;
 
 /**
+ * @description Represents the result of the retireFlow function call.
+ */
+export type RetireFlow = CallResult<{}, OPNetEvent<FlowStatusChangedEvent>[]>;
+
+/**
  * @description Represents the result of the setFlowCap function call.
  */
 export type SetFlowCap = CallResult<{}, OPNetEvent<FlowCapChangedEvent>[]>;
@@ -752,6 +757,7 @@ export interface IBridgeDepository extends IOP_NETContract {
     pauseFlow(flowId: bigint): Promise<PauseFlow>;
     resumeFlow(flowId: bigint): Promise<ResumeFlow>;
     drainFlow(flowId: bigint): Promise<DrainFlow>;
+    retireFlow(flowId: bigint): Promise<RetireFlow>;
     setFlowCap(flowId: bigint, newCap: bigint): Promise<SetFlowCap>;
     setFlowDailyLimit(flowId: bigint, newLimit: bigint): Promise<SetFlowDailyLimit>;
     setFlowMinAmount(flowId: bigint, newMin: bigint): Promise<SetFlowMinAmount>;

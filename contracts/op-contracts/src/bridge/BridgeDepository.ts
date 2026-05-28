@@ -93,10 +93,11 @@ const MAX_TIP_BPS: u32 = 200;
  * BridgeEscrow so a flow can be identified by the same status code on
  * either chain.
  */
-const FLOW_STATUS_DISABLED: u32 = 0;
+const FLOW_STATUS_DISABLED: u32 = 0; // sentinel only — never a reachable state for a registered flow
 const FLOW_STATUS_ACTIVE: u32 = 1;
 const FLOW_STATUS_PAUSED: u32 = 2;
 const FLOW_STATUS_DRAINING: u32 = 3;
+const FLOW_STATUS_RETIRED: u32 = 4; // decommission FLAG — non-terminal, reversible via resumeFlow
 
 /**
  * PR γ.1 — rolling-window length for per-flow `dailyLimit`. 24 hours.
@@ -1377,10 +1378,12 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     /**
-     * Move a flow into status=PAUSED. Only allowed from active. Governor
-     * gated — on EVM the equivalent is guardian-immediate, but on OPNet
-     * the BridgeAuthority chain already short-circuits to a guardian
-     * role; we keep the gate uniform.
+     * Move a flow into status=PAUSED. Valid from any registered non-PAUSED
+     * state (active / draining / retired). Governor gated — on EVM the
+     * equivalent is guardian-immediate, but on OPNet the BridgeAuthority
+     * chain already short-circuits to a guardian role; we keep the gate
+     * uniform. A registered flow is always in {ACTIVE,PAUSED,DRAINING,
+     * RETIRED}, so the only illegal move is a self-transition.
      */
     @method({ name: 'flowId', type: ABIDataTypes.UINT256 })
     @emit('FlowStatusChanged')
@@ -1391,7 +1394,7 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: flow not found');
         }
         const oldStatus: u32 = this._flowStatus.get(flowId).toU32();
-        if (oldStatus != FLOW_STATUS_ACTIVE) {
+        if (oldStatus == FLOW_STATUS_PAUSED) {
             throw new Revert('BridgeDepository: invalid status transition');
         }
         this._flowStatus.set(flowId, u256.fromU32(FLOW_STATUS_PAUSED));
@@ -1400,7 +1403,8 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     /**
-     * Move a flow back to status=ACTIVE. Only allowed from paused.
+     * Move a flow back to status=ACTIVE — the sole edge to ACTIVE, from any
+     * off-state (paused / draining / retired).
      */
     @method({ name: 'flowId', type: ABIDataTypes.UINT256 })
     @emit('FlowStatusChanged')
@@ -1411,7 +1415,7 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: flow not found');
         }
         const oldStatus: u32 = this._flowStatus.get(flowId).toU32();
-        if (oldStatus != FLOW_STATUS_PAUSED) {
+        if (oldStatus == FLOW_STATUS_ACTIVE) {
             throw new Revert('BridgeDepository: invalid status transition');
         }
         this._flowStatus.set(flowId, u256.fromU32(FLOW_STATUS_ACTIVE));
@@ -1420,8 +1424,10 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     /**
-     * Move a flow into status=DRAINING — one-way wind-down. Allowed from
-     * active or paused. PR γ: claim/release allowed; lock/mint rejected.
+     * Move a flow into status=DRAINING — soft wind-down: blocks new locks
+     * but keeps honouring in-flight release/burn claims. Valid from any
+     * registered non-DRAINING state. REVERSIBLE — resumeFlow flips it back
+     * to ACTIVE (no longer a one-way door).
      */
     @method({ name: 'flowId', type: ABIDataTypes.UINT256 })
     @emit('FlowStatusChanged')
@@ -1432,11 +1438,37 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: flow not found');
         }
         const oldStatus: u32 = this._flowStatus.get(flowId).toU32();
-        if (oldStatus != FLOW_STATUS_ACTIVE && oldStatus != FLOW_STATUS_PAUSED) {
+        if (oldStatus == FLOW_STATUS_DRAINING) {
             throw new Revert('BridgeDepository: invalid status transition');
         }
         this._flowStatus.set(flowId, u256.fromU32(FLOW_STATUS_DRAINING));
         this.emitEvent(new FlowStatusChanged(flowId, oldStatus, FLOW_STATUS_DRAINING));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Move a flow into status=RETIRED — a decommission FLAG (deliberate,
+     * indefinite shelving; distinct intent from a guardian incident-pause)
+     * for clear UI/indexer labelling. Behaves like "off": blocks locks AND
+     * claims (a non-active/non-draining status). Valid from any registered
+     * non-RETIRED state. NOT terminal — resumeFlow flips it back to ACTIVE
+     * exactly like paused/draining. No money-safety guarantee attaches; it
+     * is an intent label enforced only by the flow being off.
+     */
+    @method({ name: 'flowId', type: ABIDataTypes.UINT256 })
+    @emit('FlowStatusChanged')
+    public retireFlow(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const flowId: u256 = calldata.readU256();
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        const oldStatus: u32 = this._flowStatus.get(flowId).toU32();
+        if (oldStatus == FLOW_STATUS_RETIRED) {
+            throw new Revert('BridgeDepository: invalid status transition');
+        }
+        this._flowStatus.set(flowId, u256.fromU32(FLOW_STATUS_RETIRED));
+        this.emitEvent(new FlowStatusChanged(flowId, oldStatus, FLOW_STATUS_RETIRED));
         return new BytesWriter(0);
     }
 

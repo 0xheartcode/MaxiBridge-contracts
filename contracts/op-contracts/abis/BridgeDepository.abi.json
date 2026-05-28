@@ -410,6 +410,19 @@
             "outputs": []
         },
         {
+            "name": "retireFlow",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
             "name": "setFlowCap",
             "type": "Function",
             "payable": false,

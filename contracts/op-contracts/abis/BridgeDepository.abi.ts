@@ -461,6 +461,12 @@ export const BridgeDepositoryAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
+        name: 'retireFlow',
+        inputs: [{ name: 'flowId', type: ABIDataTypes.UINT256 }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
         name: 'setFlowCap',
         inputs: [
             { name: 'flowId', type: ABIDataTypes.UINT256 },

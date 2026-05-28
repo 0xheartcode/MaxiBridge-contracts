@@ -208,15 +208,31 @@ contract BridgeEscrow is
     ///         opnetBridge, opnetToken). Vouchers are validated against
     ///         the flow's status before any inventory mutation in PR γ.
     ///
-    ///         disabled  — flow does not exist OR has been retired
+    ///         disabled  — sentinel ONLY: the slot was never written (no
+    ///                     such flow). NOT a reachable state for a
+    ///                     registered flow — a decommissioned flow is
+    ///                     RETIRED, not DISABLED.
     ///         active    — vouchers and locks accepted normally
-    ///         paused    — guardian-set protective freeze; can resume
-    ///         draining  — governor-set; only release/burn (no new
-    ///                     locks/mints) — used to wind a route down
+    ///         paused    — guardian-set protective freeze; blocks locks AND
+    ///                     claims; reversible (resumeFlow → active)
+    ///         draining  — governor-set soft wind-down; blocks new locks but
+    ///                     still honours in-flight release/burn claims.
+    ///                     REVERSIBLE (resumeFlow → active) so an operator
+    ///                     that started a wind-down can reopen the route.
+    ///         retired   — governor-set decommission FLAG. Behaves like
+    ///                     "off" — blocks locks AND claims (a non-active,
+    ///                     non-draining status) — and signals deliberate,
+    ///                     indefinite decommission (distinct from PAUSED's
+    ///                     incident-freeze intent) for clear UI/indexer
+    ///                     labelling. NOT terminal: reversible via
+    ///                     resumeFlow → active, exactly like paused/draining.
+    ///                     (No money-safety guarantee attaches to it — it's
+    ///                     an intent label, enforced only by being off.)
     uint8 public constant FLOW_STATUS_DISABLED = 0;
     uint8 public constant FLOW_STATUS_ACTIVE = 1;
     uint8 public constant FLOW_STATUS_PAUSED = 2;
     uint8 public constant FLOW_STATUS_DRAINING = 3;
+    uint8 public constant FLOW_STATUS_RETIRED = 4;
 
     /// @notice Rolling-window length for per-flow `dailyLimit`. 24 hours.
     ///         Hard-coded so a hostile governor cannot disable rate
@@ -2017,40 +2033,63 @@ contract BridgeEscrow is
         emit FlowAdded(flowId, p.mode, p.evmChainId, p.evmToken, p.opnetToken);
     }
 
-    /// @notice Guardian-only protective freeze. Immediate (no timelock)
-    ///         so a compromise can be quarantined fast. Only valid from
-    ///         the active state.
+    /// @notice Guardian-only protective freeze. Immediate (no timelock) so a
+    ///         compromise can be quarantined fast. Valid from any registered
+    ///         non-PAUSED state (active / draining / retired) — the guardian
+    ///         can slam a flow off regardless of its current lifecycle state.
+    ///         FREEZE side of the H-01 freeze-but-never-thaw split: the
+    ///         guardian can push a flow toward "off" but can NEVER re-open it
+    ///         (only the owner's resumeFlow flips back to ACTIVE).
     function pauseFlow(bytes32 flowId) external {
         if (msg.sender != guardian) revert NotGuardian();
         FlowRecord storage f = flows[flowId];
         if (f.evmChainId == 0) revert FlowNotFound();
-        if (f.status != FLOW_STATUS_ACTIVE) revert FlowInvalidStatusTransition();
+        // A registered flow is always in {ACTIVE,PAUSED,DRAINING,RETIRED};
+        // the only illegal move is a self-transition.
+        if (f.status == FLOW_STATUS_PAUSED) revert FlowInvalidStatusTransition();
         emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_PAUSED);
         f.status = FLOW_STATUS_PAUSED;
     }
 
-    /// @notice Governor-only resume — flips paused → active.
+    /// @notice Owner-only resume — the SOLE edge back to ACTIVE, from any
+    ///         off-state (paused / draining / retired). THAW side of the
+    ///         H-01 split: re-opening a flow is owner-only, so a guardian
+    ///         freeze can never be self-reversed.
     function resumeFlow(bytes32 flowId) external onlyOwner {
         FlowRecord storage f = flows[flowId];
         if (f.evmChainId == 0) revert FlowNotFound();
-        if (f.status != FLOW_STATUS_PAUSED) revert FlowInvalidStatusTransition();
+        if (f.status == FLOW_STATUS_ACTIVE) revert FlowInvalidStatusTransition();
         emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_ACTIVE);
         f.status = FLOW_STATUS_ACTIVE;
     }
 
-    /// @notice Governor-only — start winding a route down. Permitted from
-    ///         active or paused. Once draining, the only forward path is
-    ///         disabled (after inventory hits zero) — no resume back to
-    ///         active. Consumed by PR γ: claim/release allowed; lock/mint
-    ///         rejected.
+    /// @notice Owner-only — wind a route down: blocks new locks but keeps
+    ///         honouring in-flight release/burn claims. Valid from any
+    ///         registered non-DRAINING state. REVERSIBLE — resumeFlow flips
+    ///         it back to ACTIVE (no longer a one-way door), so a wind-down
+    ///         started by mistake or reconsidered can simply be reopened.
     function drainFlow(bytes32 flowId) external onlyOwner {
         FlowRecord storage f = flows[flowId];
         if (f.evmChainId == 0) revert FlowNotFound();
-        if (f.status != FLOW_STATUS_ACTIVE && f.status != FLOW_STATUS_PAUSED) {
-            revert FlowInvalidStatusTransition();
-        }
+        if (f.status == FLOW_STATUS_DRAINING) revert FlowInvalidStatusTransition();
         emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_DRAINING);
         f.status = FLOW_STATUS_DRAINING;
+    }
+
+    /// @notice Owner-only — decommission FLAG. Marks a route as deliberately
+    ///         retired (distinct intent from a guardian incident-pause) for
+    ///         clear UI/indexer labelling. Behaves like "off": blocks locks
+    ///         AND claims (a non-active/non-draining status). Valid from any
+    ///         registered non-RETIRED state. NOT terminal — resumeFlow flips
+    ///         it back to ACTIVE exactly like paused/draining. No money-safety
+    ///         guarantee attaches; it is an intent label enforced only by the
+    ///         flow being off while it holds this status.
+    function retireFlow(bytes32 flowId) external onlyOwner {
+        FlowRecord storage f = flows[flowId];
+        if (f.evmChainId == 0) revert FlowNotFound();
+        if (f.status == FLOW_STATUS_RETIRED) revert FlowInvalidStatusTransition();
+        emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_RETIRED);
+        f.status = FLOW_STATUS_RETIRED;
     }
 
     /// @notice Governor-only — adjust the per-flow inventory ceiling.

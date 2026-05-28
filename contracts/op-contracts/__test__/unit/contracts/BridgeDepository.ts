@@ -403,6 +403,10 @@ export class BridgeDepository extends ContractRuntime {
         'drainFlow',
         ABIDataTypes.UINT256,
     );
+    private readonly retireFlowSelector: number = encodeSelectorWithParams(
+        'retireFlow',
+        ABIDataTypes.UINT256,
+    );
     private readonly setFlowCapSelector: number = encodeSelectorWithParams(
         'setFlowCap',
         ABIDataTypes.UINT256,
@@ -506,6 +510,13 @@ export class BridgeDepository extends ContractRuntime {
     public async drainFlow(flowId: bigint): Promise<void> {
         const w = new BinaryWriter();
         w.writeSelector(this.drainFlowSelector);
+        w.writeU256(flowId);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async retireFlow(flowId: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.retireFlowSelector);
         w.writeU256(flowId);
         await this.getResponse(w.getBuffer());
     }
