@@ -89,9 +89,11 @@ contract RelayerTipTest is Test {
         vm.stopPrank();
 
         // PR γ.1: bootstrap inventory; lock-side bump is γ.2.
-        TestableBridgeEscrow(address(escrow))._testSetInventory(
+        TestableBridgeEscrow(address(escrow))._testSeed(
             flowId,
-            type(uint128).max
+            type(uint128).max,
+            0,
+            0
         );
 
         // Seed alice + give the escrow balance to cover claims.

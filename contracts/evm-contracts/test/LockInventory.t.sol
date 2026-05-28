@@ -119,7 +119,7 @@ contract LockInventoryTest is Test {
 
     function test_Lock_CapExceeded_Reverts() public {
         // Pre-fill inventory to one wei below the cap; next 1_000 lock bumps over.
-        escrow._testSetInventory(flowId, uint128(100_000e6) - 1);
+        escrow._testSeed(flowId, uint128(100_000e6) - 1, 0, 0);
         vm.prank(alice);
         vm.expectRevert(BridgeEscrow.FlowCapExceeded.selector);
         escrow.lock(address(usdc), 1_000, RECIPIENT, flowId);
@@ -127,7 +127,7 @@ contract LockInventoryTest is Test {
 
     function test_Lock_AtCapBoundary_Succeeds() public {
         // Pre-fill to (cap - 1_000); locking exactly 1_000 lands on the cap.
-        escrow._testSetInventory(flowId, uint128(100_000e6) - 1_000);
+        escrow._testSeed(flowId, uint128(100_000e6) - 1_000, 0, 0);
         vm.prank(alice);
         escrow.lock(address(usdc), 1_000, RECIPIENT, flowId);
         assertEq(escrow.getFlow(flowId).inventory, 100_000e6);
