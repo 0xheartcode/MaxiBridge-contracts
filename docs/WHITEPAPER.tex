@@ -1,0 +1,352 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Encoding & fonts ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[protrusion=true,expansion=false]{microtype}
+
+% --- Layout ---
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{setspace}
+\usepackage{parskip}
+
+% --- Sectioning & TOC ---
+\usepackage{titlesec}
+\usepackage{titletoc}
+\titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{1em}{}
+
+% --- Math & symbols ---
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+
+% --- Tables & lists ---
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\setlist[itemize]{leftmargin=*,topsep=2pt,itemsep=2pt}
+\setlist[enumerate]{leftmargin=*,topsep=2pt,itemsep=2pt}
+
+% --- Code & verbatim ---
+\usepackage{listings}
+\usepackage{xcolor}
+\definecolor{codebg}{rgb}{0.97,0.97,0.97}
+\definecolor{codeframe}{rgb}{0.85,0.85,0.85}
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codeframe},
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  xleftmargin=8pt,
+  xrightmargin=8pt,
+  framexleftmargin=4pt,
+  framexrightmargin=4pt,
+}
+
+% --- Links ---
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=blue!50!black,
+  citecolor=black,
+  pdftitle={Maxi Bridge Architecture},
+  pdfauthor={Maxi Bridge},
+  pdfsubject={Phase 1 OP\_NET Ethereum Bridge Infrastructure},
+}
+
+% --- Header / title ---
+\title{\textbf{Maxi Bridge Architecture}\\[0.4em]
+\large Phase 1 --- OP\_NET $\leftrightarrow$ Ethereum Bridge Infrastructure}
+\author{}
+\date{Version 1.0 \quad\textbullet\quad May 2026}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+
+\vspace{2em}
+
+\begin{center}
+\begin{minipage}{0.88\textwidth}
+\noindent\textbf{Abstract.} Maxi Bridge is a non-custodial, bidirectional bridge between OP\_NET and Ethereum. Value crosses through a \emph{signed-voucher claim model}: the source chain commits an immutable lock or burn event; an off-chain signer set attests to that event after finality; and the recipient --- or any relayer on their behalf --- submits a self-paying claim on the destination chain, where the contract verifies the attestation before releasing funds.
+
+\vspace{0.5em}
+
+One deployment serves many assets through a \emph{flow registry}. Each flow is a registered (token, direction, mode) triple with its own fee, minimum, decimals, and inventory --- spanning canonical lock-and-release (no mint authority), wrapped mint/burn, and linear vesting-on-arrival, without forking the contracts.
+
+\vspace{0.5em}
+
+Security stands on three load-bearing properties: every signed message binds the exact source event and the exact recipient; signer compromise is answered by instant epoch invalidation rather than expiring vouchers; and privileged action is partitioned across an owner/guardian/pauser/treasury/signer lattice that sits behind time-locked, append-only upgradeability on both chains. Ethereum$\rightarrow$OP\_NET attestations are signed with \textbf{ML-DSA}, a post-quantum scheme.
+\end{minipage}
+\end{center}
+
+\vspace{2em}
+
+\renewcommand{\contentsname}{Contents}
+\tableofcontents
+\thispagestyle{empty}
+
+\newpage
+\setcounter{page}{1}
+
+% =====================================================
+\section{Overview}
+% =====================================================
+
+Maxi Bridge moves OP20 $\leftrightarrow$ ERC-20 assets, beginning with MOTO and the USDC/USDT stable pair. Its design objectives are:
+
+\begin{itemize}
+  \item Preserve canonical asset identity across chains.
+  \item Avoid synthetic inflation wherever lock-and-release applies.
+  \item Reduce trust to cryptographic event binding, not operator promises.
+  \item Keep supply accounting deterministic and publicly verifiable.
+  \item Remain extensible to new OP20 assets and new flow modes.
+\end{itemize}
+
+The bridge is organized around a flow registry rather than a single transfer path. This is the structural difference from a one-asset lock-and-release bridge: a single hardened deployment can simultaneously back a fixed-supply asset by reserve, a wrapped asset by collateral, and a vesting asset by schedule --- each as an independent registered flow. Routing is resolved per-flow on \emph{both} chains: every transfer names the flow it belongs to, so a single token pair may back several flows of different modes at once.
+
+% =====================================================
+\section{Architecture Goals}
+% =====================================================
+
+\subsection{Primary Goals}
+
+\begin{itemize}
+  \item Decentralized, non-custodial infrastructure.
+  \item Bidirectional bridging between OP\_NET and Ethereum.
+  \item Canonical token consistency across EVM environments.
+  \item A minimal, cryptographically bounded attack surface.
+  \item Extensibility to future OP20 assets and modes.
+  \item Instant signer invalidation with zero protocol downtime.
+\end{itemize}
+
+\subsection{Design Philosophy}
+
+The bridge deliberately refuses:
+
+\begin{itemize}
+  \item Unbounded mint authority on canonical lock-and-release assets.
+  \item Wrapped-token naming fragmentation (\texttt{wMOTO}, \texttt{MOTO.e}, and the like).
+  \item Off-chain balance custody by a centralized operator.
+  \item Vouchers that expire on a clock and silently strand funds.
+  \item Bespoke cryptography --- each message is a fixed, byte-exact preimage with a committed cross-validation fixture that gates against drift.
+\end{itemize}
+
+What it uses instead: deterministic on-chain escrow, attestations bound to a single named source event, and storage that only ever grows.
+
+% =====================================================
+\section{Core Bridge Model}
+% =====================================================
+
+\subsection{Signed-Voucher Claims}
+
+Every transfer is two phases divided by chain finality:
+
+\begin{enumerate}
+  \item \textbf{Source commit.} The user locks or burns on the origin chain. The emitted event uniquely names the transfer: source chain id, bridge address, token, transaction hash, log index, nonce, and amount.
+  \item \textbf{Destination claim.} After the configured confirmation depth, the signer set produces a signed attestation --- a \emph{voucher} --- over that event. Anyone may broadcast the claim; only the recipient bound inside the signed payload receives funds. The destination contract verifies the signature, enforces the replay nonce, and releases.
+\end{enumerate}
+
+Because the recipient is sealed into the signature, claims are \textbf{front-run safe}: relaying is permissionless, payout is not. A signed, per-flow-capped \textbf{relayer tip} makes permissionless relay practical --- the recipient may authorize a small tip (bounded on-chain by the flow's \texttt{tipCapBps}) carved from the released amount, so a third-party relayer is reimbursed for destination gas while the recipient receives the remainder. This enables claim bots without granting them any power to redirect or inflate funds.
+
+\subsection{OP\_NET $\rightarrow$ Ethereum}
+
+\begin{enumerate}
+  \item The user burns on OP\_NET via \texttt{WrappedOP20.burnForRelease(...)}, emitting \texttt{BurnedForRelease}.
+  \item The indexer waits the OP\_NET confirmation depth and re-checks the ancestor block at sign time.
+  \item The signer set produces an \textbf{EIP-712 \texttt{ReleaseIntent}}.
+  \item The user submits \texttt{BridgeEscrow.claim(intent, signature)} and pays ETH gas.
+  \item The contract verifies the EIP-712 digest, the signer epoch, and the replay nonce, then releases ERC-20 to the bound recipient.
+\end{enumerate}
+
+\subsection{Ethereum $\rightarrow$ OP\_NET}
+
+\begin{enumerate}
+  \item The user locks ERC-20 via \texttt{BridgeEscrow.lock(...)}, emitting \texttt{Locked}.
+  \item The indexer waits the EVM confirmation depth and re-checks the ancestor.
+  \item The signer set produces a \textbf{540-byte ML-DSA voucher} (\S\ref{sec:formats}).
+  \item The user submits \texttt{BridgeDepository.claimMintWithVoucher(...)} and pays OP\_NET gas.
+  \item The contract verifies the ML-DSA signature set, the epoch, and the replay guard, then mints or releases the destination asset.
+\end{enumerate}
+
+The fee is a \textbf{per-flow parameter, not a protocol constant}: each flow registers its own rate (\texttt{feeBps}) and floor (\texttt{minFee}), both updateable by governance. It is deducted on the \textbf{source side} of each direction:
+\[
+\texttt{fee} = \max(\texttt{minFee},\ \texttt{amount} \cdot \texttt{feeBps} / 10{,}000),
+\]
+rejecting any transfer where the fee rounds to zero or meets the amount. The launch default for the stable pair is \textbf{0.5\,\% (50 bps)}; any other flow may carry its own rate and floor.
+
+\subsection{Refunds \& Failure Recovery}
+
+A lock is not a one-way door. Each source-side deposit moves through an explicit lifecycle --- \texttt{Locked} $\rightarrow$ \texttt{Refundable} $\rightarrow$ \texttt{Refunded} --- so funds are never silently stranded. If the destination claim never materializes (a censored or reorged source event, or a cancelled voucher), the operator marks the deposit refundable and the user reclaims the \textbf{full gross} on the origin chain via \texttt{refundLockedDeposit}. Refund and a successful claim are \textbf{mutually exclusive by construction}: the same deposit cannot be both released on the far side and refunded on the near side. For Mode 4 the recovery has a second step --- \texttt{clawback} returns the \emph{unvested} remainder from the vault while leaving any already-vested portion with the beneficiary. Recovery is symmetric across the two directions: just as a stranded \emph{lock} returns principal to the original locker, a stranded \emph{burn} --- one whose destination release is permanently cancelled --- is made whole by \texttt{refundBurn}, which re-mints the burned amount to the original burner under the same M-of-N attestation. Because re-minting invokes mint authority, this path is the most conservative in the system: it is gated by the full signer threshold and a single-use, per-burn replay guard set before the mint. Because vouchers carry no deadline, these failure paths are deliberate, observable operator actions, never silent timeouts.
+
+% =====================================================
+\section{Flow Modes}
+% =====================================================
+
+The registry admits five modes, fixed per flow at registration:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\textwidth}{@{}c l X@{}}
+\toprule
+\textbf{Mode} & \textbf{Name} & \textbf{Behaviour} \\
+\midrule
+0 & \texttt{WRAPPED} & EVM lock $\rightarrow$ OP\_NET wrapped mint (USDC/USDT today). \\
+1 & \texttt{INVERSE\_WRAPPED} & OP\_NET lock $\rightarrow$ EVM wrapped mint. \\
+2 & \texttt{NATIVE\_BURN\_MINT} & Symmetric mint/burn for assets that grant the bridge mint authority on both sides. \\
+3 & \texttt{POOLED\_LOCK\_RELEASE} & Pre-funded reserve pools on both sides, no minting --- the canonical MOTO model. \\
+4 & \texttt{POOLED\_LOCK\_VEST} & Source side identical to Mode 3; the destination claim deposits into a per-flow vault that releases linearly over a fixed block window. \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Pooled Lock-and-Release --- Mode 3, Canonical MOTO}
+
+For MOTO the bridge holds \textbf{no mint authority}. Both sides are pre-funded reserve pools; a transfer locks reserve on the origin and releases matching reserve on the destination. Cross-chain supply is invariant, and locked balances are temporarily non-circulating collateral backing destination liquidity.
+
+Each flow's destination reserve is an explicit on-chain \texttt{inventory} ledger: governance provisions it up front, and every release decrements it \emph{atomically} with the token transfer (verify $\rightarrow$ effect $\rightarrow$ interaction), so a release can never exceed the reserve actually held and the ledger can never lead custody. A pooled flow that has not been provisioned --- or, for Mode 4, whose vault is not yet wired --- rejects activity rather than accepting an unbackable transfer.
+
+\subsection{Vesting on Arrival --- Mode 4, \texttt{POOLED\_LOCK\_VEST}}
+
+Mode 4 locks exactly as Mode 3, but the destination claim deposits into a per-flow \texttt{VestingVault} that drips the released amount to the beneficiary on a straight line over a fixed block window. The window is an immutable per-vault constructor parameter --- $\sim$7 days at 50{,}400 blocks, $\sim$10 days at 72{,}000, and so on --- not a hardcoded constant. Its properties:
+
+\begin{itemize}
+  \item \textbf{Independent schedules.} Each bridge claim opens its own schedule keyed by the voucher nonce. There are no top-ups; every lock vests on its own clock.
+  \item \textbf{No privileged custody.} The vault is non-upgradeable and owner-less. Only the bridge may deposit or claw back; only the beneficiary may claim.
+  \item \textbf{Fail-closed, two-step setup.} A flow is registered with \texttt{mode = 4}, then a deployed vault is wired via \texttt{setFlowVestingVault}, which enforces \texttt{vault.token() == flow.token}. Until the vault is set, \texttt{lock}, \texttt{claim}, and inventory provisioning all reject the flow --- a half-configured flow can never strand funds, and a vault holding the wrong asset can never be attached.
+  \item \textbf{Reorg recovery without griefing.} If the source event is reorged out after signing, the operator runs \texttt{cancelVoucher} on the escrow and \texttt{clawback} on the vault. Clawback returns the \emph{unvested} remainder to the bridge and leaves the already-vested portion with the beneficiary.
+\end{itemize}
+
+% =====================================================
+\section{Cross-Chain Message Formats}\label{sec:formats}
+% =====================================================
+
+Both formats are \textbf{fixed, byte-exact preimages}. Server, on-chain verifier, and a committed test fixture must agree to the bit; a single-byte drift fails verification on-chain, and the fixture check reports the first divergent byte.
+
+\subsection{Ethereum $\rightarrow$ OP\_NET --- ML-DSA Voucher (540 bytes)}
+
+A 540-byte preimage, hashed with SHA-256 and signed with \textbf{ML-DSA} (post-quantum, NIST Level 2). It binds: the network id (domain separation), the destination contract's own identity, a method selector, the recipient (a theft-proof binding to the claimant), the full source-event tuple (chain id, bridge address, token, tx hash, log index, deposit nonce, source block hash), the destination token, gross/fee/net amounts carried at both source and destination decimals, an optional relayer tip, the signer epoch, a per-voucher replay id, and the \textbf{flow id} that selects which registered route the claim settles into.
+
+Signatures travel as an \textbf{M-of-N blob} --- a length-prefixed array of (\texttt{pubkey}, \texttt{signature}) pairs. The verifier recovers each signer, confirms each is authorized at the voucher's epoch, rejects duplicates, and asserts the distinct-valid count meets the threshold. The launch configuration is 1-of-1; the same encoding scales to M-of-N with no contract change.
+
+\subsection{OP\_NET $\rightarrow$ Ethereum --- EIP-712 \texttt{ReleaseIntent}}
+
+A typed struct signed under the domain
+\begin{center}
+\texttt{\{ name: "BridgeEscrow", version: "1", chainId, verifyingContract \}}
+\end{center}
+Its fields mirror the voucher's binding discipline: token, recipient, amount, source chain id, OP\_NET tx hash and event index, burn nonce, signer epoch, source nonce, gross source amount, relayer tip, and flow id. Verified with \texttt{ECDSA.recover} (low-s enforced by the library) against the authorized signer set at the intent's epoch.
+
+% =====================================================
+\section{Supply Consistency}
+% =====================================================
+
+For canonical lock-and-release assets (MOTO, Mode 3) the bridge neither mints nor burns. The invariant holds at every block:
+
+\[
+\mathrm{Circulating}(\mathrm{OP\_NET}) + \mathrm{Circulating}(\mathrm{Ethereum}) = \mathrm{Fixed\ Canonical\ Supply}
+\]
+
+Locked reserves are temporarily non-circulating collateral; the escrow itself never inflates supply. For wrapped modes (0/1) the destination representation is 1:1 backed by locked source collateral. Mint/burn (mode 2) requires the issuer to grant the bridge mint authority on both sides and is reserved for assets whose economics permit it.
+
+A reserve monitor compares EVM-locked balances against OP\_NET wrapped supply every 60 seconds --- netting in-flight deposits, pending burns, and accrued fees --- and escalates on absolute or relative divergence.
+
+% =====================================================
+\section{Security Model}
+% =====================================================
+
+\subsection{Non-Custodial, Cryptographically Bound}
+
+No operator can move user funds outside the signed-voucher path. Every release is gated by a signature over a preimage that names the exact source event and the exact recipient. Replay is barred by per-transfer nonces tracked on-chain; cancelled vouchers are rejected ahead of the replay guard.
+
+\subsection{Trust Assumption}
+
+One assumption is load-bearing, and we state it plainly: the destination contract does \emph{not} re-execute the source chain. It verifies that an authorized signer set has \textbf{attested} the named source event --- not the event itself. The security ceiling is therefore the honesty of the signer threshold. That ceiling is bounded on every other axis: a signer cannot redirect a payout or inflate an amount (recipient and amounts are sealed into the signed preimage), cannot replay (per-transfer nonces), cannot reach a flow it was not authorized for, and cannot outlive a compromise (epoch rotation invalidates the entire prior signer set the instant it is detected). The launch threshold is 1-of-1 behind a hardened hot wallet; the identical encoding scales to M-of-N, and the signing interface is built to swap to KMS/HSM custody with no contract change. In short, trust reduces to a single sentence --- ``a threshold of signers will not attest an event that did not happen'' --- and every other avenue of abuse is closed cryptographically.
+
+\subsection{Role Lattice}
+
+Privilege is partitioned, not pooled:
+
+\begin{itemize}
+  \item \textbf{Owner} --- upgrades, threshold changes, adding signers, and the sole authority to \emph{unpause}. Becomes a 3-day Timelock at launch hardening.
+  \item \textbf{Guardian} --- incident response: pause, cancel voucher, remove signer, migrate signer set, and the sole caller of emergency withdrawal. Stays immediate even once the owner is the slow Timelock. Crucially it may freeze but never thaw --- \textbf{unpause is owner-only}, so an isolated guardian compromise can halt the bridge but never resume it under attacker control.
+  \item \textbf{Pauser} --- a dedicated, rotatable (and disable-able) freeze-only role that may pause and nothing else.
+  \item \textbf{Treasury} --- the \textbf{rotatable} (owner-set) destination for both routine fee withdrawal and emergency withdrawal; the latter additionally requires the paused state and the guardian role. A zero treasury fails closed, blocking both paths.
+  \item \textbf{Signer set} --- epoch-scoped M-of-N attestation authority.
+\end{itemize}
+
+\subsection{Epoch-Based Signer Invalidation}
+
+Vouchers carry no deadline. Each carries a \textbf{signer epoch}; rotating the signer set increments the epoch on both chains and instantly invalidates every unclaimed voucher from the prior epoch. The server then re-signs honest pending rows under the new epoch in a single transaction. The result is immediate compromise response without time-bombing legitimate in-flight claims.
+
+\subsection{Reorg Defense}
+
+Before signing, the indexer re-fetches the source block by hash and confirms the transaction still sits at the expected log index with the required depth. An event reorged out \emph{after} signing is pulled from the claimable surface; for Mode 4 the operator additionally claws back the unvested remainder.
+
+\subsection{Upgradeability and Governance}
+
+\begin{itemize}
+  \item \textbf{Ethereum \texttt{BridgeEscrow}} --- OZ UUPS proxy, fully hardened: disabled initializers in the implementation, gated \texttt{initialize}, \texttt{onlyOwner} upgrade authorization, no \texttt{selfdestruct} or arbitrary \texttt{delegatecall}, a trailing storage gap, and a CI storage-layout diff gate. The owner is a 3-day \texttt{TimelockController}: every upgrade is \emph{schedule $\rightarrow$ wait $\rightarrow$ execute}.
+  \item \textbf{OP\_NET \texttt{BridgeDepository}} --- \texttt{UpdatablePlugin} on a $\sim$3-day (432-block) delay, plus governance pre-authorization: each upgrade must be armed by the governor or it reverts and rolls back the apply. A compromised deployer key alone cannot ship a malicious upgrade. Storage is append-only.
+  \item \textbf{OP\_NET \texttt{WrappedOP20}} --- \textbf{non-upgradeable by design.} The wrapped tokens are the largest blast-radius surface, so they ship as immutable code; operational repointing flows through governance-gated minter-set and depository changes, never an in-place upgrade.
+\end{itemize}
+
+Both chains expose the same roughly three-day exit window before any upgrade lands --- deliberately set in lockstep so the window to exit is identical on either side.
+
+\subsection{Proof of Reserves}
+
+Reserve balances are public on-chain; anyone can verify locked balances, reserve availability, and cross-chain consistency. An independent watchdog polls both sides directly and can trigger a pause on critical divergence, with detection thresholds hard-clamped so no configuration can silence it.
+
+% =====================================================
+\section{Per-Flow Bounds}
+% =====================================================
+
+Each flow carries its own updateable bounds. The \textbf{minimum} bridge amount (for MOTO, 10{,}000) suppresses dust fragmentation, relayer overhead, and spam. Two further levers exist as \emph{optional} governance controls: a per-flow \textbf{cap} (a ceiling on outstanding inventory) and a windowed \textbf{daily limit}. At launch both are left unbounded --- the protocol imposes \textbf{no maximum or per-wallet velocity gate by default}, because security comes from cryptographic event binding and instant signer rotation, not rate limiting. The levers are there so that a single flow can be throttled, drained, or quiesced --- independently, without touching any other flow --- should an incident or a deliberately conservative ramp call for it. Flow status itself is part of this: each flow is independently \texttt{ACTIVE}, \texttt{DRAINING} (honor existing claims, accept no new locks), or inactive.
+
+% =====================================================
+\section{Future Asset Support}
+% =====================================================
+
+A new asset joins by registering a flow: deploy its ERC-20 representation on Ethereum (or grant mint authority for mint/burn modes), provision destination liquidity, and register the flow record --- \texttt{token}, \texttt{mode}, per-side \texttt{decimals}, \texttt{fee} (rate + floor), \texttt{minimum}, and the optional \texttt{cap}, \texttt{dailyLimit}, and relayer \texttt{tipCap}. Source and destination decimals may differ; the amount policy is decimal-aware, so a flow can bridge an 18-decimal asset to a 6-decimal representation without loss of binding. The bridge is \textbf{transport only} --- it does not issue tokens, manage token economics, or assume project liability. Liquidity provisioning remains the project's responsibility.
+
+% =====================================================
+\section{Phase 1 Scope \& Deliverables}
+% =====================================================
+
+\subsection*{In scope, audit-ready}
+
+\begin{itemize}
+  \item Bidirectional OP\_NET $\leftrightarrow$ Ethereum bridging for the launch asset set.
+  \item Canonical lock-and-release (Mode 3) alongside wrapped (0/1) and vesting (4) flows under one registry.
+  \item ML-DSA voucher and EIP-712 release-intent verification, M-of-N signer sets, epoch rotation.
+  \item Escrow and reserve accounting with replay and reorg protection.
+  \item Time-locked upgradeability on both chains; immutable wrapped tokens.
+  \item Public reserve transparency and an independent watchdog.
+  \item Operator console and deploy/upgrade/ops tooling.
+  \item Test suites across contracts, server, and frontend, plus a committed cross-validation fixture for the voucher format.
+\end{itemize}
+
+\subsection*{Out of scope for Phase 1}
+
+\begin{itemize}
+  \item Multi-chain EVM routing and cross-chain swaps.
+  \item Generalized message passing.
+  \item Automated liquidity rebalancing and dynamic caps.
+  \item KMS-backed signing --- planned; v1 uses hardened hot-wallet signers behind a swappable interface.
+\end{itemize}
+
+% =====================================================
+\section{Conclusion}
+% =====================================================
+
+Maxi Bridge is non-custodial transport between OP\_NET and Ethereum, bound by cryptography rather than custody. By generalizing to a flow registry it serves fixed-supply, wrapped, and vesting assets from one hardened deployment. Its security is layered: every release is sealed to a named source event and recipient; signer compromise is met by instant epoch rotation; privilege is divided across a role lattice; and upgrades on both chains pass through a matched three-day exit window. This is the groundwork for the broader Moto ecosystem across Ethereum and the EVM environments to follow.
+
+\end{document}
