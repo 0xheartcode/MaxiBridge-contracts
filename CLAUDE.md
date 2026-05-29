@@ -34,33 +34,12 @@ EVM → OPNet (deposit)                    OPNet → EVM (withdraw)
 
 > **Source of truth: `scripts/src/addresses.json`** (re-read it before any ceremony — this table is a human-readable snapshot and drifts). Root `.env` mirrors these values for server + frontend runtime use. As of 2026-05-14 the canonical registry points at the EVM-mainnet + OPNet-mainnet pair below. The EVM proxy is still on the **pre-Phase-1** impl; the OPNet side was redeployed fresh on 2026-04-21 (the v0 `op1sqz9cxss...` depository is recorded under `_deprecated_opnetBridgeDepository_v0_networkIdBug` and must NOT be wired).
 
-**EVM — Ethereum mainnet (chainId 1):**
-
-| | Address |
-|---|---|
-| `BridgeEscrow` proxy | `0xc63BF445E59607Ae30AB377fAe10260BA626bF68` |
-| `BridgeEscrow` implementation (v2, post-emergencyWithdraw — **pre Phase 1**) | `0x5c8194FbeF33f499B92d8199d1C62cFA5cD4a9Bc` |
-| `BridgeEscrow` implementation (Phase 1 M-of-N + treasury/guardian + cancelVoucher + flowId/MintIntent + refundLockedDeposit) | **NOT YET DEPLOYED** — code on `main`, awaiting ceremony (`docs/runbooks/mainnet-deploy.md`) |
-| `TimelockController` (3-day, governance owner) | **NOT YET DEPLOYED** — `evmTimelock: null` in addresses.json; scripts ready (`deploy:evm:timelock` + `deploy:evm:transfer-ownership`) |
-| Canonical USDC | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` |
-| Canonical USDT | `0xdAC17F958D2ee523a2206206994597C13D831ec7` |
-| Owner / deployer | `0x5DB730b89351F286fE1825B02d68d09C1bA6Efc6` (will transfer to Timelock during ceremony) |
-| EIP-712 signer | `0x5DB730b89351F286fE1825B02d68d09C1bA6Efc6` (same as owner for v1 launch; 1-of-1 → M-of-N is a follow-up ceremony, issue #38) |
-| Current signer epoch | `1` |
-| `expectedOpnetChainId` | `1` (OPNet mainnet) |
-
-**OPNet — mainnet (networkId 1):**
-
-| | bech32 |
-|---|---|
-| `wUSDC` | `op1sqrxt26zv0udnylkc40vt8ja2rxana3pz3ysvlapp` |
-| `wUSDT` | `op1sqqjrvvnrxf23zn3y3gtz8n2eey3vxtwp0ggw8lg0` |
-| `BridgeDepository` | `op1sqrywquhgn5vc5p53av8pcmykaj6jq0va8ghu0yh2` (redeployed 2026-04-21; v0 deprecated for `networkId` bug) |
-| Deployer / governor | `bc1p9kuwhqpfp6skhyq2qx3dphx4nl2cqjf0f048tv3e9dv973u8p6gqp6n56x` |
-| `networkId` | `1` (OPNet mainnet — enforced on every voucher) |
-| Current signer epoch | `1` |
-| ML-DSA signer pubkey hash @ epoch 1 | `sha256` of the pubkey derived from `MLDSA_SIGNER_WIF`/`MLDSA_SIGNER_KEY` in `.env` (verify via `/api/stats/public → opnetSignerHash` — see §6b) |
-| `_storageVersion` | shipped fresh with Phase 1 features baked in (cancelVoucher, M-of-N helpers, confirmBurn, BridgeAuthority cascade for upgrade authority — closes #16b) |
+Key architectural notes (all addresses live in `scripts/src/addresses.json`):
+- **Phase 1 `BridgeEscrow` impl + `TimelockController`:** **NOT YET DEPLOYED** — code on `main`, awaiting ceremony (`docs/runbooks/mainnet-deploy.md`). `evmTimelock: null` in addresses.json; scripts ready (`deploy:evm:timelock` + `deploy:evm:transfer-ownership`).
+- **OPNet v0 depository DEPRECATED:** The v0 `op1sqz9cxss...` depository is recorded under `_deprecated_opnetBridgeDepository_v0_networkIdBug` — must **NOT** be wired.
+- **ML-DSA signer pubkey hash:** `sha256` of pubkey from `MLDSA_SIGNER_WIF`/`MLDSA_SIGNER_KEY` in `.env`. Verify via `/api/stats/public → opnetSignerHash` (see §6b).
+- **`_storageVersion`:** shipped fresh with Phase 1 features (cancelVoucher, M-of-N helpers, confirmBurn, BridgeAuthority upgrade authority — closes #16b).
+- **EIP-712 signer (v1):** same as owner/deployer; 1-of-1 → M-of-N is a follow-up ceremony (issue #38).
 
 **Testnet / Sepolia / regtest stacks:** none currently registered in `addresses.json`. Fresh testnet deploys (Sepolia + OPNet testnet) are spun up via `npm run deploy:evm` / `deploy:opnet` with the alternate env block in `.env.example` — they overwrite `addresses.json`, so checkpoint/restore the file when switching networks. The `docs/TESTNET-SMOKE-TEST.md` walkthrough assumes a fresh testnet stack. **Faucet tokens are gated NON-MAINNET (testnet AND regtest both allowed).** OPNet `networkId` accepts `1`=mainnet / `2`=testnet / `3`=regtest; the open-mint `MockOP20` faucet deploy (`deploy:opnet:mock`) refuses ONLY `networkId === 1`, and the EVM Mode-4 faucet helper (`/api/admin/flows/draft-faucet`) just encodes `mint(to,amount)` calldata that production canonical tokens revert on. Gate is non-mainnet, not testnet-only.
 
@@ -73,7 +52,6 @@ Bridge-Monorepo/
 ├── .env                      # SECRETS + ADDRESSES — gitignored, do not edit fields other than append
 ├── .env.example              # shape + Sepolia commented alt
 ├── CLAUDE.md                 # THIS FILE
-├── README.md
 ├── dev-all.sh                # concurrent runner (server + frontend + admin panel)
 ├── package.json              # root scripts — npm run dev / build:* / test:*
 ├── Dockerfile                # multi-stage: builds all three + single runtime container
@@ -84,8 +62,6 @@ Bridge-Monorepo/
 │   ├── src/IVestingVault.sol  # Mode 4 interface (depositFor / clawback / previewClaimable)
 │   ├── src/VestingVault.sol   # Mode 4 destination vault — linear block-based release
 │   ├── test/                 # 275/275 passing — BridgeEscrow + VestingVault + Mode4 + Create2Deploy + fork-tests-behind-SEPOLIA_RPC_URL
-│   ├── script/Deploy.s.sol
-│   ├── script/check-storage-layout.sh
 │   ├── storage-layout.json   # COMMITTED snapshot — CI diff gate for upgrades
 │   └── foundry.toml          # extra_output = ["storageLayout"]
 │
@@ -97,8 +73,6 @@ Bridge-Monorepo/
 │   │   └── bridge/events.ts
 │   ├── __test__/unit/        # 52/52 passing — BridgeDepository + WrappedOP20 + cancelVoucher
 │   ├── abis/                 # Auto-generated ABIs (BridgeDepository.*, WrappedOP20.*, OP20.*)
-│   ├── asconfig.json
-│   ├── tsconfig.json
 │   └── package.json          # Sacred versions — see §8
 │
 ├── server/                   # hyper-express + better-sqlite3 + ethers v6 + opnet
