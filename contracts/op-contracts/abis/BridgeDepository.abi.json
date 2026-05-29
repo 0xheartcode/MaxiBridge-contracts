@@ -410,6 +410,19 @@
             "outputs": []
         },
         {
+            "name": "retireFlow",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
             "name": "setFlowCap",
             "type": "Function",
             "payable": false,
@@ -630,6 +643,23 @@
             "outputs": []
         },
         {
+            "name": "emergencyWithdraw",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "token",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
             "name": "withdrawFees",
             "type": "Function",
             "payable": false,
@@ -665,6 +695,97 @@
                 {
                     "name": "accrued",
                     "type": "UINT256"
+                }
+            ]
+        },
+        {
+            "name": "markLockRefundable",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "lockNonce",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "sig",
+                    "type": "BYTES"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "refundLock",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "lockNonce",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "lockRecord",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "lockNonce",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "record",
+                    "type": "BYTES"
+                }
+            ]
+        },
+        {
+            "name": "isLockRefundable",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "refundable",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
+            "name": "refundBurn",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "attestation",
+                    "type": "BYTES"
+                },
+                {
+                    "name": "mldsaSig",
+                    "type": "BYTES"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "isBurnRefunded",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "refunded",
+                    "type": "BOOL"
                 }
             ]
         },
@@ -833,6 +954,58 @@
             "outputs": []
         },
         {
+            "name": "transferGovernor",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newGovernor",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setPauser",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newPauser",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setTreasury",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newTreasury",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "setGuardian",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newGuardian",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
             "name": "claimMintWithVoucher",
             "type": "Function",
             "payable": false,
@@ -872,6 +1045,45 @@
                 {
                     "name": "paused",
                     "type": "BOOL"
+                }
+            ]
+        },
+        {
+            "name": "pauser",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "pauser",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
+            "name": "treasury",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "treasury",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
+            "name": "guardian",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "guardian",
+                    "type": "ADDRESS"
                 }
             ]
         },
@@ -1177,6 +1389,10 @@
                 {
                     "name": "mode",
                     "type": "UINT32"
+                },
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
                 }
             ],
             "type": "Event"
@@ -1294,6 +1510,24 @@
             "type": "Event"
         },
         {
+            "name": "EmergencyWithdrawal",
+            "values": [
+                {
+                    "name": "token",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "treasury",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
             "name": "FeesWithdrawn",
             "values": [
                 {
@@ -1310,6 +1544,64 @@
                 },
                 {
                     "name": "by",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "LockMarkedRefundable",
+            "values": [
+                {
+                    "name": "lockNonce",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "LockRefunded",
+            "values": [
+                {
+                    "name": "lockNonce",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "user",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "token",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "BurnRefunded",
+            "values": [
+                {
+                    "name": "burnId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "burner",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "wrappedToken",
                     "type": "ADDRESS"
                 },
                 {
@@ -1360,6 +1652,48 @@
                 },
                 {
                     "name": "newGov",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "PauserSet",
+            "values": [
+                {
+                    "name": "oldPauser",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "newPauser",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "TreasurySet",
+            "values": [
+                {
+                    "name": "oldTreasury",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "newTreasury",
+                    "type": "ADDRESS"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "GuardianSet",
+            "values": [
+                {
+                    "name": "oldGuardian",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "newGuardian",
                     "type": "ADDRESS"
                 }
             ],

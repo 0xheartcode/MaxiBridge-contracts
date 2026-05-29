@@ -861,6 +861,253 @@ await opnet('BridgeDepository — pause gate', async (vm: OPNetUnit) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// 10b. Roles PR — transferGovernor + dedicated pauser role
+// ════════════════════════════════════════════════════════════════════════════
+
+await opnet('BridgeDepository — roles (transferGovernor + pauser)', async (vm: OPNetUnit) => {
+    let setup: BridgeSetup;
+
+    vm.beforeEach(async () => {
+        Blockchain.dispose();
+        Blockchain.clearContracts();
+        await Blockchain.init();
+        setSender(deployer);
+        setup = await setupContracts();
+    });
+
+    vm.afterEach(() => disposeSetup(setup));
+
+    await vm.it('transferGovernor: only governor may call', async () => {
+        const { depository } = setup;
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.transferGovernor(bob);
+        }).toThrow();
+    });
+
+    await vm.it('transferGovernor: changes governor; old governor loses access', async () => {
+        const { depository } = setup;
+
+        setSender(deployer);
+        await depository.transferGovernor(bob);
+        Assert.expect((await depository.governor()).equals(bob)).toEqual(true);
+
+        // Old governor (deployer) can no longer pause.
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await depository.setPaused(true);
+        }).toThrow();
+
+        // New governor can.
+        setSender(bob);
+        await depository.setPaused(true);
+        Assert.expect(await depository.paused()).toEqual(true);
+    });
+
+    await vm.it('transferGovernor: zero address reverts', async () => {
+        const { depository } = setup;
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await depository.transferGovernor(Address.dead());
+        }).toThrow();
+    });
+
+    await vm.it('setPauser: only governor may set', async () => {
+        const { depository } = setup;
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.setPauser(bob);
+        }).toThrow();
+    });
+
+    await vm.it('pauser can FREEZE but never THAW (H-01); governor thaws', async () => {
+        const { depository } = setup;
+
+        setSender(deployer);
+        await depository.setPauser(bob);
+        Assert.expect((await depository.pauser()).equals(bob)).toEqual(true);
+
+        // Pauser can FREEZE.
+        setSender(bob);
+        await depository.setPaused(true);
+        Assert.expect(await depository.paused()).toEqual(true);
+
+        // Pauser CANNOT THAW — freeze-but-never-thaw, mirrors EVM unpause owner-only.
+        await Assert.expect(async () => {
+            await depository.setPaused(false);
+        }).toThrow();
+        Assert.expect(await depository.paused()).toEqual(true);
+
+        // Only the governor may re-open.
+        setSender(deployer);
+        await depository.setPaused(false);
+        Assert.expect(await depository.paused()).toEqual(false);
+
+        // Pauser has NO other governor surface — e.g. setGovernor.
+        setSender(bob);
+        await Assert.expect(async () => {
+            await depository.setGovernor(alice);
+        }).toThrow();
+
+        // ...nor transferGovernor.
+        setSender(bob);
+        await Assert.expect(async () => {
+            await depository.transferGovernor(alice);
+        }).toThrow();
+    });
+
+    await vm.it('setPauser(zero) disables the role', async () => {
+        const { depository } = setup;
+
+        setSender(deployer);
+        await depository.setPauser(bob);
+        // Address.dead() is the all-zero address in the test transaction lib
+        // (Address.zero() is not a function here — see authority.ts note).
+        await depository.setPauser(Address.dead());
+        // `.isZero()` is not a runtime method on the Address returned by the
+        // test transaction lib (it's a 32-byte buffer) — compare bytewise to
+        // Address.dead() instead (mirrors upgrade-authority.ts isZeroAddr).
+        const pauserAddr = (await depository.pauser()) as unknown as Uint8Array;
+        const deadAddr = Address.dead() as unknown as Uint8Array;
+        let pauserIsZero = true;
+        for (let i = 0; i < 32; i++) {
+            if (pauserAddr[i] !== deadAddr[i]) {
+                pauserIsZero = false;
+                break;
+            }
+        }
+        Assert.expect(pauserIsZero).toEqual(true);
+
+        // Disabled pauser can no longer pause.
+        setSender(bob);
+        await Assert.expect(async () => {
+            await depository.setPaused(true);
+        }).toThrow();
+    });
+
+    // ─── Roles-mirror PR — dedicated guardian (mirror of EVM) ────────────
+
+    await vm.it('setGuardian: only governor may set', async () => {
+        const { depository } = setup;
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.setGuardian(bob);
+        }).toThrow();
+    });
+
+    await vm.it('guardian can FREEZE but never THAW (H-01); governor thaws', async () => {
+        const { depository } = setup;
+
+        setSender(deployer);
+        await depository.setGuardian(bob);
+        Assert.expect((await depository.guardian()).equals(bob)).toEqual(true);
+
+        // Guardian can FREEZE.
+        setSender(bob);
+        await depository.setPaused(true);
+        Assert.expect(await depository.paused()).toEqual(true);
+
+        // Guardian CANNOT THAW — freeze-but-never-thaw, mirrors EVM unpause owner-only.
+        await Assert.expect(async () => {
+            await depository.setPaused(false);
+        }).toThrow();
+        Assert.expect(await depository.paused()).toEqual(true);
+
+        // Only the governor may re-open.
+        setSender(deployer);
+        await depository.setPaused(false);
+        Assert.expect(await depository.paused()).toEqual(false);
+
+        // Guardian has NO governor-handoff surface.
+        setSender(bob);
+        await Assert.expect(async () => {
+            await depository.transferGovernor(alice);
+        }).toThrow();
+    });
+
+    await vm.it('guardian can cancelVoucher (onlyGovernorOrGuardian)', async () => {
+        const { depository } = setup;
+        setSender(deployer);
+        await depository.setGuardian(bob);
+
+        // Guardian cancels.
+        setSender(bob);
+        await depository.cancelVoucher(0xfeedn);
+        Assert.expect(await depository.isVoucherCancelled(0xfeedn)).toEqual(true);
+
+        // A random non-role caller cannot.
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.cancelVoucher(0xbeefn);
+        }).toThrow();
+    });
+
+    await vm.it('emergencyWithdraw: onlyGuardian (governor cannot call)', async () => {
+        const { depository, wusdcAddress } = setup;
+        setSender(deployer);
+        await depository.setGuardian(bob);
+        await depository.setTreasury(alice);
+        await depository.setPaused(true);
+
+        // Governor is NOT the guardian → emergencyWithdraw must revert.
+        setSender(deployer);
+        await Assert.expect(async () => {
+            await depository.emergencyWithdraw(wusdcAddress, 1n);
+        }).toThrow();
+    });
+
+    await vm.it('emergencyWithdraw: reverts when NOT paused', async () => {
+        const { depository, wusdcAddress } = setup;
+        setSender(deployer);
+        await depository.setGuardian(bob);
+        await depository.setTreasury(alice);
+
+        // Not paused → must revert (whenPaused gate, mirrors EVM).
+        setSender(bob);
+        await Assert.expect(async () => {
+            await depository.emergencyWithdraw(wusdcAddress, 1n);
+        }).toThrow();
+    });
+
+    await vm.it('emergencyWithdraw: reverts when treasury unset (fail-closed)', async () => {
+        const { depository, wusdcAddress } = setup;
+        setSender(deployer);
+        await depository.setGuardian(bob);
+        await depository.setPaused(true);
+        // Treasury never wired → must revert.
+        setSender(bob);
+        await Assert.expect(async () => {
+            await depository.emergencyWithdraw(wusdcAddress, 1n);
+        }).toThrow();
+    });
+
+    await vm.it('emergencyWithdraw: guardian drains to treasury when paused', async () => {
+        const { depository, depositoryAddress, wusdc, wusdcAddress } = setup;
+
+        // Fund the depository directly: the bridge is the minter, so
+        // impersonate it to mint a custodied balance into itself.
+        setSender(depositoryAddress);
+        await wusdc.mintTo(depositoryAddress, 1_000_000n);
+        Assert.expect(await wusdc.balanceOf(depositoryAddress)).toEqual(1_000_000n);
+
+        // Wire guardian + treasury and freeze.
+        setSender(deployer);
+        await depository.setGuardian(bob);
+        await depository.setTreasury(alice);
+        await depository.setPaused(true);
+
+        const treasuryBefore = await wusdc.balanceOf(alice);
+
+        // Guardian drains to the pinned treasury.
+        setSender(bob);
+        await depository.emergencyWithdraw(wusdcAddress, 400_000n);
+
+        Assert.expect(await wusdc.balanceOf(alice)).toEqual(treasuryBefore + 400_000n);
+        Assert.expect(await wusdc.balanceOf(depositoryAddress)).toEqual(600_000n);
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // 11. Upgrade-flow: deploy v1 → populate → deploy v2 → every view unchanged
 //
 // We simulate the "deploy v2 as update" path by re-initializing the contract
@@ -1344,6 +1591,60 @@ await opnet('BridgeDepository — #68 Tier B flowId route binding', async (vm: O
     await vm.it('mode-0 flow routes through claimMintWithVoucher (mints)', async () => {
         const { depository, wusdc, signerWallet } = setup;
         // Default wUSDC flow is mode 0 — mint path succeeds.
+        const fields = defaultFields(setup, alice);
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(alice);
+        await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        Assert.expect(await wusdc.balanceOf(alice)).toEqual(fields.netAmount);
+    });
+
+    // ─── FINDING-003 regression (audit 2026-05-26) ──────────────────────
+    //
+    // The early gate validates `parsed.flowId` (token binding + mode + status)
+    // but the subsequent effects (status/minAmount/dailyLimit/inventory/tip)
+    // use a flowId recomputed from the voucher's source-chain fields. Pre-fix
+    // the two flow ids were not asserted equal, so a signer that named one
+    // flow in `parsed.flowId` could end up mutating a DIFFERENT flow.
+
+    await vm.it('FINDING-003: parsed.flowId ≠ recomputed flowId reverts on mint path', async () => {
+        const { depository, signerWallet } = setup;
+        // Register a SECOND mode-0 flow on the same wrappedToken but a
+        // different (sourceBridge, sourceToken) pair. Both flows are valid
+        // routes for wUSDC mint; the voucher names flow A in parsed.flowId
+        // while its source fields recompute to flow B.
+        const altBridge = Blockchain.generateRandomAddress();
+        const altToken = Blockchain.generateRandomAddress();
+        setSender(deployer);
+        const flowB = await registerFlowFor(setup, {
+            mode: 0n,
+            sourceBridgeAddr: altBridge,
+            sourceTokenAddr: altToken,
+            wrappedToken: setup.wusdcAddress,
+        });
+        // Sanity — the test only matters if the two flow ids differ.
+        Assert.expect(flowB !== setup.defaultFlowId).toEqual(true);
+
+        const fields = {
+            ...defaultFields(setup, alice),
+            // parsed.flowId binds to the DEFAULT route (flow A).
+            flowId: setup.defaultFlowId,
+            // Source fields belong to the ALT route (flow B). Without the
+            // FINDING-003 assertion the contract would consume flow B's
+            // status/limits/inventory while the signer attested to flow A.
+            sourceBridgeAddr: altBridge,
+            sourceTokenAddr: altToken,
+        };
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        }).toThrow();
+    });
+
+    await vm.it('FINDING-003: parsed.flowId == recomputed flowId still mints (no false positive)', async () => {
+        // The default happy path uses parsed.flowId == _flowIdFromVoucher(...).
+        // This test confirms the new assertion doesn't break the canonical case.
+        const { depository, wusdc, signerWallet } = setup;
         const fields = defaultFields(setup, alice);
         const { preimage, hash } = buildVoucher(fields);
         setSender(alice);

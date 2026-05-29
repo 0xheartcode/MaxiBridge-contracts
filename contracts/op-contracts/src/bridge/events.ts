@@ -15,6 +15,64 @@ export class GovernorUpdated extends NetEvent {
     }
 }
 
+/**
+ * Roles PR — emitted when the dedicated pause role is set/rotated/disabled.
+ * `oldPauser` -> `newPauser`; a zero `newPauser` disables the role.
+ */
+export class PauserSet extends NetEvent {
+    constructor(oldPauser: Address, newPauser: Address) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2);
+        data.writeAddress(oldPauser);
+        data.writeAddress(newPauser);
+        super('PauserSet', data);
+    }
+}
+
+/**
+ * Emitted when the dedicated treasury (fee-revenue + emergency-drain sink) is
+ * set/rotated/disabled. `oldTreasury` -> `newTreasury`; a zero `newTreasury`
+ * disables fee sweeps + emergency withdrawals (fail-closed). Mirrors the EVM
+ * `BridgeEscrow.TreasurySet` role — SAME terminology on both chains.
+ */
+export class TreasurySet extends NetEvent {
+    constructor(oldTreasury: Address, newTreasury: Address) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2);
+        data.writeAddress(oldTreasury);
+        data.writeAddress(newTreasury);
+        super('TreasurySet', data);
+    }
+}
+
+/**
+ * Emitted when the dedicated guardian (incident-response) role is
+ * set/rotated/disabled. `oldGuardian` -> `newGuardian`; a zero `newGuardian`
+ * disables the role. Mirrors the EVM `BridgeEscrow.GuardianSet` role — SAME
+ * terminology on both chains.
+ */
+export class GuardianSet extends NetEvent {
+    constructor(oldGuardian: Address, newGuardian: Address) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2);
+        data.writeAddress(oldGuardian);
+        data.writeAddress(newGuardian);
+        super('GuardianSet', data);
+    }
+}
+
+/**
+ * Emitted on `emergencyWithdraw` — the guardian drains `amount` of `token`
+ * from the depository to the pinned `treasury` while paused. Mirrors the EVM
+ * `BridgeEscrow.EmergencyWithdrawal(token, treasury, amount)` role.
+ */
+export class EmergencyWithdrawal extends NetEvent {
+    constructor(token: Address, treasury: Address, amount: u256) {
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32);
+        data.writeAddress(token);
+        data.writeAddress(treasury);
+        data.writeU256(amount);
+        super('EmergencyWithdrawal', data);
+    }
+}
+
 export class WrappedTokenSet extends NetEvent {
     constructor(wrappedToken: Address, enabled: bool) {
         const data = new BytesWriter(ADDRESS_BYTE_LENGTH + 1);
@@ -108,6 +166,12 @@ export class TokenModeSet extends NetEvent {
  * OPNet to bridge to EVM. Indexer picks this up and signs an EIP-712
  * MintIntent (mode 2) or ReleaseIntent (mode 4) for the EVM side.
  */
+// FINDING-002 (audit 2026-05-26): `flowId` appended LAST so off-chain
+// indexers can persist the canonical route identity without re-deriving
+// from the per-token `_tokenMode` (which after PR #76 is no longer the
+// routing authority for N:M). Old-format readers tolerant of trailing
+// bytes still parse the first 168 bytes; flow-aware readers parse 200.
+// Compatible event NAME — only the data length changes.
 export class LockedForBridge extends NetEvent {
     constructor(
         canonicalToken: Address,
@@ -117,8 +181,9 @@ export class LockedForBridge extends NetEvent {
         destChainId: u32,
         lockNonce: u256,
         mode: u32,
+        flowId: u256, // FINDING-002 — appended
     ) {
-        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32 + 32 + 4 + 32 + 4);
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32 + 32 + 4 + 32 + 4 + 32);
         data.writeAddress(canonicalToken);
         data.writeAddress(user);
         data.writeU256(amount);
@@ -126,6 +191,7 @@ export class LockedForBridge extends NetEvent {
         data.writeU32(destChainId);
         data.writeU256(lockNonce);
         data.writeU32(mode);
+        data.writeU256(flowId); // FINDING-002 — appended LAST
         super('LockedForBridge', data);
     }
 }
@@ -320,5 +386,64 @@ export class BurnConfirmed extends NetEvent {
         data.writeU256(releasedAmount);
         data.writeAddress(attester);
         super('BurnConfirmed', data);
+    }
+}
+
+// ─── Trustless stranded-lock refund (mirror of EVM BridgeEscrow) ────────
+
+/**
+ * Emitted when a stranded OPNet-source lock is marked refundable via a valid
+ * M-of-N attestation (`markLockRefundable`). The lock moves LOCKED →
+ * REFUNDABLE; the recorded locker may then call `refundLock`. Mirrors the EVM
+ * `BridgeEscrow.DepositMarkedRefundable`.
+ */
+export class LockMarkedRefundable extends NetEvent {
+    constructor(lockNonce: u256, flowId: u256) {
+        const data = new BytesWriter(32 + 32);
+        data.writeU256(lockNonce);
+        data.writeU256(flowId);
+        super('LockMarkedRefundable', data);
+    }
+}
+
+/**
+ * Emitted when a refundable lock's full gross principal is returned to the
+ * recorded locker (`refundLock`). Mirrors the EVM
+ * `BridgeEscrow.LockRefunded`. `amount` is the gross `received` recorded at
+ * lock time (the fee is reversed from accrual, not promoted, so the user gets
+ * the entire locked amount back).
+ */
+export class LockRefunded extends NetEvent {
+    constructor(lockNonce: u256, user: Address, token: Address, amount: u256) {
+        const data = new BytesWriter(32 + ADDRESS_BYTE_LENGTH * 2 + 32);
+        data.writeU256(lockNonce);
+        data.writeAddress(user);
+        data.writeAddress(token);
+        data.writeU256(amount);
+        super('LockRefunded', data);
+    }
+}
+
+// ─── #55 — Trustless burn-side recovery (attested re-mint) ───────────────
+
+/**
+ * Emitted when a permanently-cancelled burn's principal is RE-MINTED to the
+ * original burner via a valid M-of-N BurnRefundAuthorization (`refundBurn`).
+ * The burn-initiated counterpart of `LockRefunded`. `burnId` is the per-burn
+ * replay key sha256(burnTxHash‖burnNonce); `amount` is the signer-attested
+ * burned amount minted back to `burner`.
+ *
+ * ⚠️ This event marks a MINT-AUTHORITY action gated by M-of-N attestation +
+ * a per-burn replay guard. Indexers should reconcile it against the cancelled
+ * EVM destination voucher.
+ */
+export class BurnRefunded extends NetEvent {
+    constructor(burnId: u256, burner: Address, wrappedToken: Address, amount: u256) {
+        const data = new BytesWriter(32 + ADDRESS_BYTE_LENGTH * 2 + 32);
+        data.writeU256(burnId);
+        data.writeAddress(burner);
+        data.writeAddress(wrappedToken);
+        data.writeU256(amount);
+        super('BurnRefunded', data);
     }
 }

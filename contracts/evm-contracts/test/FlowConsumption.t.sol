@@ -90,7 +90,7 @@ contract FlowConsumptionTest is Test {
 
         // Seed inventory directly to a non-zero starting state so the
         // release path can decrement it.
-        escrow._testSetInventory(flowId, 1_000_000e6);
+        escrow._testSeed(flowId, 1_000_000e6, 0, 0);
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────
@@ -208,7 +208,7 @@ contract FlowConsumptionTest is Test {
         // EVM claim is the release path — the relevant overflow guard is
         // `inventory >= grossDst`. Set inventory to a tiny value and submit
         // a claim larger than that. Surfaces as InsufficientFlowInventory.
-        escrow._testSetInventory(flowId, 500);
+        escrow._testSeed(flowId, 500, 0, 0);
         BridgeEscrow.ReleaseIntent memory intent = _intent(
             10_000,
             10_000,
@@ -273,7 +273,7 @@ contract FlowConsumptionTest is Test {
     function test_Claim_DailyLimit_Exceeded_Reverts() public {
         // dailyLimit = 100_000e6. Pre-fill the bucket to exactly the cap;
         // any further claim of any size must revert.
-        escrow._testSetWindow(flowId, 100_000e6, uint64(block.timestamp));
+        escrow._testSeed(flowId, 1_000_000e6, 100_000e6, uint64(block.timestamp));
         BridgeEscrow.ReleaseIntent memory intent = _intent(
             1_000,
             1_000,
@@ -290,7 +290,7 @@ contract FlowConsumptionTest is Test {
         // Pre-fill bucket at the cap; advance time > 24h; new claim
         // succeeds and the bucket is reset to (just) `grossDst`.
         vm.warp(1_000_000);
-        escrow._testSetWindow(flowId, 100_000e6, uint64(block.timestamp));
+        escrow._testSeed(flowId, 1_000_000e6, 100_000e6, uint64(block.timestamp));
         vm.warp(1_000_000 + 86_400 + 1); // strictly past the window edge.
         BridgeEscrow.ReleaseIntent memory intent = _intent(
             10_000,
@@ -343,7 +343,7 @@ contract FlowConsumptionTest is Test {
     // ─── inventory ──────────────────────────────────────────────────────
 
     function test_Claim_InsufficientInventory_Reverts() public {
-        escrow._testSetInventory(flowId, 5_000);
+        escrow._testSeed(flowId, 5_000, 0, 0);
         BridgeEscrow.ReleaseIntent memory intent = _intent(
             10_000,
             10_000,

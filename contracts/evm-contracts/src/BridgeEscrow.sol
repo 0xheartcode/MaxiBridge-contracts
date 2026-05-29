@@ -117,6 +117,37 @@ contract BridgeEscrow is
             "RefundAuthorization(uint256 depositNonce,bytes32 flowId,uint32 signerEpoch)"
         );
 
+    /// @notice EIP-712 type for the M-of-N burn-refund attestation (#55
+    ///         EVM-side symmetric counterpart to OPNet `refundBurn`).
+    ///         Authorizes `refundBurn` to RE-MINT a burned `WrappedERC20`
+    ///         amount back to the original burner when that burn's OPNet
+    ///         destination voucher was PERMANENTLY cancelled (reorg/fraud),
+    ///         leaving the tokens destroyed with no release path.
+    /// @dev    MINT-AUTHORITY PRIMITIVE. Trust model == vouchers: the SAME
+    ///         M-of-N signer set attests off-chain that the burn is final
+    ///         AND the OPNet destination is cancelled-and-final. Every
+    ///         binding field lives inside the signed struct, so tampering
+    ///         (amount / burner / token / flowId / epoch / nonce / txHash)
+    ///         fails the EIP-712 digest recover → NO mint. `burnBlockHash`
+    ///         is the reorg guard: opaque to the contract, but signed so a
+    ///         stale-block attestation can't be reused after a reorg.
+    struct BurnRefundAuthorization {
+        address burner;          // original burner — the re-mint recipient
+        address wrappedToken;    // WrappedERC20 to re-mint (bridge-mintable)
+        uint256 amount;          // burned amount to re-mint (signer-attested)
+        uint256 burnNonce;       // burn nonce from the BurnedForRelease event
+        bytes32 burnTxHash;      // the EVM burn tx hash (binding + replay key)
+        bytes32 burnBlockHash;   // reorg guard — opaque, but inside the struct
+        bytes32 flowId;          // route binding; flow.evmToken must == wrappedToken
+        uint32  signerEpoch;     // MUST equal currentEpoch
+    }
+
+    /// @dev keccak256("BurnRefundAuthorization(address burner,address wrappedToken,uint256 amount,uint256 burnNonce,bytes32 burnTxHash,bytes32 burnBlockHash,bytes32 flowId,uint32 signerEpoch)")
+    bytes32 public constant BURN_REFUND_AUTHORIZATION_TYPEHASH =
+        keccak256(
+            "BurnRefundAuthorization(address burner,address wrappedToken,uint256 amount,uint256 burnNonce,bytes32 burnTxHash,bytes32 burnBlockHash,bytes32 flowId,uint32 signerEpoch)"
+        );
+
     /// @notice Token bridging mode — set per token at registration time.
     ///         Once set, can never be changed for that token (set-once).
     ///
@@ -177,15 +208,31 @@ contract BridgeEscrow is
     ///         opnetBridge, opnetToken). Vouchers are validated against
     ///         the flow's status before any inventory mutation in PR γ.
     ///
-    ///         disabled  — flow does not exist OR has been retired
+    ///         disabled  — sentinel ONLY: the slot was never written (no
+    ///                     such flow). NOT a reachable state for a
+    ///                     registered flow — a decommissioned flow is
+    ///                     RETIRED, not DISABLED.
     ///         active    — vouchers and locks accepted normally
-    ///         paused    — guardian-set protective freeze; can resume
-    ///         draining  — governor-set; only release/burn (no new
-    ///                     locks/mints) — used to wind a route down
+    ///         paused    — guardian-set protective freeze; blocks locks AND
+    ///                     claims; reversible (resumeFlow → active)
+    ///         draining  — governor-set soft wind-down; blocks new locks but
+    ///                     still honours in-flight release/burn claims.
+    ///                     REVERSIBLE (resumeFlow → active) so an operator
+    ///                     that started a wind-down can reopen the route.
+    ///         retired   — governor-set decommission FLAG. Behaves like
+    ///                     "off" — blocks locks AND claims (a non-active,
+    ///                     non-draining status) — and signals deliberate,
+    ///                     indefinite decommission (distinct from PAUSED's
+    ///                     incident-freeze intent) for clear UI/indexer
+    ///                     labelling. NOT terminal: reversible via
+    ///                     resumeFlow → active, exactly like paused/draining.
+    ///                     (No money-safety guarantee attaches to it — it's
+    ///                     an intent label, enforced only by being off.)
     uint8 public constant FLOW_STATUS_DISABLED = 0;
     uint8 public constant FLOW_STATUS_ACTIVE = 1;
     uint8 public constant FLOW_STATUS_PAUSED = 2;
     uint8 public constant FLOW_STATUS_DRAINING = 3;
+    uint8 public constant FLOW_STATUS_RETIRED = 4;
 
     /// @notice Rolling-window length for per-flow `dailyLimit`. 24 hours.
     ///         Hard-coded so a hostile governor cannot disable rate
@@ -283,12 +330,24 @@ contract BridgeEscrow is
     /// @notice Required number of distinct valid signatures to claim.
     uint256 public signerThreshold;
 
-    /// @notice Guardian — gates `emergencyWithdraw` (alongside `whenPaused`).
-    ///         Set-once via `setGuardian`.
+    /// @notice Guardian — gates `emergencyWithdraw` (alongside `whenPaused`)
+    ///         and shares the incident-response surface (`pause`,
+    ///         `cancelVoucher`, `removeSigner`, `migrateSignerSet`).
+    /// @dev    Owner-rotatable via `setGuardian` (was set-once pre-roles PR).
+    ///         On mainnet `owner` is the 3-day TimelockController, so guardian
+    ///         rotation is timelock-gated — an instant-EOA owner reintroduces
+    ///         the hot-key risk this role exists to mitigate. H-3 (audit
+    ///         2026-05-27): consider a 2-step accept (`startGuardianTransfer`
+    ///         + `acceptGuardian`) as a follow-up if EOA owners are ever used
+    ///         in production — the timelock IS the staging mechanism today.
     address public guardian;
 
-    /// @notice Set-once destination for `emergencyWithdraw`. Once non-zero,
-    ///         cannot be changed — prevents redirection by a compromised owner.
+    /// @notice Destination for `emergencyWithdraw` drains.
+    /// @dev    Owner-rotatable via `setTreasury` (was set-once pre-roles PR).
+    ///         On mainnet `owner` is the 3-day TimelockController, so treasury
+    ///         rotation is timelock-gated. H-3 (audit 2026-05-27): same 2-step
+    ///         consideration as `guardian` above — the timelock provides the
+    ///         3-day staging window for today's mainnet topology.
     address public treasury;
 
     /// @notice Unwrap fee, bps (1 bp = 0.01%). Charged on the OPNet→EVM
@@ -395,15 +454,37 @@ contract BridgeEscrow is
     ///         `refundLockedDeposit`. Permissionless refund path.
     mapping(uint256 => LockRecord) public lockedDeposits;
 
+    /// @notice Dedicated pause role. May call `pause()` (alongside owner +
+    ///         guardian) but NOT `unpause()` or any other privileged fn.
+    ///         Owner-rotatable via `setPauser`; zero address = disabled.
+    /// @dev    Roles PR — appended after `lockedDeposits` (append-only). The
+    ///         trailing `__gap` shrinks by 1 (42 → 41) so the layout past this
+    ///         slot is unchanged.
+    address public pauser;
+
+    /// @notice #55 — per-burn replay guard for `refundBurn`. Keyed by
+    ///         `keccak256(abi.encode(wrappedToken, burner, burnTxHash, burnNonce))`
+    ///         (M-4 — `burnNonce` is per-`WrappedERC20`, so the token + burner
+    ///         are bound in to keep the key collision-free across wrappeds).
+    ///         Set strictly BEFORE the cross-contract re-mint (CEI) — it is the ONLY
+    ///         protection against a double / infinite re-mint of the same
+    ///         burn. An unset slot (false) means "not yet refunded";
+    ///         append-only, no version bump needed.
+    /// @dev    Appended after `pauser` (append-only). The trailing `__gap`
+    ///         shrinks by 1 (41 → 40) so the layout past this slot is
+    ///         unchanged.
+    mapping(bytes32 => bool) public refundedBurns;
+
     /// @dev Reserved for future appends. New slots go BEFORE the gap and the
     ///      gap shrinks by the same count to preserve layout.
     ///      Slots past treasury: unwrapFeeBps + unwrapMinFee + flows +
     ///      allFlowIds + flowsByEvmToken + flowsByMode + flowsByEvmChain +
-    ///      lockedDeposits = 8. (Legacy tokenMode + opnetCounterpartOf +
-    ///      _tokenModeFinalized were removed pre-mainnet; flow registry is
-    ///      the source of truth for mode + OPNet counterpart binding.)
-    ///      50 - 8 = 42.
-    uint256[42] private __gap;
+    ///      lockedDeposits + pauser + refundedBurns = 10. (Legacy tokenMode +
+    ///      opnetCounterpartOf + _tokenModeFinalized were removed pre-mainnet;
+    ///      flow registry is the source of truth for mode + OPNet counterpart
+    ///      binding.)
+    ///      50 - 10 = 40.
+    uint256[40] private __gap;
 
     // ---------------------------------------------------------------------
     // Events
@@ -421,11 +502,17 @@ contract BridgeEscrow is
     /// @notice PR γ.2a — flow-tagged lock event. Emitted alongside `Locked`
     ///         so existing indexers keep working while flow-aware tooling
     ///         can subscribe to the per-flow stream.
+    /// @dev    FINDING-001 (audit 2026-05-26): `depositNonce` added so
+    ///         indexers can persist `flow_id` per deposit without joining
+    ///         against the legacy `Locked` event (which has no `flowId`).
+    ///         Same tx, same log block, but `LockedToFlow` is now the
+    ///         self-contained authoritative stream for flow-aware tooling.
     event LockedToFlow(
         bytes32 indexed flowId,
         address indexed user,
         address indexed token,
-        uint256 amount
+        uint256 amount,
+        uint256 depositNonce
     );
 
     /// @notice PR γ.2c — emitted on a successful permissionless refund of a
@@ -452,6 +539,18 @@ contract BridgeEscrow is
         address indexed by
     );
 
+    /// @notice #55 — emitted on a successful trustless burn-side recovery.
+    ///         `burnId` is the replay key
+    ///         `keccak256(wrappedToken, burner, burnTxHash, burnNonce)` (M-4);
+    ///         `burner` is the re-mint recipient; `amount` is the
+    ///         signer-attested re-minted amount.
+    event BurnRefunded(
+        bytes32 indexed burnId,
+        address indexed burner,
+        address indexed wrappedToken,
+        uint256 amount
+    );
+
     event Claimed(
         address indexed token,
         address indexed to,
@@ -474,8 +573,12 @@ contract BridgeEscrow is
         address indexed by
     );
 
-    event TreasurySet(address indexed treasury);
-    event GuardianSet(address indexed guardian);
+    /// @dev H-3 (audit 2026-05-27): emits old + new for full audit-trail
+    ///      readability. Pre-fix the event carried only the new value.
+    event TreasurySet(address indexed oldTreasury, address indexed newTreasury);
+    event GuardianSet(address indexed oldGuardian, address indexed newGuardian);
+    /// @notice Emitted when the dedicated pause role is set/rotated/disabled.
+    event PauserSet(address indexed pauser);
 
     /// @notice Emitted when accrued source-side fees for a flow are
     ///         withdrawn (always to the set-once `treasury`). Non-emergency
@@ -550,9 +653,7 @@ contract BridgeEscrow is
     error AlreadyClaimed();
     error SourceEventAlreadyUsed();
     error InvalidSignature();
-    error TreasuryAlreadySet();
     error TreasuryNotSet();
-    error GuardianAlreadySet();
     error NotGuardian();
     error NotASigner();
     error AlreadyASigner();
@@ -560,8 +661,6 @@ contract BridgeEscrow is
     error FeeBpsTooHigh();
     error TipCapTooHigh();
     error WrongMode();
-    error InsufficientInventory();
-    error NotProvisioner();
     error InvalidSigBlob();
     error InsufficientSignatures();
     error DuplicateSigner();
@@ -572,6 +671,7 @@ contract BridgeEscrow is
     error VestingVaultTokenMismatch();
     error InsufficientAccruedFees();
     error VoucherNotCancelled();        // HIGH-001 — clawback requires prior cancelVoucher
+    error BurnAlreadyRefunded();        // #55 — refundBurn replay guard already set
     // #62-fix — lifecycle errors for time-based settlement.
     error FeeExceedsAmount();           // lock with fee >= received (zero-net bridge)
     error LockNotSettleable();          // settleLockedDeposit on non-Locked status
@@ -589,7 +689,6 @@ contract BridgeEscrow is
 
     // ─── Relayer-tip payout errors (PR β.2.payout-evm) ─────────────────
     error TipExceedsFlowCap();
-    error TipPaidOnInactiveFlow();
 
     // ─── Flow consumption errors (PR γ.1) ──────────────────────────────
     error FlowNotActive();
@@ -663,7 +762,7 @@ contract BridgeEscrow is
 
     /// @notice H-01 — incident-response actions (pause, voucher
     ///         cancellation, signer removal/rotation) must stay fast even
-    ///         after `owner` is handed to the 7-day TimelockController.
+    ///         after `owner` is handed to the 3-day TimelockController.
     ///         The set-once `guardian` may invoke them alongside the owner.
     ///         Recovery actions (unpause, addSigner, setThreshold, upgrades,
     ///         flow/treasury config) remain owner-only — the timelock delay
@@ -732,7 +831,7 @@ contract BridgeEscrow is
         });
 
         emit Locked(token, msg.sender, amount, amountReceived_, opnetRecipient, depositNonce_);
-        emit LockedToFlow(flowId, msg.sender, token, amountReceived_);
+        emit LockedToFlow(flowId, msg.sender, token, amountReceived_, depositNonce_);
     }
 
     /// @notice EIP-2612 one-transaction bridging: consume an off-chain
@@ -1160,19 +1259,44 @@ contract BridgeEscrow is
             flow.inventory = flow.inventory - grossDst128;
         }
 
-        // 5. tip cap + carve. Status was already enforced above so we drop
-        //    the redundant TipPaidOnInactiveFlow gate; tipped paths still
-        //    surface FlowNotActive on inactive flows. Bps math identical to
-        //    pre-PR γ.1 — uses `amount` (= netDst) as the denominator.
+        // FINDING-004 (audit 2026-05-26): accrue the release-side fee.
+        // The inventory was decremented by gross, but only
+        // `intent.amount` (= net) leaves the bridge to the recipient and
+        // `tip` to the relayer. The remainder `gross - net = fee`
+        // stays in the bridge's balance. Pre-fix this delta was never
+        // recorded anywhere, so `withdrawFees` couldn't sweep it and the
+        // per-flow invariant `inventory + accruedFees == bridge.balance`
+        // drifted upward on every release.
+        // `intent.amount > intent.grossSrcAmount` is rejected earlier
+        // (AmountExceedsGross), so the subtraction is safe.
+        uint256 feePortion = uint256(intent.grossSrcAmount) - intent.amount;
+        if (feePortion > 0) {
+            // grossDst128 is uint128, feePortion <= grossDst128, so the
+            // cast back to uint128 below is safe.
+            flow.accruedFees = uint128(uint256(flow.accruedFees) + feePortion);
+        }
+
+        // 5. tip cap + carve.
+        //
+        // FINDING-006 (audit 2026-05-26): the pre-fix form was
+        //   bps = tip * 10_000 / amount;  if (bps > tipCapBps) revert;
+        // which floors the ratio. With `tipCapBps == 0` any positive tip
+        // where `tip * 10_000 < amount` passed silently, so governance
+        // could not fully disable tips through a zero cap. Cross-multiply
+        // avoids the rounding entirely:
+        //   tip * 10_000 > amount * tipCapBps  →  revert.
+        // We also explicitly defend `tip <= amount` (the comment-only
+        // invariant becomes a check) so the subtraction below cannot
+        // underflow on a malformed signer-bound intent.
         uint256 recipientAmount = intent.amount;
         uint128 tip = intent.relayerTip;
         if (tip > 0) {
-            uint256 bps = (uint256(tip) * 10_000) / intent.amount;
-            if (bps > uint256(flow.tipCapBps)) revert TipExceedsFlowCap();
+            if (uint256(tip) > intent.amount) revert TipExceedsFlowCap();
+            if (uint256(tip) * 10_000 > intent.amount * uint256(flow.tipCapBps)) {
+                revert TipExceedsFlowCap();
+            }
             unchecked {
-                // tip <= amount enforced indirectly: bps <= MAX_TIP_BPS = 200
-                // (governor-capped at addFlow / setFlowTipCap). 200 bps = 2%
-                // of amount, so tip < amount always. Safe to subtract.
+                // Safe: tip <= amount asserted directly above.
                 recipientAmount = intent.amount - tip;
             }
         }
@@ -1408,26 +1532,57 @@ contract BridgeEscrow is
         emit SupportedTokenUpdated(token, enabled);
     }
 
-    function pause() external onlyOwnerOrGuardian {
+    /// @notice Protective freeze. Callable by owner, guardian, OR the
+    ///         dedicated `pauser` role — the widest incident-response surface.
+    ///         `unpause` deliberately stays narrower (owner/guardian only).
+    function pause() external {
+        if (msg.sender != owner() && msg.sender != guardian && msg.sender != pauser) {
+            revert NotGuardian();
+        }
         _pause();
     }
 
+    /// @notice Resume. OWNER-ONLY (audit H-01). The guardian and `pauser`
+    ///         roles can freeze for incident response but must never re-open
+    ///         the bridge — resumption is a deliberate governance decision
+    ///         (timelock-gated on mainnet), so a compromised incident-response
+    ///         key cannot thaw a legitimate freeze.
     function unpause() external onlyOwner {
         _unpause();
     }
 
-    function setTreasury(address newTreasury) external onlyOwner {
-        if (treasury != address(0)) revert TreasuryAlreadySet();
-        if (newTreasury == address(0)) revert ZeroAddress();
-        treasury = newTreasury;
-        emit TreasurySet(newTreasury);
+    /// @notice Set/rotate/disable the dedicated pause role.
+    /// @dev    Owner-only (timelock-gated on mainnet). Zero address disables.
+    function setPauser(address newPauser) external onlyOwner {
+        pauser = newPauser;
+        emit PauserSet(newPauser);
     }
 
+    /// @notice Set or rotate the emergency-drain destination.
+    /// @dev    Owner-rotatable (was set-once pre-roles PR). On mainnet `owner`
+    ///         is the 3-day TimelockController, so rotation is timelock-gated
+    ///         (the timelock IS the staging step). H-3 (audit 2026-05-27):
+    ///         emits the OLD treasury alongside the new for full audit-trail
+    ///         readability — a forgotten or accidental rotation now shows up
+    ///         with both values in the indexer. If EOA owners are ever used,
+    ///         consider adding an explicit `startTreasuryTransfer` /
+    ///         `acceptTreasury` 2-step on top (see `treasury` storage doc).
+    function setTreasury(address newTreasury) external onlyOwner {
+        if (newTreasury == address(0)) revert ZeroAddress();
+        address old = treasury;
+        treasury = newTreasury;
+        emit TreasurySet(old, newTreasury);
+    }
+
+    /// @notice Set or rotate the guardian (incident-response co-signer).
+    /// @dev    Owner-rotatable (was set-once pre-roles PR). Timelock-gated on
+    ///         mainnet (3 days). H-3 — emits old + new for audit-trail parity
+    ///         with `setTreasury`. Same 2-step follow-up consideration applies.
     function setGuardian(address newGuardian) external onlyOwner {
-        if (guardian != address(0)) revert GuardianAlreadySet();
         if (newGuardian == address(0)) revert ZeroAddress();
+        address old = guardian;
         guardian = newGuardian;
-        emit GuardianSet(newGuardian);
+        emit GuardianSet(old, newGuardian);
     }
 
     /// @notice Update the unwrap fee bps. Capped at `MAX_FEE_BPS = 1000`
@@ -1527,6 +1682,101 @@ contract BridgeEscrow is
         );
 
         IWrappedERC20(intent.wrappedToken).mintFromBridge(intent.to, intent.amount);
+    }
+
+    /// @notice #55 — trustless burn-side recovery (MINT-AUTHORITY PRIMITIVE).
+    ///         Symmetric EVM counterpart to OPNet `BridgeDepository.refundBurn`.
+    ///         When a `WrappedERC20` burn's OPNet destination voucher is
+    ///         PERMANENTLY cancelled (reorg/fraud) the burned tokens are gone
+    ///         AND the destination never pays. This RE-MINTS the burned
+    ///         `amount` back to the original `burner`, gated by an M-of-N
+    ///         EIP-712 attestation from the SAME signer set that signs
+    ///         vouchers — they attest off-chain that the burn is final AND the
+    ///         destination voucher is cancelled-and-final.
+    ///
+    /// @dev    Permissionless to *call* — the tokens always go to the
+    ///         signer-attested `intent.burner`, so anyone may submit the blob.
+    ///         M-5 — IS pause-gated (`whenNotPaused`). Unlike
+    ///         `markDepositRefundable` / `refundLockedDeposit` which return
+    ///         user PRINCIPAL during a freeze (no new asset created),
+    ///         `refundBurn` is a MINT primitive and pause halts mint authority
+    ///         system-wide (mirrors OPNet `requireNotPaused`).
+    ///
+    ///         Replay guard:
+    ///         `keccak256(abi.encode(wrappedToken, burner, burnTxHash, burnNonce))`
+    ///         (M-4) is set BEFORE the cross-contract mint (CEI) — the ONLY
+    ///         protection against a double / infinite re-mint. `nonReentrant` backstops
+    ///         the external `mintFromBridge` call.
+    ///
+    ///         `sig` is the same `[uint8 numSigs][sig(65)]…` M-of-N blob that
+    ///         `claim`/`claimMintWrapped` consume, verified over the EIP-712
+    ///         digest of the BurnRefundAuthorization. Binding mirrors the
+    ///         claimMintWrapped flow checks: wrappedToken allowlisted +
+    ///         bridge-mintable; flow exists + ACTIVE only (M-3 — DRAINING
+    ///         rejected) + its evmToken binds the wrapped (so a sig for one
+    ///         wrapped can't be replayed against another).
+    function refundBurn(BurnRefundAuthorization calldata intent, bytes calldata sig)
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        if (intent.burner == address(0)) revert InvalidRecipient();
+        if (intent.amount == 0) revert AmountZero();
+        if (intent.signerEpoch != currentEpoch) revert InvalidSignerEpoch();
+        if (!supportedToken[intent.wrappedToken]) revert TokenNotSupported();
+
+        // Per-burn replay key. Computed before any sig work so the revert
+        // surface is stable and cheap for an already-refunded burn.
+        // M-4 — bind wrappedToken + burner into the replay key. burnNonce is
+        // per-`WrappedERC20` (see WrappedERC20.burnNonce), so two different
+        // wrappeds can produce overlapping (txHash, nonce) pairs and one
+        // legitimate refund would otherwise permanently block the other.
+        bytes32 burnId = keccak256(
+            abi.encode(intent.wrappedToken, intent.burner, intent.burnTxHash, intent.burnNonce)
+        );
+        if (refundedBurns[burnId]) revert BurnAlreadyRefunded();
+
+        // Verify the M-of-N attestation over the EIP-712 digest. Done before
+        // the flow lookup so unauthenticated callers can't spam flow reads.
+        bytes32 digest = _hashTypedDataV4(_hashBurnRefundAuth(intent));
+        _verifySignatures(digest, sig);
+
+        // Flow binding — mirrors claimMintWrapped. The attestation commits to
+        // a flowId; assert (1) it exists, (2) it is a mint-on-EVM mode (the
+        // bridge can only re-mint where it is the minter), (3) the wrapped in
+        // the attestation matches the flow's evmToken, (4) the flow is live.
+        FlowRecord storage flow = flows[intent.flowId];
+        if (flow.evmChainId == 0) revert FlowNotFound();
+        if (flow.mode != uint8(TokenMode.INVERSE_WRAPPED) && flow.mode != uint8(TokenMode.NATIVE_BURN_MINT)) {
+            revert WrongMode();
+        }
+        if (flow.evmToken != intent.wrappedToken) revert WrongMode();
+        // M-3 (audit 2026-05-27) — tighten to ACTIVE-only. A DRAINING flow is
+        // intentionally winding down (no new locks/mints, see L214); allowing
+        // `refundBurn` against a DRAINING flow lets a (potentially compromised)
+        // signer set continue minting into a route that was deliberately
+        // marked for shutdown. Recovery for a burn whose flow has gone DRAINING
+        // is an operator decision — resume the flow briefly, refund, then
+        // re-drain.
+        if (flow.status != FLOW_STATUS_ACTIVE) {
+            revert FlowNotActive();
+        }
+
+        // H-1 — the mint-on-EVM `claimMintWrapped` path enforces minAmount +
+        // rolling-window dailyLimit via `_consumeMintFlowLimits` (MED-001)
+        // precisely to bound how much a compromised signer can mint per 24h.
+        // `refundBurn` is the OTHER signer-attested mint primitive on this
+        // contract and must share the same bound, or it becomes an unbounded
+        // mint hole. Keyed on the minted `amount` (matches the helper's
+        // contract). `whenNotPaused` is a global freeze, not a rolling bound.
+        _consumeMintFlowLimits(flow, intent.amount);
+
+        // Effects BEFORE interaction (CEI): set the replay flag, then mint.
+        refundedBurns[burnId] = true;
+
+        emit BurnRefunded(burnId, intent.burner, intent.wrappedToken, intent.amount);
+
+        IWrappedERC20(intent.wrappedToken).mintFromBridge(intent.burner, intent.amount);
     }
 
     // ---------------------------------------------------------------------
@@ -1787,40 +2037,63 @@ contract BridgeEscrow is
         emit FlowAdded(flowId, p.mode, p.evmChainId, p.evmToken, p.opnetToken);
     }
 
-    /// @notice Guardian-only protective freeze. Immediate (no timelock)
-    ///         so a compromise can be quarantined fast. Only valid from
-    ///         the active state.
+    /// @notice Guardian-only protective freeze. Immediate (no timelock) so a
+    ///         compromise can be quarantined fast. Valid from any registered
+    ///         non-PAUSED state (active / draining / retired) — the guardian
+    ///         can slam a flow off regardless of its current lifecycle state.
+    ///         FREEZE side of the H-01 freeze-but-never-thaw split: the
+    ///         guardian can push a flow toward "off" but can NEVER re-open it
+    ///         (only the owner's resumeFlow flips back to ACTIVE).
     function pauseFlow(bytes32 flowId) external {
         if (msg.sender != guardian) revert NotGuardian();
         FlowRecord storage f = flows[flowId];
         if (f.evmChainId == 0) revert FlowNotFound();
-        if (f.status != FLOW_STATUS_ACTIVE) revert FlowInvalidStatusTransition();
+        // A registered flow is always in {ACTIVE,PAUSED,DRAINING,RETIRED};
+        // the only illegal move is a self-transition.
+        if (f.status == FLOW_STATUS_PAUSED) revert FlowInvalidStatusTransition();
         emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_PAUSED);
         f.status = FLOW_STATUS_PAUSED;
     }
 
-    /// @notice Governor-only resume — flips paused → active.
+    /// @notice Owner-only resume — the SOLE edge back to ACTIVE, from any
+    ///         off-state (paused / draining / retired). THAW side of the
+    ///         H-01 split: re-opening a flow is owner-only, so a guardian
+    ///         freeze can never be self-reversed.
     function resumeFlow(bytes32 flowId) external onlyOwner {
         FlowRecord storage f = flows[flowId];
         if (f.evmChainId == 0) revert FlowNotFound();
-        if (f.status != FLOW_STATUS_PAUSED) revert FlowInvalidStatusTransition();
+        if (f.status == FLOW_STATUS_ACTIVE) revert FlowInvalidStatusTransition();
         emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_ACTIVE);
         f.status = FLOW_STATUS_ACTIVE;
     }
 
-    /// @notice Governor-only — start winding a route down. Permitted from
-    ///         active or paused. Once draining, the only forward path is
-    ///         disabled (after inventory hits zero) — no resume back to
-    ///         active. Consumed by PR γ: claim/release allowed; lock/mint
-    ///         rejected.
+    /// @notice Owner-only — wind a route down: blocks new locks but keeps
+    ///         honouring in-flight release/burn claims. Valid from any
+    ///         registered non-DRAINING state. REVERSIBLE — resumeFlow flips
+    ///         it back to ACTIVE (no longer a one-way door), so a wind-down
+    ///         started by mistake or reconsidered can simply be reopened.
     function drainFlow(bytes32 flowId) external onlyOwner {
         FlowRecord storage f = flows[flowId];
         if (f.evmChainId == 0) revert FlowNotFound();
-        if (f.status != FLOW_STATUS_ACTIVE && f.status != FLOW_STATUS_PAUSED) {
-            revert FlowInvalidStatusTransition();
-        }
+        if (f.status == FLOW_STATUS_DRAINING) revert FlowInvalidStatusTransition();
         emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_DRAINING);
         f.status = FLOW_STATUS_DRAINING;
+    }
+
+    /// @notice Owner-only — decommission FLAG. Marks a route as deliberately
+    ///         retired (distinct intent from a guardian incident-pause) for
+    ///         clear UI/indexer labelling. Behaves like "off": blocks locks
+    ///         AND claims (a non-active/non-draining status). Valid from any
+    ///         registered non-RETIRED state. NOT terminal — resumeFlow flips
+    ///         it back to ACTIVE exactly like paused/draining. No money-safety
+    ///         guarantee attaches; it is an intent label enforced only by the
+    ///         flow being off while it holds this status.
+    function retireFlow(bytes32 flowId) external onlyOwner {
+        FlowRecord storage f = flows[flowId];
+        if (f.evmChainId == 0) revert FlowNotFound();
+        if (f.status == FLOW_STATUS_RETIRED) revert FlowInvalidStatusTransition();
+        emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_RETIRED);
+        f.status = FLOW_STATUS_RETIRED;
     }
 
     /// @notice Governor-only — adjust the per-flow inventory ceiling.
@@ -1939,10 +2212,6 @@ contract BridgeEscrow is
     // Views
     // ---------------------------------------------------------------------
 
-    function hashIntent(ReleaseIntent calldata intent) external view returns (bytes32) {
-        return _hashTypedDataV4(_hashIntent(intent));
-    }
-
     function domainSeparator() external view returns (bytes32) {
         return _domainSeparatorV4();
     }
@@ -1991,11 +2260,6 @@ contract BridgeEscrow is
             );
     }
 
-    /// @notice EIP-712 digest for a MintIntent — useful off-chain and for tests.
-    function hashMintIntent(MintIntent calldata intent) external view returns (bytes32) {
-        return _hashTypedDataV4(_hashMintIntent(intent));
-    }
-
     function _hashRefundAuth(uint256 depositNonce_, bytes32 flowId, uint32 signerEpoch)
         internal
         pure
@@ -2008,6 +2272,27 @@ contract BridgeEscrow is
                     depositNonce_,
                     flowId,
                     signerEpoch
+                )
+            );
+    }
+
+    function _hashBurnRefundAuth(BurnRefundAuthorization calldata intent)
+        internal
+        pure
+        returns (bytes32)
+    {
+        return
+            keccak256(
+                abi.encode(
+                    BURN_REFUND_AUTHORIZATION_TYPEHASH,
+                    intent.burner,
+                    intent.wrappedToken,
+                    intent.amount,
+                    intent.burnNonce,
+                    intent.burnTxHash,
+                    intent.burnBlockHash,
+                    intent.flowId,
+                    intent.signerEpoch
                 )
             );
     }

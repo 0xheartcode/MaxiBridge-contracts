@@ -289,21 +289,15 @@ contract FlowRegistryTest is Test {
         escrow.resumeFlow(flowId);
     }
 
-    function test_DrainFlow_OneWay() public {
+    function test_DrainFlow_OwnerOnly() public {
         bytes32 flowId = _addDefault(address(usdc), OPNET_USDC);
+        vm.prank(stranger);
+        vm.expectRevert(); // OZ Ownable
+        escrow.drainFlow(flowId);
+
         vm.prank(owner);
         escrow.drainFlow(flowId);
         assertEq(escrow.getFlow(flowId).status, escrow.FLOW_STATUS_DRAINING());
-
-        // Cannot resume from draining.
-        vm.prank(owner);
-        vm.expectRevert(BridgeEscrow.FlowInvalidStatusTransition.selector);
-        escrow.resumeFlow(flowId);
-
-        // Cannot pause from draining.
-        vm.prank(guardian);
-        vm.expectRevert(BridgeEscrow.FlowInvalidStatusTransition.selector);
-        escrow.pauseFlow(flowId);
     }
 
     function test_DrainFlow_FromPaused() public {
@@ -313,6 +307,97 @@ contract FlowRegistryTest is Test {
         vm.prank(owner);
         escrow.drainFlow(flowId);
         assertEq(escrow.getFlow(flowId).status, escrow.FLOW_STATUS_DRAINING());
+    }
+
+    // Draining is REVERSIBLE — resumeFlow flips it back to ACTIVE.
+    function test_DrainFlow_Reversible() public {
+        bytes32 flowId = _addDefault(address(usdc), OPNET_USDC);
+        vm.prank(owner);
+        escrow.drainFlow(flowId);
+        vm.prank(owner);
+        escrow.resumeFlow(flowId);
+        assertEq(escrow.getFlow(flowId).status, escrow.FLOW_STATUS_ACTIVE());
+    }
+
+    // Guardian can freeze a draining flow (incident response from any state).
+    function test_PauseFlow_FromDraining() public {
+        bytes32 flowId = _addDefault(address(usdc), OPNET_USDC);
+        vm.prank(owner);
+        escrow.drainFlow(flowId);
+        vm.prank(guardian);
+        escrow.pauseFlow(flowId);
+        assertEq(escrow.getFlow(flowId).status, escrow.FLOW_STATUS_PAUSED());
+    }
+
+    function test_DrainFlow_RejectsAlreadyDraining() public {
+        bytes32 flowId = _addDefault(address(usdc), OPNET_USDC);
+        vm.prank(owner);
+        escrow.drainFlow(flowId);
+        vm.prank(owner);
+        vm.expectRevert(BridgeEscrow.FlowInvalidStatusTransition.selector);
+        escrow.drainFlow(flowId);
+    }
+
+    // ─── retireFlow (non-terminal decommission flag) ────────────────────
+
+    function test_RetireFlow_OwnerOnly() public {
+        bytes32 flowId = _addDefault(address(usdc), OPNET_USDC);
+        vm.prank(stranger);
+        vm.expectRevert(); // OZ Ownable
+        escrow.retireFlow(flowId);
+
+        vm.prank(owner);
+        escrow.retireFlow(flowId);
+        assertEq(escrow.getFlow(flowId).status, escrow.FLOW_STATUS_RETIRED());
+    }
+
+    function test_RetireFlow_RejectsUnknown() public {
+        vm.prank(owner);
+        vm.expectRevert(BridgeEscrow.FlowNotFound.selector);
+        escrow.retireFlow(bytes32(uint256(0xDEADBEEF)));
+    }
+
+    // Retire is reachable from any non-retired state.
+    function test_RetireFlow_FromAnyState() public {
+        bytes32 a = _addDefault(address(usdc), OPNET_USDC);
+        vm.prank(owner);
+        escrow.retireFlow(a); // from ACTIVE
+        assertEq(escrow.getFlow(a).status, escrow.FLOW_STATUS_RETIRED());
+
+        bytes32 b = _addDefault(address(usdt), OPNET_USDT);
+        vm.prank(guardian);
+        escrow.pauseFlow(b);
+        vm.prank(owner);
+        escrow.retireFlow(b); // from PAUSED
+        assertEq(escrow.getFlow(b).status, escrow.FLOW_STATUS_RETIRED());
+    }
+
+    function test_RetireFlow_FromDraining() public {
+        bytes32 flowId = _addDefault(address(usdc), OPNET_USDC);
+        vm.prank(owner);
+        escrow.drainFlow(flowId);
+        vm.prank(owner);
+        escrow.retireFlow(flowId);
+        assertEq(escrow.getFlow(flowId).status, escrow.FLOW_STATUS_RETIRED());
+    }
+
+    function test_RetireFlow_RejectsAlreadyRetired() public {
+        bytes32 flowId = _addDefault(address(usdc), OPNET_USDC);
+        vm.prank(owner);
+        escrow.retireFlow(flowId);
+        vm.prank(owner);
+        vm.expectRevert(BridgeEscrow.FlowInvalidStatusTransition.selector);
+        escrow.retireFlow(flowId);
+    }
+
+    // RETIRED is NOT terminal — resumeFlow brings it back to ACTIVE.
+    function test_RetireFlow_Reversible() public {
+        bytes32 flowId = _addDefault(address(usdc), OPNET_USDC);
+        vm.prank(owner);
+        escrow.retireFlow(flowId);
+        vm.prank(owner);
+        escrow.resumeFlow(flowId);
+        assertEq(escrow.getFlow(flowId).status, escrow.FLOW_STATUS_ACTIVE());
     }
 
     // ─── setFlowCap / setFlowDailyLimit / setFlowMinAmount / setFlowFee ─

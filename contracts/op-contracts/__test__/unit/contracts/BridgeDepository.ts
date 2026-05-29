@@ -30,6 +30,15 @@ export class BridgeDepository extends ContractRuntime {
         'setGovernor',
         ABIDataTypes.ADDRESS,
     );
+    private readonly transferGovernorSelector: number = encodeSelectorWithParams(
+        'transferGovernor',
+        ABIDataTypes.ADDRESS,
+    );
+    private readonly setPauserSelector: number = encodeSelectorWithParams(
+        'setPauser',
+        ABIDataTypes.ADDRESS,
+    );
+    private readonly pauserSelector: number = encodeNumericSelector('pauser()');
 
     private readonly claimMintWithVoucherSelector: number = encodeSelectorWithParams(
         'claimMintWithVoucher',
@@ -147,6 +156,27 @@ export class BridgeDepository extends ContractRuntime {
         w.writeSelector(this.setGovernorSelector);
         w.writeAddress(addr);
         await this.getResponse(w.getBuffer());
+    }
+
+    public async transferGovernor(addr: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.transferGovernorSelector);
+        w.writeAddress(addr);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async setPauser(addr: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setPauserSelector);
+        w.writeAddress(addr);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async pauser(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.pauserSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
     }
 
     public async claimMintWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<void> {
@@ -373,6 +403,10 @@ export class BridgeDepository extends ContractRuntime {
         'drainFlow',
         ABIDataTypes.UINT256,
     );
+    private readonly retireFlowSelector: number = encodeSelectorWithParams(
+        'retireFlow',
+        ABIDataTypes.UINT256,
+    );
     private readonly setFlowCapSelector: number = encodeSelectorWithParams(
         'setFlowCap',
         ABIDataTypes.UINT256,
@@ -476,6 +510,13 @@ export class BridgeDepository extends ContractRuntime {
     public async drainFlow(flowId: bigint): Promise<void> {
         const w = new BinaryWriter();
         w.writeSelector(this.drainFlowSelector);
+        w.writeU256(flowId);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async retireFlow(flowId: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.retireFlowSelector);
         w.writeU256(flowId);
         await this.getResponse(w.getBuffer());
     }
@@ -720,6 +761,110 @@ export class BridgeDepository extends ContractRuntime {
         await this.getResponse(w.getBuffer());
     }
 
+    // ─── Trustless stranded-lock refund ───────────────────────────────
+
+    private readonly markLockRefundableSelector: number = encodeSelectorWithParams(
+        'markLockRefundable',
+        ABIDataTypes.UINT256,
+        ABIDataTypes.BYTES,
+    );
+    private readonly refundLockSelector: number = encodeSelectorWithParams(
+        'refundLock',
+        ABIDataTypes.UINT256,
+    );
+    private readonly lockRecordSelector: number = encodeSelectorWithParams(
+        'lockRecord',
+        ABIDataTypes.UINT256,
+    );
+    private readonly isLockRefundableSelector: number = encodeNumericSelector(
+        'isLockRefundable()',
+    );
+
+    // HARDENED: the contract rebuilds the RefundAuthorization preimage from
+    // its own stored lock record + chain data; only the M-of-N sig blob is
+    // sent on the wire (ABI signature `markLockRefundable(uint256,bytes)`
+    // unchanged → selector stable).
+    public async markLockRefundable(
+        lockNonce: bigint,
+        mldsaSig: Uint8Array,
+    ): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.markLockRefundableSelector);
+        w.writeU256(lockNonce);
+        w.writeBytesWithLength(mldsaSig);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async refundLock(lockNonce: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.refundLockSelector);
+        w.writeU256(lockNonce);
+        await this.getResponse(w.getBuffer());
+    }
+
+    // Returns [status, user, token, flowId, amount, fee, mode, blockNumber]
+    // as 8 × u256.
+    public async lockRecord(lockNonce: bigint): Promise<bigint[]> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.lockRecordSelector);
+        w.writeU256(lockNonce);
+        const r = await this.getResponse(w.getBuffer());
+        const blob = r.readBytesWithLength();
+        const out: bigint[] = [];
+        for (let i = 0; i < 8; i++) {
+            let v = 0n;
+            for (let j = 0; j < 32; j++) {
+                v = (v << 8n) | BigInt(blob[i * 32 + j]!);
+            }
+            out.push(v);
+        }
+        return out;
+    }
+
+    public async isLockRefundable(lockNonce: bigint): Promise<boolean> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.isLockRefundableSelector);
+        w.writeU256(lockNonce);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readBoolean();
+    }
+
+    // ─── #55 — trustless burn-side recovery (attested re-mint) ──────────
+
+    private readonly refundBurnSelector: number = encodeSelectorWithParams(
+        'refundBurn',
+        ABIDataTypes.BYTES,
+        ABIDataTypes.BYTES,
+    );
+    private readonly isBurnRefundedSelector: number = encodeNumericSelector(
+        'isBurnRefunded()',
+    );
+
+    // The attestation IS the signed 296-byte preimage; only it + the M-of-N
+    // sig blob are sent on the wire (ABI signature `refundBurn(bytes,bytes)`).
+    public async refundBurn(
+        attestation: Uint8Array,
+        mldsaSig: Uint8Array,
+    ): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.refundBurnSelector);
+        w.writeBytesWithLength(attestation);
+        w.writeBytesWithLength(mldsaSig);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async isBurnRefunded(
+        burnTxHash: bigint,
+        burnNonce: bigint,
+    ): Promise<boolean> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.isBurnRefundedSelector);
+        w.writeU256(burnTxHash);
+        w.writeU256(burnNonce);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readBoolean();
+    }
+
     // ─── #62 — per-flow fee accounting + withdrawFees ─────────────────
 
     private readonly withdrawFeesSelector: number = encodeSelectorWithParams(
@@ -734,6 +879,62 @@ export class BridgeDepository extends ContractRuntime {
         const w = new BinaryWriter();
         w.writeSelector(this.withdrawFeesSelector);
         w.writeU256(flowId);
+        w.writeAddress(token);
+        w.writeU256(amount);
+        await this.getResponse(w.getBuffer());
+    }
+
+    private readonly setTreasurySelector: number = encodeSelectorWithParams(
+        'setTreasury',
+        ABIDataTypes.ADDRESS,
+    );
+
+    public async setTreasury(treasury: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setTreasurySelector);
+        w.writeAddress(treasury);
+        await this.getResponse(w.getBuffer());
+    }
+
+    private readonly treasurySelector: number = encodeNumericSelector('treasury()');
+
+    public async treasury(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.treasurySelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
+    }
+
+    private readonly setGuardianSelector: number = encodeSelectorWithParams(
+        'setGuardian',
+        ABIDataTypes.ADDRESS,
+    );
+
+    public async setGuardian(guardian: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setGuardianSelector);
+        w.writeAddress(guardian);
+        await this.getResponse(w.getBuffer());
+    }
+
+    private readonly guardianSelector: number = encodeNumericSelector('guardian()');
+
+    public async guardian(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.guardianSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
+    }
+
+    private readonly emergencyWithdrawSelector: number = encodeSelectorWithParams(
+        'emergencyWithdraw',
+        ABIDataTypes.ADDRESS,
+        ABIDataTypes.UINT256,
+    );
+
+    public async emergencyWithdraw(token: Address, amount: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.emergencyWithdrawSelector);
         w.writeAddress(token);
         w.writeU256(amount);
         await this.getResponse(w.getBuffer());

@@ -22,6 +22,10 @@ import { UpdatablePlugin } from '@btc-vision/btc-runtime/runtime/plugins/Updatab
 
 import {
     GovernorUpdated,
+    PauserSet,
+    TreasurySet,
+    GuardianSet,
+    EmergencyWithdrawal,
     WrappedTokenSet,
     SignerRotated,
     Paused,
@@ -42,6 +46,9 @@ import {
     RelayerTipPaid,
     BurnConfirmed,
     FeesWithdrawn,
+    LockMarkedRefundable,
+    LockRefunded,
+    BurnRefunded,
 } from './events';
 
 /**
@@ -86,10 +93,11 @@ const MAX_TIP_BPS: u32 = 200;
  * BridgeEscrow so a flow can be identified by the same status code on
  * either chain.
  */
-const FLOW_STATUS_DISABLED: u32 = 0;
+const FLOW_STATUS_DISABLED: u32 = 0; // sentinel only — never a reachable state for a registered flow
 const FLOW_STATUS_ACTIVE: u32 = 1;
 const FLOW_STATUS_PAUSED: u32 = 2;
 const FLOW_STATUS_DRAINING: u32 = 3;
+const FLOW_STATUS_RETIRED: u32 = 4; // decommission FLAG — non-terminal, reversible via resumeFlow
 
 /**
  * PR γ.1 — rolling-window length for per-flow `dailyLimit`. 24 hours.
@@ -145,6 +153,124 @@ const BURN_ATTESTATION_LEN: i32 = 252;
  * OPNet transform is 0x9cffeea6 (see CLAUDE.md §8 for the hash table).
  */
 const CONFIRM_BURN_SELECTOR: u32 = 0x9cffeea6;
+
+/**
+ * Trustless stranded-lock refund (mirror of EVM
+ * `BridgeEscrow.markDepositRefundable` + `refundLockedDeposit`).
+ *
+ * RefundAuthorization preimage length — 264 bytes total. The preimage is
+ * REBUILT inside `markLockRefundable` from the STORED lock record's fields +
+ * chain data (NOT from caller-supplied bytes) and SHA-256'd before M-of-N
+ * verify, exactly like the 252-byte BurnAttestation. Layout:
+ *   networkId       u256    32   (0)    — domain separation
+ *   contractSelf    Address 32   (32)   — this depository's identity
+ *   selector        u32      4   (64)   — sha256('markLockRefundable(uint256,bytes)')
+ *   lockNonce       u256    32   (68)    — the lock being authorized
+ *   flowId          u256    32   (100)   — stored _lockFlowId[lockNonce]
+ *   user            u256    32   (132)   — stored _lockUser[lockNonce] (locker identity)
+ *   canonicalToken  u256    32   (164)   — stored _lockToken[lockNonce]
+ *   amount          u256    32   (196)   — stored _lockAmount[lockNonce] (gross)
+ *   lockBlockNumber u256    32   (228)   — stored _lockBlock[lockNonce] (reorg guard)
+ *   signerEpoch     u32      4   (260)   — current _signerEpoch
+ *                                = 264
+ *
+ * HARDENING (reorg + identity binding): the preimage binds the lock's full
+ * IDENTITY (user, token, amount, lockBlockNumber) in addition to lockNonce +
+ * flowId. Under a deep OPNet/BTC reorg a `lockNonce` could be re-assigned to a
+ * DIFFERENT lock; binding the identity tuple means an attestation signed for
+ * one lock can NEVER verify against a record whose stored fields differ — the
+ * rebuilt preimage simply won't hash to what the signer signed. `lockBlockNumber`
+ * is the reorg guard, mirroring the voucher path's `sourceBlockHash` (CLAUDE.md §6).
+ *
+ * The server signer attests (off-chain) that the EVM far-leg of this OPNet
+ * lock was cancelled / never claimed, so the locked principal can be safely
+ * returned. The contract verifies the attestation against the SAME M-of-N
+ * signer set that authorizes vouchers/burns — no new trust assumption.
+ */
+const REFUND_AUTHORIZATION_LEN: i32 = 264;
+
+/**
+ * SHA-256 selector of `markLockRefundable(uint256,bytes)` first 4 bytes —
+ * bound into the RefundAuthorization preimage so an authorization can only be
+ * consumed by this method on this contract. The constant is asserted against
+ * the OPNet transform's emitted selector at build time (the @method ABI hash
+ * for `markLockRefundable`). If a future rebuild changes the signature this
+ * MUST be regenerated (see CLAUDE.md §8).
+ */
+const MARK_LOCK_REFUNDABLE_SELECTOR: u32 = 0xcdcd9059;
+
+/**
+ * Lock lifecycle status codes for the stranded-lock refund ledger. Stored as
+ * u256 in `_lockStatus[lockNonce]`. 0 (NONE) means the slot was never
+ * written — i.e. no such lock. Mirrors the EVM `DepositStatus` enum on the
+ * subset of states the OPNet refund path uses (None / Locked / Refundable /
+ * Refunded — OPNet has no Settled state because there is no settlement-window
+ * fee-promotion path here; fees accrue at lock time).
+ */
+const LOCK_STATUS_NONE: u32 = 0;
+const LOCK_STATUS_LOCKED: u32 = 1;
+const LOCK_STATUS_REFUNDABLE: u32 = 2;
+const LOCK_STATUS_REFUNDED: u32 = 3;
+
+/**
+ * Trustless BURN-side recovery (re-mint) — closes the recovery gap for
+ * burn-initiated OPNet legs (mode 0 reverse: burn wUSDC → EVM release; mode 2
+ * OPNet→EVM). A user burns wrapped tokens via `WrappedOP20.burnForRelease`
+ * expecting the EVM destination to release. Normally the EVM voucher is
+ * always-claimable (no deadline) so no recovery is needed. The GAP this closes:
+ * if the EVM destination voucher is PERMANENTLY cancelled (reorg / fraud), the
+ * burned tokens are gone AND the destination never pays → the burner needs the
+ * burned amount RE-MINTED.
+ *
+ * ⚠️ MINT-AUTHORITY PRIMITIVE — a wrong guard mints tokens from thin air.
+ * The trust model is IDENTICAL to vouchers: the M-of-N signer set attests
+ * off-chain facts. The signer set signs a `BurnRefundAuthorization` ONLY after
+ * confirming, off-chain, BOTH (a) the burn is on-chain & final AND (b) the EVM
+ * destination voucher is cancelled-and-final.
+ *
+ * The burn happens on the TOKEN (`WrappedOP20.burnForRelease`), not the
+ * depository, so the depository has NO native burn record. The M-of-N
+ * attestation is therefore SELF-CONTAINED — it carries every field needed to
+ * rebuild the preimage + bound the re-mint. The depository never reads a stored
+ * burn record (it has none); it trusts the attestation exactly as it trusts a
+ * voucher's `netAmount`.
+ *
+ * BurnRefundAuthorization preimage — 296 bytes total. The attestation IS this
+ * signed preimage (mirrors the 252-byte BurnAttestation / `confirmBurn` shape):
+ * built off-chain by the signer, parsed at fixed offsets on-chain, and the
+ * M-of-N sig is verified over these exact bytes (no rebuild step). Layout:
+ *   networkId       u256    32   (0)    — domain separation (1=mainnet/2=testnet)
+ *   contractSelf    Address 32   (32)   — this depository's identity
+ *   selector        u32      4   (64)   — sha256('refundBurn(bytes,bytes)') = 0xbe782e17
+ *   burner          u256    32   (68)   — OPNet identity of the original burner;
+ *                                         the re-mint recipient
+ *   wrappedToken    u256    32   (100)  — OPNet identity of the wrapped token to
+ *                                         re-mint (wUSDC/wUSDT)
+ *   amount          u256    32   (132)  — burned amount to re-mint (signer-attested,
+ *                                         same trust as a voucher netAmount)
+ *   burnNonce       u256    32   (164)  — burn id from the BurnedForRelease event
+ *   burnTxHash      u256    32   (196)  — the OPNet burn tx hash (binding + replay key)
+ *   burnBlock       u256    32   (228)  — burn block number-or-hash; REORG GUARD,
+ *                                         mirrors the voucher path's sourceBlockHash
+ *   flowId          u256    32   (260)  — route binding; flow's opnetToken must
+ *                                         == wrappedToken (mirrors the claim path)
+ *   signerEpoch     u32      4   (292)  — MUST equal current _signerEpoch
+ *                                = 296
+ *
+ * Every identity field is inside the signed bytes, so any tampering (amount /
+ * burner / token / flowId / epoch / burnNonce / burnTxHash) makes the ML-DSA
+ * verify fail → NO mint. The on-chain replay key is sha256(burnTxHash‖burnNonce).
+ */
+const BURN_REFUND_AUTHORIZATION_LEN: i32 = 296;
+
+/**
+ * SHA-256 selector of `refundBurn(bytes,bytes)` first 4 bytes — bound into the
+ * BurnRefundAuthorization preimage so an authorization can only ever be
+ * consumed by this method on this contract. Asserted against the OPNet
+ * transform's emitted selector at build time (see CLAUDE.md §8). If a future
+ * rebuild changes the signature this MUST be regenerated.
+ */
+const REFUND_BURN_SELECTOR: u32 = 0xbe782e17;
 
 /**
  * BridgeDepository — mint authority for WrappedOP20.
@@ -376,20 +502,118 @@ export class BridgeDepository extends ReentrancyGuard {
     // it ships baked into v1 storage, but the ordering rule still holds).
     private _flowAccruedFees: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
+    // ─── Roles PR — dedicated pause role ───────────────────────────────
+    // Address allowed to flip the pause flag in addition to the governor.
+    // May ONLY pause/unpause via `setPaused` — no other governor surface.
+    // Zero (default) disables the role. Set/rotated by the governor via
+    // `setPauser`.
+    //
+    // Append-only: declared as the LAST storage slot to preserve the
+    // upgrade discipline (Five Upgrade Commandments). `onUpdate` seeds it to
+    // zero on the v(2→3) migration so an in-place upgrade leaves the role
+    // disabled until the governor wires it.
+    private _pauser: StoredAddress = new StoredAddress(Blockchain.nextPointer);
+
+    // Dedicated treasury — the PINNED sink for BOTH `withdrawFees` and
+    // `emergencyWithdraw` (mirrors EVM `BridgeEscrow.treasury`, SAME
+    // terminology). Protocol revenue + emergency drains land HERE, never on
+    // the governor key — this separates funds from the god-key. Fail-closed: a
+    // zero slot blocks fee sweeps AND emergency withdrawals until the governor
+    // wires it via `setTreasury`. Appended AFTER `_pauser` to preserve
+    // append-only storage discipline (storage pointer slot unchanged by the
+    // _feeRecipient → _treasury rename).
+    private _treasury: StoredAddress = new StoredAddress(Blockchain.nextPointer);
+
+    // Dedicated guardian — incident-response role (mirrors EVM
+    // `BridgeEscrow.guardian`, SAME terminology). The guardian may FREEZE
+    // (`setPaused(true)`), `cancelVoucher`, run `migrateSignerSet`, and is the
+    // SOLE caller of `emergencyWithdraw` (which additionally requires paused).
+    // It may NOT unpause (H-01 freeze-but-never-thaw). A zero slot disables the
+    // role. Set/rotated by the governor via `setGuardian`.
+    //
+    // Append-only: NEW pointer appended AFTER `_treasury`. `onUpdate` seeds it
+    // to zero on the v(3→4) migration so an in-place upgrade leaves the role
+    // disabled until the governor wires it.
+    private _guardian: StoredAddress = new StoredAddress(Blockchain.nextPointer);
+
+    // ─── Trustless stranded-lock refund ledger (v4→5) ──────────────────
+    // Mirror of EVM `BridgeEscrow.lockedDeposits[depositNonce]`. Records,
+    // per `lockForBridge` lock nonce, exactly enough to reverse the lock's
+    // ledger effects and return the principal to the locker. AssemblyScript
+    // has no compound storage struct, so one StoredMapU256 per scalar field
+    // (same pattern as the flow registry above), keyed by lockNonce:
+    //
+    //   _lockStatus      → 0 NONE / 1 LOCKED / 2 REFUNDABLE / 3 REFUNDED
+    //   _lockUser        → the locker (tx.sender at lock time), as u256 of
+    //                      its 32-byte OPNet identity. Refund returns to this.
+    //   _lockToken       → the canonical OP20 locked (u256 of its identity).
+    //   _lockFlowId      → the flow the lock named (for inventory reversal).
+    //   _lockAmount      → the GROSS `received` (balance-delta) at lock time.
+    //                      This is what the user gets back in full on refund.
+    //   _lockFee         → the fee portion `lockForBridge` accrued into
+    //                      `_flowAccruedFees` for this lock. Reversed on
+    //                      refund so the fee is NOT promoted (mirrors EVM
+    //                      "fee is NOT promoted on refund"). The mode-1
+    //                      inventory credit was `received - lockFee` (net),
+    //                      so the refund reverses BOTH: -net from inventory
+    //                      (mode 1 only) AND -fee from accruedFees (all
+    //                      lockable modes), leaving the
+    //                      `inventory + accruedFees == balance` invariant
+    //                      intact after the full gross leaves to the user.
+    //   _lockMode        → the flow mode at lock time (1/3/4). Pinned per
+    //                      lock so the refund decrements inventory only for
+    //                      mode 1 (the sole mode lockForBridge credited).
+    //   _lockBlock       → REORG GUARD. `Blockchain.block.number` captured at
+    //                      lock time, as u256. Bound into the RefundAuthorization
+    //                      preimage so an attestation can only ever apply to the
+    //                      lock recorded at that exact block. Mirrors the voucher
+    //                      path's `sourceBlockHash` (CLAUDE.md §6) — under a deep
+    //                      OPNet/BTC reorg a re-assigned `lockNonce` carries a
+    //                      different block, so the rebuilt preimage won't match.
+    //
+    // All NEW pointers appended AFTER `_guardian` to preserve append-only
+    // storage discipline. Fresh deploy ships these baked into the v1 baseline
+    // layout (no in-place migration — the whole OPNet stack redeploys fresh,
+    // see onUpdate). Unwritten StoredMapU256 slots read zero (LOCK_STATUS_NONE /
+    // zero everywhere — the correct "no such lock" base).
+    private _lockStatus: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _lockUser: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _lockToken: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _lockFlowId: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _lockAmount: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _lockFee: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _lockMode: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    private _lockBlock: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+
+    // ─── Trustless burn-side recovery replay guard (#55) ───────────────
+    // burnId → u256.One once that burn has been re-minted via `refundBurn`.
+    // burnId = sha256(burnTxHash(32) ‖ burnNonce(32)) — globally-unique per
+    // burn (the (txHash, nonce) tuple is unique even if a bare nonce could
+    // ever collide across a deep reorg). This map is the ONLY thing
+    // preventing a double / infinite re-mint of the same burn, so it is set
+    // BEFORE the cross-contract mint (CEI) and an already-set slot reverts.
+    //
+    // Append-only: NEW pointer appended AFTER `_lockBlock` to preserve the
+    // append-only storage discipline (Five Upgrade Commandments). An unwritten
+    // StoredMapU256 slot reads zero — the correct "not yet refunded" base, so
+    // NO storage-version bump / onUpdate seeding is required (a clean +1 was
+    // considered and rejected: the map defaults safely).
+    private _refundedBurns: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+
     public constructor() {
         super();
         // AddressMemoryMap MUST be initialized in the constructor body.
         this._wrappedTokens = new AddressMemoryMap(this._wrappedTokensPointer);
 
-        // Phase 2.2 — 7-day upgrade timelock.
-        // Updatable-via-plugin: 1008 blocks (~7 days at 10min/block) timelock
-        // between submitUpdate and applyUpdate. Gives users a full week to
-        // exit before any upgrade lands, matching the EVM-side
-        // TimelockController(604800s). Pointers allocated at the END of the
+        // 3-day upgrade timelock (governance decision 2026-05-27, was 1008/7d).
+        // Updatable-via-plugin: 432 blocks (~3 days at 10min/block) timelock
+        // between submitUpdate and applyUpdate. Gives users 3 days to exit
+        // before any upgrade lands, matching the EVM-side
+        // TimelockController(259200s). Pointers allocated at the END of the
         // constructor body so they append after every previously declared
         // storage slot, preserving append-only discipline for future
         // upgrades.
-        this.registerPlugin(new UpdatablePlugin(1008));
+        this.registerPlugin(new UpdatablePlugin(432));
     }
 
     public override onDeployment(calldata: Calldata): void {
@@ -412,10 +636,38 @@ export class BridgeDepository extends ReentrancyGuard {
         }
         this._networkId.value = networkId;
 
-        // Storage version 1 for fresh v1 deployments.
-        this._storageVersion.value = u256.One;
+        // Fresh-baseline storage version. This stack is a FRESH redeploy (not
+        // an in-place upgrade of the prior mainnet depository — #68 Tier C
+        // already forces fresh non-upgradeable wrappers, so the WHOLE OPNet
+        // stack redeploys). The historical v2→v5 migration ladder is therefore
+        // dead weight and has been removed; a clean deploy ships at v1 with all
+        // role/refund fields present (StoredAddress/StoredMapU256 slots read
+        // zero, which is the correct fail-closed / "no such lock" base). A
+        // future POST-LAUNCH upgrade can start a fresh ladder from v1.
+        this._storageVersion.value = u256.fromU32(1);
         // Signer epoch starts at 1 so "epoch 0" is invalid by construction.
         this._signerEpoch.value = u256.One;
+
+        // A-4 (audit 2026-05-27) — runtime guard against selector-constant
+        // drift. The hardcoded selectors above are baked into signed preimages
+        // (mark-lock-refundable, refund-burn, confirm-burn) and the voucher
+        // method dispatch. If a maintainer mutates the constant without
+        // updating the matching `methodName(...)` string (or vice versa),
+        // every attestation silently mismatches the contract's REBUILT
+        // preimage hash and reverts with cryptic errors. Pay the gas once
+        // at deploy to surface drift loud at the ceremony.
+        if (encodeSelector('claimMintWithVoucher(bytes,bytes)') != CLAIM_MINT_WITH_VOUCHER_SELECTOR) {
+            throw new Revert('BridgeDepository: CLAIM_MINT_WITH_VOUCHER_SELECTOR drift');
+        }
+        if (encodeSelector('confirmBurn(uint256,bytes,bytes)') != CONFIRM_BURN_SELECTOR) {
+            throw new Revert('BridgeDepository: CONFIRM_BURN_SELECTOR drift');
+        }
+        if (encodeSelector('markLockRefundable(uint256,bytes)') != MARK_LOCK_REFUNDABLE_SELECTOR) {
+            throw new Revert('BridgeDepository: MARK_LOCK_REFUNDABLE_SELECTOR drift');
+        }
+        if (encodeSelector('refundBurn(bytes,bytes)') != REFUND_BURN_SELECTOR) {
+            throw new Revert('BridgeDepository: REFUND_BURN_SELECTOR drift');
+        }
     }
 
     public override onUpdate(calldata: Calldata): void {
@@ -433,10 +685,8 @@ export class BridgeDepository extends ReentrancyGuard {
         // Once the governor wires `_upgradeAuthority`, every subsequent
         // upgrade must be authorized via `proposeUpgrade()`. The flag is
         // consumed (cleared) here so each upgrade requires a fresh
-        // hand-shake. Until the authority is wired, the legacy
-        // deployer-only path remains active so the v1 bootstrap upgrade
-        // (which seeds storageVersion → 2) can land without a chicken-
-        // and-egg problem.
+        // hand-shake. Until the authority is wired, the legacy deployer-only
+        // path remains active (v1 bootstrap window).
         const upgradeAuthority: Address = this._upgradeAuthority.value;
         if (!upgradeAuthority.isZero()) {
             if (!this._pendingUpgradeAuthorized.value) {
@@ -446,24 +696,17 @@ export class BridgeDepository extends ReentrancyGuard {
             this._pendingUpgradeAuthorized.value = false;
         }
 
-        // Append-only migrations gated by _storageVersion. Every branch
-        // re-runs only once thanks to the version gate.
-        const version = this._storageVersion.value;
-        if (u256.lt(version, u256.fromU32(2))) {
-            // Phase 1.3 migration — seed the M-of-N signer set from the
-            // legacy single-signer state so the new claim path works
-            // immediately after the upgrade.
-            const epoch: u256 = this._signerEpoch.value;
-            const legacyHash: u256 = this._bridgeSignerHashes.get(epoch);
-            if (!legacyHash.isZero()) {
-                this._signerKeyHashSet.set(legacyHash, u256.One);
-                this._signerCount.value = u256.One;
-            }
-            this._requiredSignatures.value = u256.One;
-            // _authorityAddress left zero — governor sets it via a
-            // separate `setAuthorityAddress` call after upgrade.
-            this._storageVersion.value = u256.fromU32(2);
-        }
+        // ── Storage-version migration ladder — INTENTIONALLY EMPTY ──
+        // This stack is a FRESH redeploy, not an in-place upgrade of the prior
+        // mainnet depository (#68 Tier C forces fresh non-upgradeable wrappers,
+        // so the whole OPNet stack redeploys). `onDeployment` ships a clean v1
+        // baseline with every role/refund field present, so the historical
+        // v2→v5 migration steps are dead weight and have been removed. The
+        // append-only storage discipline still governs FUTURE upgrades — a
+        // future post-launch upgrade adds `if (version < 2) { … }` blocks here,
+        // starting a fresh ladder from this v1 baseline. Field/pointer order is
+        // unchanged (that order IS the canonical fresh layout); only the dead
+        // historical migration steps are deleted.
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -500,6 +743,51 @@ export class BridgeDepository extends ReentrancyGuard {
         const auth = this._authorityAddress.value;
         if (!auth.isZero() && sender.equals(auth)) return;
         throw new Revert('BridgeDepository: not governor or authority');
+    }
+
+    /**
+     * Roles PR — pause path. Accepts the governor OR the dedicated `_pauser`
+     * role. Scoped to `setPaused` only — the pauser has no other governor
+     * surface. A zero `_pauser` slot disables the role.
+     */
+    private onlyGovernorOrPauser(): void {
+        const sender = Blockchain.tx.sender;
+        const gov = this._governor.value;
+        if (!gov.isZero() && sender.equals(gov)) return;
+        const p = this._pauser.value;
+        if (!p.isZero() && sender.equals(p)) return;
+        throw new Revert('BridgeDepository: not governor or pauser');
+    }
+
+    /**
+     * Roles-mirror PR — guardian-only (mirrors EVM `onlyGuardian`). The
+     * guardian is the SOLE caller of `emergencyWithdraw`. A zero `_guardian`
+     * slot disables the role (fail-closed — nobody can call).
+     */
+    private onlyGuardian(): void {
+        const g = this._guardian.value;
+        if (g.isZero()) {
+            throw new Revert('BridgeDepository: guardian not set');
+        }
+        if (!Blockchain.tx.sender.equals(g)) {
+            throw new Revert('BridgeDepository: not guardian');
+        }
+    }
+
+    /**
+     * Roles-mirror PR — governor OR guardian (mirrors EVM
+     * `onlyOwnerOrGuardian`). Used for incident-response surfaces that should
+     * stay immediate even once the governor becomes a timelock: `cancelVoucher`
+     * and `withdrawFees`. A zero `_guardian` slot just means only the governor
+     * qualifies.
+     */
+    private onlyGovernorOrGuardian(): void {
+        const sender = Blockchain.tx.sender;
+        const gov = this._governor.value;
+        if (!gov.isZero() && sender.equals(gov)) return;
+        const g = this._guardian.value;
+        if (!g.isZero() && sender.equals(g)) return;
+        throw new Revert('BridgeDepository: not governor or guardian');
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -589,8 +877,17 @@ export class BridgeDepository extends ReentrancyGuard {
                 this._signerCount.value = SafeMath.sub(this._signerCount.value, u256.One);
             }
         }
-        this._signerKeyHashSet.set(newHash, u256.One);
-        this._signerCount.value = SafeMath.add(this._signerCount.value, u256.One);
+        // M-1 (audit 2026-05-27) — gate the count increment so re-rotating to
+        // a hash that is ALREADY in the set (e.g. one previously added via
+        // `addSignerToSet` / `migrateSignerSet`) does not inflate
+        // `_signerCount` past the true set cardinality. Pre-fix the counter
+        // could drift higher than the actual count and let `setRequiredSignatures`
+        // accept an impossible threshold (bricks the M-of-N path). Matches the
+        // idiom in `addSignerToSet`.
+        if (this._signerKeyHashSet.get(newHash).isZero()) {
+            this._signerKeyHashSet.set(newHash, u256.One);
+            this._signerCount.value = SafeMath.add(this._signerCount.value, u256.One);
+        }
         if (this._requiredSignatures.value.isZero()) {
             this._requiredSignatures.value = u256.One;
         }
@@ -647,7 +944,9 @@ export class BridgeDepository extends ReentrancyGuard {
      */
     @method({ name: 'voucherId', type: ABIDataTypes.UINT256 })
     public cancelVoucher(calldata: Calldata): BytesWriter {
-        this.onlyGovernor();
+        // Incident-response surface — governor OR guardian (mirrors EVM
+        // `BridgeEscrow.cancelVoucher` onlyOwnerOrGuardian, H-01).
+        this.onlyGovernorOrGuardian();
         const voucherId: u256 = calldata.readU256();
         this._cancelledVouchers.set(voucherId, u256.One);
         return new BytesWriter(0);
@@ -1079,10 +1378,12 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     /**
-     * Move a flow into status=PAUSED. Only allowed from active. Governor
-     * gated — on EVM the equivalent is guardian-immediate, but on OPNet
-     * the BridgeAuthority chain already short-circuits to a guardian
-     * role; we keep the gate uniform.
+     * Move a flow into status=PAUSED. Valid from any registered non-PAUSED
+     * state (active / draining / retired). Governor gated — on EVM the
+     * equivalent is guardian-immediate, but on OPNet the BridgeAuthority
+     * chain already short-circuits to a guardian role; we keep the gate
+     * uniform. A registered flow is always in {ACTIVE,PAUSED,DRAINING,
+     * RETIRED}, so the only illegal move is a self-transition.
      */
     @method({ name: 'flowId', type: ABIDataTypes.UINT256 })
     @emit('FlowStatusChanged')
@@ -1093,7 +1394,7 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: flow not found');
         }
         const oldStatus: u32 = this._flowStatus.get(flowId).toU32();
-        if (oldStatus != FLOW_STATUS_ACTIVE) {
+        if (oldStatus == FLOW_STATUS_PAUSED) {
             throw new Revert('BridgeDepository: invalid status transition');
         }
         this._flowStatus.set(flowId, u256.fromU32(FLOW_STATUS_PAUSED));
@@ -1102,7 +1403,8 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     /**
-     * Move a flow back to status=ACTIVE. Only allowed from paused.
+     * Move a flow back to status=ACTIVE — the sole edge to ACTIVE, from any
+     * off-state (paused / draining / retired).
      */
     @method({ name: 'flowId', type: ABIDataTypes.UINT256 })
     @emit('FlowStatusChanged')
@@ -1113,7 +1415,7 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: flow not found');
         }
         const oldStatus: u32 = this._flowStatus.get(flowId).toU32();
-        if (oldStatus != FLOW_STATUS_PAUSED) {
+        if (oldStatus == FLOW_STATUS_ACTIVE) {
             throw new Revert('BridgeDepository: invalid status transition');
         }
         this._flowStatus.set(flowId, u256.fromU32(FLOW_STATUS_ACTIVE));
@@ -1122,8 +1424,10 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     /**
-     * Move a flow into status=DRAINING — one-way wind-down. Allowed from
-     * active or paused. PR γ: claim/release allowed; lock/mint rejected.
+     * Move a flow into status=DRAINING — soft wind-down: blocks new locks
+     * but keeps honouring in-flight release/burn claims. Valid from any
+     * registered non-DRAINING state. REVERSIBLE — resumeFlow flips it back
+     * to ACTIVE (no longer a one-way door).
      */
     @method({ name: 'flowId', type: ABIDataTypes.UINT256 })
     @emit('FlowStatusChanged')
@@ -1134,11 +1438,37 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: flow not found');
         }
         const oldStatus: u32 = this._flowStatus.get(flowId).toU32();
-        if (oldStatus != FLOW_STATUS_ACTIVE && oldStatus != FLOW_STATUS_PAUSED) {
+        if (oldStatus == FLOW_STATUS_DRAINING) {
             throw new Revert('BridgeDepository: invalid status transition');
         }
         this._flowStatus.set(flowId, u256.fromU32(FLOW_STATUS_DRAINING));
         this.emitEvent(new FlowStatusChanged(flowId, oldStatus, FLOW_STATUS_DRAINING));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Move a flow into status=RETIRED — a decommission FLAG (deliberate,
+     * indefinite shelving; distinct intent from a guardian incident-pause)
+     * for clear UI/indexer labelling. Behaves like "off": blocks locks AND
+     * claims (a non-active/non-draining status). Valid from any registered
+     * non-RETIRED state. NOT terminal — resumeFlow flips it back to ACTIVE
+     * exactly like paused/draining. No money-safety guarantee attaches; it
+     * is an intent label enforced only by the flow being off.
+     */
+    @method({ name: 'flowId', type: ABIDataTypes.UINT256 })
+    @emit('FlowStatusChanged')
+    public retireFlow(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const flowId: u256 = calldata.readU256();
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        const oldStatus: u32 = this._flowStatus.get(flowId).toU32();
+        if (oldStatus == FLOW_STATUS_RETIRED) {
+            throw new Revert('BridgeDepository: invalid status transition');
+        }
+        this._flowStatus.set(flowId, u256.fromU32(FLOW_STATUS_RETIRED));
+        this.emitEvent(new FlowStatusChanged(flowId, oldStatus, FLOW_STATUS_RETIRED));
         return new BytesWriter(0);
     }
 
@@ -1519,6 +1849,27 @@ export class BridgeDepository extends ReentrancyGuard {
         const nextNonce: u256 = SafeMath.add(this._lockNonce.value, u256.One);
         this._lockNonce.value = nextNonce;
 
+        // ─── Trustless stranded-lock refund ledger (v5) ───────────────
+        // Record exactly enough to reverse this lock if its EVM far-leg is
+        // cancelled / never claimed. Keyed by the just-minted lockNonce.
+        // `_lockAmount` is the GROSS `received` (full refund to user);
+        // `_lockFee` is the fee portion accrued above (reversed on refund so
+        // it is NOT promoted); `_lockMode` pins the mode so the refund
+        // decrements inventory only for the mode that credited it (mode 1).
+        // Lock nonces are monotonic and unique, so no slot is ever
+        // overwritten — the status starts at LOCKED.
+        this._lockStatus.set(nextNonce, u256.fromU32(LOCK_STATUS_LOCKED));
+        this._lockUser.set(nextNonce, _opnetAddrToU256(Blockchain.tx.sender));
+        this._lockToken.set(nextNonce, _opnetAddrToU256(canonical));
+        this._lockFlowId.set(nextNonce, flowId);
+        this._lockAmount.set(nextNonce, received);
+        this._lockFee.set(nextNonce, lockFee);
+        this._lockMode.set(nextNonce, mode);
+        // Reorg guard — pin the block this lock was recorded at. Bound into the
+        // RefundAuthorization preimage so an attestation can never apply to a
+        // lockNonce re-assigned to a different lock under a deep reorg.
+        this._lockBlock.set(nextNonce, Blockchain.block.numberU256);
+
         // Pack evmRecipient (32B) into a u256 for event encoding.
         const evmRecipU256: u256 = u256.fromUint8ArrayBE(evmRecipient);
 
@@ -1530,6 +1881,8 @@ export class BridgeDepository extends ReentrancyGuard {
             destChainId,
             nextNonce,
             mode.toU32(),
+            flowId, // FINDING-002 — appended so the OPNet scanner can persist
+                    // flow_id without resolving from per-token state.
         ));
 
         const writer = new BytesWriter(32);
@@ -1667,6 +2020,17 @@ export class BridgeDepository extends ReentrancyGuard {
             this.address,
             parsed.wrappedToken,
         );
+        // FINDING-003 (audit 2026-05-26): the early gate above validated
+        // `parsed.flowId` (token binding, mode, status). All subsequent
+        // effects (status/minAmount/dailyLimit/inventory/tip) read storage
+        // keyed by `flowIdRel`, the value recomputed from the voucher's
+        // source-chain fields. If those two flow ids disagree the contract
+        // would mutate a DIFFERENT flow than the one the signer attested
+        // to. Require equality so every effect is provably governed by the
+        // signed flowId.
+        if (!u256.eq(flowIdRel, parsed.flowId)) {
+            throw new Revert('BridgeDepository: voucher flowId mismatch');
+        }
         if (this._flowExists.get(flowIdRel).isZero()) {
             throw new Revert('BridgeDepository: flow not registered');
         }
@@ -1706,14 +2070,37 @@ export class BridgeDepository extends ReentrancyGuard {
             SafeMath.sub(inventoryRelBefore, parsed.grossAmount),
         );
 
+        // FINDING-004 (audit 2026-05-26): accrue the release-side fee.
+        // Inventory was decremented by gross, but only `parsed.netAmount`
+        // leaves the bridge (split into recipient + tip). The remainder
+        // `parsed.feeAmount` (= gross - net, validated at the head of this
+        // function) stays in the bridge's balance. Pre-fix this delta was
+        // never recorded anywhere, so `withdrawFees` couldn't sweep it
+        // and the per-flow invariant
+        // `_flowInventory + _flowAccruedFees == bridge balance` drifted
+        // upward on every release.
+        if (!parsed.feeAmount.isZero()) {
+            const accruedBeforeRel: u256 = this._flowAccruedFees.get(flowIdRel);
+            this._flowAccruedFees.set(
+                flowIdRel,
+                SafeMath.add(accruedBeforeRel, parsed.feeAmount),
+            );
+        }
+
         let recipientNetAmountRel: u256 = parsed.netAmount;
         if (!parsed.relayerTip.isZero()) {
+            // FINDING-006 (audit 2026-05-26): cross-multiply instead of
+            // floored division so `tipCapBps == 0` cannot still permit a
+            // sub-1-bp tip, and explicitly reject `tip > netAmount` so the
+            // subtraction below cannot underflow on a malformed
+            // signer-bound voucher.
+            if (u256.gt(parsed.relayerTip, parsed.netAmount)) {
+                throw new Revert('BridgeDepository: tip exceeds flow cap');
+            }
             const tipCapBpsRel: u32 = this._flowTipCapBps.get(flowIdRel).toU32();
-            const bpsRel: u256 = SafeMath.div(
-                SafeMath.mul(parsed.relayerTip, u256.fromU32(10000)),
-                parsed.netAmount,
-            );
-            if (u256.gt(bpsRel, u256.fromU32(tipCapBpsRel))) {
+            const tipScaledRel: u256 = SafeMath.mul(parsed.relayerTip, u256.fromU32(10000));
+            const capScaledRel: u256 = SafeMath.mul(parsed.netAmount, u256.fromU32(tipCapBpsRel));
+            if (u256.gt(tipScaledRel, capScaledRel)) {
                 throw new Revert('BridgeDepository: tip exceeds flow cap');
             }
             const relayerRel: Address = Blockchain.tx.sender;
@@ -1799,15 +2186,21 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: token not flow canonical');
         }
 
-        // Verify → effect → interaction (CEI). Cap-check + ledger credit
-        // happen before the external transferFrom; a failed transfer
-        // reverts the whole tx, so the ledger can never lead custody.
-        const before: u256 = this._flowInventory.get(flowId);
-        const after: u256 = SafeMath.add(before, amount);
-        if (u256.gt(after, this._flowCap.get(flowId))) {
-            throw new Revert('BridgeDepository: flow cap exceeded');
-        }
-        this._flowInventory.set(flowId, after);
+        // FINDING-005 (audit 2026-05-26): balance-delta the transfer so the
+        // ledger credit equals what the bridge ACTUALLY received. Pre-fix
+        // this credited the caller-supplied `amount`; a non-standard OP20
+        // (fee-on-transfer, rebasing, partial-fill) could leave
+        // `_flowInventory` ahead of physical custody — the same drift class
+        // that lockForBridge's pre-#46 form had. Mirrors the lockForBridge
+        // balance-delta pattern, and is governor-only, so a misconfigured
+        // token surfaces as a revert during provisioning rather than as
+        // silent inventory inflation.
+        const balOfSelector: u32 = encodeSelector('balanceOf(address)');
+
+        const balBeforeW = new BytesWriter(4 + ADDRESS_BYTE_LENGTH);
+        balBeforeW.writeSelector(balOfSelector);
+        balBeforeW.writeAddress(this.address);
+        const balBefore: u256 = Blockchain.call(token, balBeforeW).data.readU256();
 
         const transferFromSelector: u32 = encodeSelector('transferFrom(address,address,uint256)');
         const w = new BytesWriter(4 + ADDRESS_BYTE_LENGTH * 2 + 32);
@@ -1817,8 +2210,24 @@ export class BridgeDepository extends ReentrancyGuard {
         w.writeU256(amount);
         Blockchain.call(token, w);
 
+        const balAfterW = new BytesWriter(4 + ADDRESS_BYTE_LENGTH);
+        balAfterW.writeSelector(balOfSelector);
+        balAfterW.writeAddress(this.address);
+        const balAfter: u256 = Blockchain.call(token, balAfterW).data.readU256();
+
+        const received: u256 = SafeMath.sub(balAfter, balBefore);
+        if (received.isZero()) throw new Revert('BridgeDepository: nothing received');
+
+        // Now credit + cap-check against actual received.
+        const before: u256 = this._flowInventory.get(flowId);
+        const after: u256 = SafeMath.add(before, received);
+        if (u256.gt(after, this._flowCap.get(flowId))) {
+            throw new Revert('BridgeDepository: flow cap exceeded');
+        }
+        this._flowInventory.set(flowId, after);
+
         this.emitEvent(
-            new InventoryProvisionedOpNet(flowId, token, Blockchain.tx.sender, amount),
+            new InventoryProvisionedOpNet(flowId, token, Blockchain.tx.sender, received),
         );
         return new BytesWriter(0);
     }
@@ -1880,6 +2289,56 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    //  Guardian: emergency withdraw (mirror of EVM
+    //  BridgeEscrow.emergencyWithdraw)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Emergency drain of custodied pooled/inverse (mode 1/3) balances to the
+     * pinned `_treasury`. Mirrors EVM `BridgeEscrow.emergencyWithdraw(token,
+     * amount)` byte-for-byte in semantics:
+     *   - `onlyGuardian` (NOT the governor — incident-response role)
+     *   - whenPaused (`_paused.value == true`)
+     *   - `@nonReentrant`, strict CEI
+     *   - transfers exclusively to `_treasury`; reverts if treasury unset.
+     *
+     * This is the guardian+paused+treasury-pinned emergency path. It sits
+     * ALONGSIDE the routine `drainInventoryOpNet` (governor, caller-chosen
+     * recipient) — neither replaces the other.
+     */
+    @method(
+        { name: 'token', type: ABIDataTypes.ADDRESS },
+        { name: 'amount', type: ABIDataTypes.UINT256 },
+    )
+    @emit('EmergencyWithdrawal')
+    @nonReentrant
+    public emergencyWithdraw(calldata: Calldata): BytesWriter {
+        this.onlyGuardian();
+        if (!this._paused.value) {
+            throw new Revert('BridgeDepository: must pause before emergency withdraw');
+        }
+        const token: Address = calldata.readAddress();
+        const amount: u256 = calldata.readU256();
+        if (token.isZero()) throw new Revert('BridgeDepository: zero token');
+        if (amount.isZero()) throw new Revert('BridgeDepository: zero amount');
+
+        const treasury: Address = this._treasury.value;
+        if (treasury.isZero()) {
+            throw new Revert('BridgeDepository: treasury not set');
+        }
+
+        const transferSelector: u32 = encodeSelector('transfer(address,uint256)');
+        const w = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+        w.writeSelector(transferSelector);
+        w.writeAddress(treasury);
+        w.writeU256(amount);
+        Blockchain.call(token, w);
+
+        this.emitEvent(new EmergencyWithdrawal(token, treasury, amount));
+        return new BytesWriter(0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     //  #62 — non-emergency per-flow fee withdrawal (mirror of EVM
     //  BridgeEscrow.withdrawFees)
     // ═══════════════════════════════════════════════════════════════════════
@@ -1913,7 +2372,9 @@ export class BridgeDepository extends ReentrancyGuard {
     @emit('FeesWithdrawn')
     @nonReentrant
     public withdrawFees(calldata: Calldata): BytesWriter {
-        this.onlyGovernor();
+        // Governor OR guardian (mirrors EVM `BridgeEscrow.withdrawFees`
+        // onlyOwnerOrGuardian).
+        this.onlyGovernorOrGuardian();
         const flowId: u256 = calldata.readU256();
         const token: Address = calldata.readAddress();
         const amount: u256 = calldata.readU256();
@@ -1938,8 +2399,13 @@ export class BridgeDepository extends ReentrancyGuard {
         }
         this._flowAccruedFees.set(flowId, SafeMath.sub(accrued, amount));
 
-        // Recipient = governor (no treasury slot on OPNet).
-        const recipient: Address = this._governor.value;
+        // Dedicated treasury sink (mirrors EVM `withdrawFees` -> treasury),
+        // NOT the governor key — keeps protocol revenue off the god-key.
+        // Fail-closed: a zero treasury blocks the sweep.
+        const recipient: Address = this._treasury.value;
+        if (recipient.isZero()) {
+            throw new Revert('BridgeDepository: treasury not set');
+        }
 
         const transferSelector: u32 = encodeSelector('transfer(address,uint256)');
         const w = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
@@ -1971,6 +2437,461 @@ export class BridgeDepository extends ReentrancyGuard {
         const flowId: u256 = calldata.readU256();
         const r = new BytesWriter(32);
         r.writeU256(this._flowAccruedFees.get(flowId));
+        return r;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Trustless stranded-lock refund (mirror of EVM
+    //  BridgeEscrow.markDepositRefundable + refundLockedDeposit)
+    //
+    //  Closes the EVM↔OPNet recovery-symmetry gap: OPNet-source locks
+    //  (lockForBridge, modes 1/3/4) gain the SAME user-initiated recovery the
+    //  EVM-source locks already have. Two steps, mirroring the EVM lattice:
+    //
+    //    1. markLockRefundable(lockNonce, mofnSigBlob) — permissionless with a
+    //       VALID M-of-N signature. The signer set attests the EVM far-leg was
+    //       cancelled / never claimed; on success the lock moves LOCKED →
+    //       REFUNDABLE. (Mirror of EVM markDepositRefundable, which takes a
+    //       single EIP-712 sig; here the OPNet M-of-N envelope is the analog —
+    //       same signer set, same trust model as vouchers/burns.) The 264-byte
+    //       RefundAuthorization preimage is REBUILT from the stored lock record
+    //       (user/token/amount/lockBlock/flowId) + chain data, so the signature
+    //       is bound to the lock's full IDENTITY + a reorg guard — a re-assigned
+    //       nonce or reorged lock can never match.
+    //
+    //    2. refundLock(lockNonce) — the locker (anyone, but funds go to the
+    //       recorded user) reclaims the FULL gross principal. CEI: status →
+    //       REFUNDED first, then reverse the ledger (inventory for mode 1,
+    //       accruedFees for the carved fee — the fee is NOT promoted), then
+    //       transfer. @nonReentrant + status flag guard double-refund.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Mark a stranded lock refundable against an M-of-N attestation.
+     * Permissionless-with-valid-sig (mirrors EVM `markDepositRefundable`).
+     *
+     * HARDENED (reorg + identity binding): the 264-byte RefundAuthorization
+     * preimage is REBUILT here from the STORED lock record's fields + chain
+     * data (NOT from caller-supplied bytes), then verified via `_verifyMofN`.
+     * The signer must therefore have signed over the EXACT tuple (networkId,
+     * contractSelf, selector, lockNonce, flowId, user, token, amount,
+     * lockBlockNumber, signerEpoch) for THIS lock. A `lockNonce` re-assigned to
+     * a different lock under a deep reorg, or any field drift, makes the rebuilt
+     * preimage hash to something the signer never signed → ML-DSA verify fails.
+     * See REFUND_AUTHORIZATION_LEN for the byte layout.
+     *
+     * ABI signature stays `markLockRefundable(uint256,bytes)` (selector
+     * 0xcdcd9059 unchanged) — the `bytes` arg is the M-of-N SIG BLOB. (The
+     * preimage is no longer transmitted; it is reconstructed from storage.)
+     *
+     * Replay-guard: requires status == LOCKED; rejects NONE (no such lock),
+     * REFUNDABLE (already marked), and REFUNDED. The signer-set + epoch +
+     * identity binding is the entire authorization — a bad / empty /
+     * wrong-epoch / wrong-identity sig reverts before any state change.
+     */
+    @method(
+        { name: 'lockNonce', type: ABIDataTypes.UINT256 },
+        { name: 'sig', type: ABIDataTypes.BYTES },
+    )
+    @emit('LockMarkedRefundable')
+    public markLockRefundable(calldata: Calldata): BytesWriter {
+        // A-2 — NOT pause-gated (mirrors EVM `markDepositRefundable`).
+        // Lock-refund returns user PRINCIPAL — no new asset is created —
+        // and must stay possible during an incident freeze so operators
+        // can recover stranded locks even while the bridge is halted.
+        // The signer-set + epoch + identity binding is the entire trust
+        // anchor; pause does not gate this path on either chain.
+        const lockNonce: u256 = calldata.readU256();
+        const sig: Uint8Array = calldata.readBytesWithLength();
+
+        // Replay / state guard FIRST — cheap reverts before the ML-DSA verify.
+        const status: u32 = this._lockStatus.get(lockNonce).toU32();
+        if (status == LOCK_STATUS_NONE) {
+            throw new Revert('BridgeDepository: lock not found');
+        }
+        if (status == LOCK_STATUS_REFUNDED) {
+            throw new Revert('BridgeDepository: lock already refunded');
+        }
+        if (status != LOCK_STATUS_LOCKED) {
+            throw new Revert('BridgeDepository: lock not in locked state');
+        }
+
+        // ── Rebuild the 264-byte RefundAuthorization preimage from the STORED
+        // lock record + chain data. This binds the lock's full identity so an
+        // attestation can only ever apply to the exact lock it was signed for.
+        const flowId: u256 = this._lockFlowId.get(lockNonce);
+        const userU256: u256 = this._lockUser.get(lockNonce);
+        const tokenU256: u256 = this._lockToken.get(lockNonce);
+        const amount: u256 = this._lockAmount.get(lockNonce);
+        const lockBlock: u256 = this._lockBlock.get(lockNonce);
+        const epoch: u256 = this._signerEpoch.value;
+
+        const pre = new BytesWriter(REFUND_AUTHORIZATION_LEN);
+        pre.writeU256(this._networkId.value);          // 0
+        pre.writeAddress(this.address);                // 32
+        pre.writeSelector(MARK_LOCK_REFUNDABLE_SELECTOR); // 64
+        pre.writeU256(lockNonce);                      // 68
+        pre.writeU256(flowId);                         // 100
+        pre.writeU256(userU256);                       // 132 — locker identity
+        pre.writeU256(tokenU256);                      // 164 — canonical token
+        pre.writeU256(amount);                         // 196 — gross
+        pre.writeU256(lockBlock);                      // 228 — reorg guard
+        pre.writeU32(epoch.toU32());                   // 260 — current epoch
+        const preimage: Uint8Array = pre.getBuffer();
+
+        // M-of-N verify against the signer set at the current epoch — SAME
+        // verifier the vouchers + confirmBurn use. The signer's signature must
+        // match the rebuilt preimage exactly (identity + reorg binding).
+        this._verifyMofN(sig, preimage);
+
+        // Authorized — move LOCKED → REFUNDABLE.
+        this._lockStatus.set(lockNonce, u256.fromU32(LOCK_STATUS_REFUNDABLE));
+
+        this.emitEvent(new LockMarkedRefundable(lockNonce, flowId));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Reclaim a stranded lock that has been marked REFUNDABLE. The full gross
+     * principal recorded at lock time is returned to the recorded locker
+     * (mirrors EVM `refundLockedDeposit` — `to` is the original locker, not
+     * the caller). Permissionless caller; funds always go to `_lockUser`.
+     *
+     * CEI + @nonReentrant + status-flag double-refund guard. Reverses the
+     * EXACT ledger effects `lockForBridge` applied:
+     *   - mode 1: `_flowInventory[flowId] -= (received - lockFee)` (the net it
+     *     credited). Modes 3/4 credited NO OPNet inventory at lock time, so
+     *     nothing to reverse there.
+     *   - all lockable modes: `_flowAccruedFees[flowId] -= lockFee` (the fee
+     *     is NOT promoted — the whole gross leaves to the user, so the carved
+     *     fee must be un-accrued to keep `inventory + accruedFees == balance`).
+     */
+    @method({ name: 'lockNonce', type: ABIDataTypes.UINT256 })
+    @emit('LockRefunded')
+    @nonReentrant
+    public refundLock(calldata: Calldata): BytesWriter {
+        const lockNonce: u256 = calldata.readU256();
+
+        const status: u32 = this._lockStatus.get(lockNonce).toU32();
+        if (status == LOCK_STATUS_NONE) {
+            throw new Revert('BridgeDepository: lock not found');
+        }
+        if (status == LOCK_STATUS_REFUNDED) {
+            throw new Revert('BridgeDepository: lock already refunded');
+        }
+        if (status != LOCK_STATUS_REFUNDABLE) {
+            throw new Revert('BridgeDepository: lock not refundable');
+        }
+
+        const flowId: u256 = this._lockFlowId.get(lockNonce);
+        const gross: u256 = this._lockAmount.get(lockNonce);
+        const lockFee: u256 = this._lockFee.get(lockNonce);
+        const mode: u32 = this._lockMode.get(lockNonce).toU32();
+        const userU256: u256 = this._lockUser.get(lockNonce);
+        const tokenU256: u256 = this._lockToken.get(lockNonce);
+
+        if (gross.isZero()) {
+            // Defensive — a LOCKED/REFUNDABLE record always carries a positive
+            // gross (lockForBridge rejects zero `received`). Guard anyway.
+            throw new Revert('BridgeDepository: zero refund amount');
+        }
+
+        // ── EFFECTS (CEI) — set REFUNDED before any external call so a
+        // re-entrant token (or repeated call) cannot double-spend.
+        this._lockStatus.set(lockNonce, u256.fromU32(LOCK_STATUS_REFUNDED));
+
+        // Reverse the mode-1 inventory credit (net = gross - fee). Modes 3/4
+        // never credited OPNet inventory in lockForBridge, so skip them.
+        if (mode == 1) {
+            const net: u256 = SafeMath.sub(gross, lockFee);
+            const invBefore: u256 = this._flowInventory.get(flowId);
+            if (u256.lt(invBefore, net)) {
+                // Inventory can only fall short if governance manually drained
+                // it (drainInventoryOpNet) below this lock's backing while it
+                // sat refundable. Mirror EVM's defensive clamp to zero rather
+                // than bricking the user's refund. (EVM clamps identically.)
+                this._flowInventory.set(flowId, u256.Zero);
+            } else {
+                this._flowInventory.set(flowId, SafeMath.sub(invBefore, net));
+            }
+        }
+
+        // Reverse the carved fee from accrued fees (fee NOT promoted). Clamp
+        // defensively if a prior withdrawFees already swept past it.
+        if (!lockFee.isZero()) {
+            const accruedBefore: u256 = this._flowAccruedFees.get(flowId);
+            if (u256.lt(accruedBefore, lockFee)) {
+                this._flowAccruedFees.set(flowId, u256.Zero);
+            } else {
+                this._flowAccruedFees.set(flowId, SafeMath.sub(accruedBefore, lockFee));
+            }
+        }
+
+        // ── INTERACTION — return the FULL gross principal to the recorded
+        // locker. Reconstruct the Address objects from their stored u256
+        // identities.
+        const token: Address = _u256ToOpnetAddr(tokenU256);
+        const user: Address = _u256ToOpnetAddr(userU256);
+
+        const transferSelector: u32 = encodeSelector('transfer(address,uint256)');
+        const w = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+        w.writeSelector(transferSelector);
+        w.writeAddress(user);
+        w.writeU256(gross);
+        Blockchain.call(token, w);
+
+        this.emitEvent(new LockRefunded(lockNonce, user, token, gross));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * @view — full lock record for a nonce, packed as 8 × u256 (256 bytes,
+     * length-prefixed BYTES). Order:
+     *   [0] status (0 NONE / 1 LOCKED / 2 REFUNDABLE / 3 REFUNDED)
+     *   [1] user      (u256 of OPNet identity)
+     *   [2] token     (u256 of OPNet identity)
+     *   [3] flowId
+     *   [4] amount    (gross received at lock time)
+     *   [5] fee       (carved lock fee)
+     *   [6] mode
+     *   [7] blockNumber (reorg guard — block this lock was recorded at)
+     */
+    @method({ name: 'lockNonce', type: ABIDataTypes.UINT256 })
+    @returns({ name: 'record', type: ABIDataTypes.BYTES })
+    public lockRecord(calldata: Calldata): BytesWriter {
+        const lockNonce: u256 = calldata.readU256();
+        const buf = new BytesWriter(32 * 8);
+        buf.writeU256(this._lockStatus.get(lockNonce));
+        buf.writeU256(this._lockUser.get(lockNonce));
+        buf.writeU256(this._lockToken.get(lockNonce));
+        buf.writeU256(this._lockFlowId.get(lockNonce));
+        buf.writeU256(this._lockAmount.get(lockNonce));
+        buf.writeU256(this._lockFee.get(lockNonce));
+        buf.writeU256(this._lockMode.get(lockNonce));
+        buf.writeU256(this._lockBlock.get(lockNonce));
+        const r = new BytesWriter(32 + 32 * 8);
+        r.writeBytesWithLength(buf.getBuffer());
+        return r;
+    }
+
+    @view
+    @returns({ name: 'refundable', type: ABIDataTypes.BOOL })
+    public isLockRefundable(calldata: Calldata): BytesWriter {
+        const lockNonce: u256 = calldata.readU256();
+        const r = new BytesWriter(1);
+        r.writeBoolean(
+            this._lockStatus.get(lockNonce).toU32() == LOCK_STATUS_REFUNDABLE,
+        );
+        return r;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  #55 — Trustless burn-side recovery (attested re-mint)
+    //
+    //  ⚠️ MINT-AUTHORITY PRIMITIVE. A wrong guard mints from thin air. This is
+    //  the burn-initiated counterpart of the stranded-lock refund: a user who
+    //  burned wUSDC via `WrappedOP20.burnForRelease` expecting an EVM release
+    //  gets the burned amount RE-MINTED to them iff the EVM destination voucher
+    //  was permanently cancelled (reorg/fraud).
+    //
+    //  The burn lives on the TOKEN, not here, so the attestation is fully
+    //  self-contained (carries burner/token/amount/burnNonce/burnTxHash/
+    //  burnBlock/flowId). Trust model == vouchers: the M-of-N signer set signs
+    //  the BurnRefundAuthorization only after confirming the burn is final AND
+    //  the EVM dest voucher is cancelled-and-final.
+    //
+    //  Scope: OPNet only. The symmetric EVM-side burn recovery (re-mint
+    //  WrappedERC20 via BridgeEscrow for modes 1/2) is a SEPARATE follow-up.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Re-mint a permanently-cancelled burn's principal back to the original
+     * burner, gated by an M-of-N BurnRefundAuthorization attestation.
+     * Permissionless-with-valid-sig (anyone may submit; funds go ONLY to the
+     * signer-attested `burner`).
+     *
+     * The 296-byte preimage is REBUILT here from the caller-supplied
+     * attestation fields (the depository has NO stored burn record — the burn
+     * happened on the token), then verified via `_verifyMofN` against the
+     * CURRENT epoch signer set. Because the burner / token / amount / burnNonce
+     * / burnTxHash / burnBlock / flowId / epoch are ALL inside the signed
+     * preimage, the signer's signature binds the FULL identity + a reorg guard:
+     * any tampered field makes the rebuilt preimage hash to something the signer
+     * never signed → ML-DSA verify fails (no mint).
+     *
+     * Attestation calldata (`bytes` arg) layout — read in order, all big-endian:
+     *   burner       u256  (OPNet identity of the burner / re-mint recipient)
+     *   wrappedToken u256  (OPNet identity of the wrapped token to re-mint)
+     *   amount       u256  (burned amount — signer-attested, == voucher trust)
+     *   burnNonce    u256  (burn id from BurnedForRelease)
+     *   burnTxHash   u256  (OPNet burn tx hash)
+     *   burnBlock    u256  (reorg guard)
+     *   flowId       u256  (route binding; flow's opnetToken must == wrappedToken)
+     *   signerEpoch  u32   (MUST equal current _signerEpoch — bumped on rotation)
+     *                  = 7×32 + 4 = 228 attestation bytes.
+     *
+     * CEI + @nonReentrant + per-burn replay guard. The replay key
+     * `burnId = sha256(burnTxHash ‖ burnNonce)` is set to One BEFORE the mint;
+     * an already-set slot reverts. This guard is the ENTIRE protection against
+     * a double / infinite re-mint — make sure it stays airtight.
+     */
+    @method(
+        { name: 'attestation', type: ABIDataTypes.BYTES },
+        { name: 'mldsaSig', type: ABIDataTypes.BYTES },
+    )
+    @emit('BurnRefunded')
+    @nonReentrant
+    public refundBurn(calldata: Calldata): BytesWriter {
+        this.requireNotPaused();
+
+        // The attestation IS the signed 296-byte preimage (built off-chain by
+        // the signer, mirroring confirmBurn's attestation-is-preimage shape).
+        // We parse it at FIXED offsets, validate the domain/selector/epoch
+        // bindings, then verify the M-of-N sig over the attestation bytes
+        // directly — no rebuild step, so the on-wire bytes and the signed bytes
+        // are provably identical.
+        const attestation: Uint8Array = calldata.readBytesWithLength();
+        const sig: Uint8Array = calldata.readBytesWithLength();
+
+        if (attestation.length != BURN_REFUND_AUTHORIZATION_LEN) {
+            throw new Revert('BridgeDepository: bad burn-refund attestation length');
+        }
+
+        // ── Domain separation — networkId + contractSelf + selector. These
+        // bind the attestation to THIS contract on THIS network + this method,
+        // so a sig is never replayable cross-network / cross-contract / cross-
+        // method (mirrors confirmBurn + the voucher preimage).
+        const networkId: u256 = readU256BE(attestation, 0);
+        if (!u256.eq(networkId, this._networkId.value)) {
+            throw new Revert('BridgeDepository: wrong networkId');
+        }
+        const contractSelf: Address = readAddress(attestation, 32);
+        if (!contractSelf.equals(this.address)) {
+            throw new Revert('BridgeDepository: wrong contractSelf');
+        }
+        const selector: u32 = readU32BE(attestation, 64);
+        if (selector != REFUND_BURN_SELECTOR) {
+            throw new Revert('BridgeDepository: wrong selector');
+        }
+
+        const burnerU256: u256 = readU256BE(attestation, 68);
+        const wrappedTokenU256: u256 = readU256BE(attestation, 100);
+        const amount: u256 = readU256BE(attestation, 132);
+        const burnNonce: u256 = readU256BE(attestation, 164);
+        const burnTxHash: u256 = readU256BE(attestation, 196);
+        // burnBlock @ 228 — reorg guard, opaque to the contract (bound only
+        // because it's inside the signed preimage; the signer used it to pin
+        // the burn to a final block before signing).
+        const flowId: u256 = readU256BE(attestation, 260);
+        const sigEpoch: u32 = readU32BE(attestation, 292);
+
+        if (amount.isZero()) {
+            throw new Revert('BridgeDepository: zero refund amount');
+        }
+
+        // ── Epoch binding — the attestation's signerEpoch MUST equal the
+        // current epoch. Rotating the signer set instantly invalidates any
+        // un-consumed burn-refund attestation (same model as vouchers).
+        if (!u256.eq(u256.fromU32(sigEpoch), this._signerEpoch.value)) {
+            throw new Revert('BridgeDepository: wrong signerEpoch');
+        }
+
+        // ── Per-burn replay guard FIRST (cheap revert before the ML-DSA
+        // verify). burnId = sha256(burnTxHash ‖ burnNonce) — globally unique
+        // per burn (the tuple is unique even if a bare nonce could ever collide
+        // under a deep reorg). This is the ONLY thing preventing a double /
+        // infinite re-mint of the same burn, so it is checked here and SET
+        // below strictly BEFORE the external mint (CEI).
+        const burnId: u256 = _burnRefundId(burnTxHash, burnNonce);
+        if (!this._refundedBurns.get(burnId).isZero()) {
+            throw new Revert('BridgeDepository: burn already refunded');
+        }
+
+        // ── wrappedToken must be an allowlisted wrapped token (mint target) —
+        // the contract never mints an unregistered token.
+        const wrappedToken: Address = _u256ToOpnetAddr(wrappedTokenU256);
+        if (this._wrappedTokens.get(wrappedToken).isZero()) {
+            throw new Revert('BridgeDepository: unknown wrappedToken');
+        }
+
+        // ── flowId binding — mirror the claim path: flow must exist + be
+        // ACTIVE + its opnetToken must equal the wrappedToken being re-minted,
+        // so a mint/burn token live in >1 flow binds to the right route.
+        if (this._flowExists.get(flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        if (this._flowStatus.get(flowId).toU32() != FLOW_STATUS_ACTIVE) {
+            throw new Revert('BridgeDepository: flow not active');
+        }
+        if (!u256.eq(this._flowOpnetToken.get(flowId), wrappedTokenU256)) {
+            throw new Revert('BridgeDepository: flow token mismatch');
+        }
+
+        // H-2 — mode allowlist (mirrors claimMintWithVoucher). The bridge can
+        // only re-mint where it holds mint authority on the OPNet side, i.e.
+        // WRAPPED (0) and NATIVE_BURN_MINT (2). Without this, an attestation
+        // for a mode-1/3 flow whose `_flowOpnetToken` happens to point at an
+        // allowlisted wrapped would still mint here — defense-in-depth gap.
+        const refundMode: u256 = this._flowMode.get(flowId);
+        const isMintableWrapped: bool = refundMode.isZero();
+        const isMintableNative: bool = u256.eq(refundMode, u256.fromU32(2));
+        if (!isMintableWrapped && !isMintableNative) {
+            throw new Revert('BridgeDepository: token not in mintable mode');
+        }
+
+        // ── M-of-N verify over the attestation bytes — SAME verifier the
+        // vouchers + lock-refund + confirmBurn use. A bad / empty / wrong-epoch
+        // / tampered-identity attestation fails here BEFORE any state change or
+        // mint (every identity field is inside the signed bytes).
+        this._verifyMofN(sig, attestation);
+
+        // ── EFFECTS (CEI) — mark the burn refunded BEFORE the external mint so
+        // a re-entrant token (or a repeated call) cannot double-mint. This is
+        // the single most important line in this method.
+        this._refundedBurns.set(burnId, u256.One);
+
+        // A-1 — rolling 24h dailyLimit (mirrors claimMintWithVoucher §10b).
+        // Without this, `refundBurn` is an unbounded mint primitive: a
+        // compromised signer set could mint arbitrarily across many synthetic
+        // (burnTxHash, burnNonce) pairs, only bound by `requireNotPaused`.
+        // Keyed on `amount` (the minted quantity — mirrors EVM `H-1`).
+        const nowRefundMint: u64 = Blockchain.block.medianTimestamp;
+        const windowStartRefundMint: u64 = this._flowLastWindowStart.get(flowId).toU64();
+        let mintedTodayRefund: u256 = this._flowMintedToday.get(flowId);
+        if (nowRefundMint - windowStartRefundMint > FLOW_WINDOW_DURATION) {
+            mintedTodayRefund = u256.Zero;
+            this._flowLastWindowStart.set(flowId, u256.fromU64(nowRefundMint));
+        }
+        const newMintedRefund: u256 = SafeMath.add(mintedTodayRefund, amount);
+        const flowDailyLimitRefund: u256 = this._flowDailyLimit.get(flowId);
+        if (u256.gt(newMintedRefund, flowDailyLimitRefund)) {
+            throw new Revert('BridgeDepository: daily limit exceeded');
+        }
+        this._flowMintedToday.set(flowId, newMintedRefund);
+
+        // ── INTERACTION — re-mint exactly `amount` of the wrapped token to the
+        // attested burner. The bridge is the minter. `amount` is signer-
+        // attested (same trust as a voucher's netAmount).
+        const burner: Address = _u256ToOpnetAddr(burnerU256);
+        const mintSelector: u32 = encodeSelector('mintTo(address,uint256)');
+        const mintCalldata = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+        mintCalldata.writeSelector(mintSelector);
+        mintCalldata.writeAddress(burner);
+        mintCalldata.writeU256(amount);
+        Blockchain.call(wrappedToken, mintCalldata);
+
+        this.emitEvent(new BurnRefunded(burnId, burner, wrappedToken, amount));
+        return new BytesWriter(0);
+    }
+
+    @view
+    @returns({ name: 'refunded', type: ABIDataTypes.BOOL })
+    public isBurnRefunded(calldata: Calldata): BytesWriter {
+        const burnTxHash: u256 = calldata.readU256();
+        const burnNonce: u256 = calldata.readU256();
+        const burnId: u256 = _burnRefundId(burnTxHash, burnNonce);
+        const r = new BytesWriter(1);
+        r.writeBoolean(!this._refundedBurns.get(burnId).isZero());
         return r;
     }
 
@@ -2074,7 +2995,23 @@ export class BridgeDepository extends ReentrancyGuard {
     @method({ name: 'payload', type: ABIDataTypes.BYTES })
     @emit('SignerRotated')
     public migrateSignerSet(calldata: Calldata): BytesWriter {
-        this.onlyGovernorOrAuthority();
+        // Incident-response surface — governor, registered BridgeAuthority,
+        // OR guardian (mirrors EVM `BridgeEscrow.migrateSignerSet`
+        // onlyOwnerOrGuardian, H-01; the BridgeAuthority push path is retained
+        // on top so its cascade keeps working).
+        {
+            const sender = Blockchain.tx.sender;
+            const gov = this._governor.value;
+            const auth = this._authorityAddress.value;
+            const guard = this._guardian.value;
+            if (
+                !(!gov.isZero() && sender.equals(gov)) &&
+                !(!auth.isZero() && sender.equals(auth)) &&
+                !(!guard.isZero() && sender.equals(guard))
+            ) {
+                throw new Revert('BridgeDepository: not governor, authority, or guardian');
+            }
+        }
         const payload: Uint8Array = calldata.readBytesWithLength();
         let off: u32 = 0;
         if (off + 4 > <u32>payload.length) {
@@ -2391,8 +3328,26 @@ export class BridgeDepository extends ReentrancyGuard {
     @method({ name: 'paused', type: ABIDataTypes.BOOL })
     @emit('Paused', 'Unpaused')
     public setPaused(calldata: Calldata): BytesWriter {
-        this.onlyGovernor();
         const paused: boolean = calldata.readBoolean();
+        // Freeze-but-never-thaw (mirrors EVM BridgeEscrow H-01): the governor,
+        // guardian, and pauser may FREEZE; ONLY the governor may THAW (re-open
+        // the bridge). A compromised pauser/guardian/incident key cannot keep
+        // the bridge open.
+        if (paused) {
+            const sender = Blockchain.tx.sender;
+            const gov = this._governor.value;
+            const guard = this._guardian.value;
+            const p = this._pauser.value;
+            if (
+                !(!gov.isZero() && sender.equals(gov)) &&
+                !(!guard.isZero() && sender.equals(guard)) &&
+                !(!p.isZero() && sender.equals(p))
+            ) {
+                throw new Revert('BridgeDepository: not governor, guardian, or pauser');
+            }
+        } else {
+            this.onlyGovernor();
+        }
         this._paused.value = paused;
         if (paused) {
             this.emitEvent(new Paused());
@@ -2425,6 +3380,92 @@ export class BridgeDepository extends ReentrancyGuard {
         const old = this._governor.value;
         this._governor.value = newGovernor;
         this.emitEvent(new GovernorUpdated(old, newGovernor));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Roles PR — strict governor handoff at the governor key only.
+     *
+     * M-2 (audit 2026-05-27 clarification): "strict" is relative to the
+     * governor key — gated `onlyGovernor`, so only the CURRENT governor
+     * may name its successor via this path. After this lands, the old
+     * governor immediately loses every `onlyGovernor`-gated surface.
+     *
+     * However, the REGISTERED BRIDGE AUTHORITY can ALSO swap the governor
+     * via `setGovernor` (`onlyGovernorOrAuthority`) — that cascade exists
+     * by design so the authority can pivot the role during its own
+     * rotation ceremony (closes #16b). Reviewers must NOT assume that the
+     * governor key is the sole successor authority while
+     * `_authorityAddress` is non-zero.
+     */
+    @method({ name: 'newGovernor', type: ABIDataTypes.ADDRESS })
+    @emit('GovernorUpdated')
+    @nonReentrant
+    public transferGovernor(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const newGovernor: Address = calldata.readAddress();
+        if (newGovernor.isZero()) {
+            throw new Revert('BridgeDepository: zero governor');
+        }
+        const old = this._governor.value;
+        this._governor.value = newGovernor;
+        this.emitEvent(new GovernorUpdated(old, newGovernor));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Roles PR — set/rotate/disable the dedicated pause role. Governor-only.
+     * A zero address disables the role. The pauser may flip the pause flag
+     * via `setPaused` but has NO other governor surface.
+     */
+    @method({ name: 'newPauser', type: ABIDataTypes.ADDRESS })
+    @emit('PauserSet')
+    @nonReentrant
+    public setPauser(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const newPauser: Address = calldata.readAddress();
+        const old = this._pauser.value;
+        this._pauser.value = newPauser;
+        this.emitEvent(new PauserSet(old, newPauser));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Set/rotate/disable the dedicated treasury. Governor-only. The treasury
+     * is the PINNED sink for BOTH `withdrawFees` AND `emergencyWithdraw`
+     * (mirrors EVM `BridgeEscrow.setTreasury`, SAME terminology), so protocol
+     * revenue + emergency drains land on a dedicated address rather than the
+     * governor key. A zero address disables fee sweeps + emergency withdrawals
+     * (fail-closed).
+     */
+    @method({ name: 'newTreasury', type: ABIDataTypes.ADDRESS })
+    @emit('TreasurySet')
+    @nonReentrant
+    public setTreasury(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const newTreasury: Address = calldata.readAddress();
+        const old = this._treasury.value;
+        this._treasury.value = newTreasury;
+        this.emitEvent(new TreasurySet(old, newTreasury));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Set/rotate/disable the dedicated guardian (incident-response) role.
+     * Governor-only. Mirrors EVM `BridgeEscrow.setGuardian`, SAME terminology.
+     * The guardian may FREEZE (`setPaused(true)`), `cancelVoucher`,
+     * `migrateSignerSet`, and is the SOLE caller of `emergencyWithdraw`. It may
+     * NOT unpause. A zero address disables the role.
+     */
+    @method({ name: 'newGuardian', type: ABIDataTypes.ADDRESS })
+    @emit('GuardianSet')
+    @nonReentrant
+    public setGuardian(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        const newGuardian: Address = calldata.readAddress();
+        const old = this._guardian.value;
+        this._guardian.value = newGuardian;
+        this.emitEvent(new GuardianSet(old, newGuardian));
         return new BytesWriter(0);
     }
 
@@ -2620,6 +3661,14 @@ export class BridgeDepository extends ReentrancyGuard {
             this.address,
             parsed.wrappedToken,
         );
+        // FINDING-003 (audit 2026-05-26): require the recomputed flowId
+        // to equal `parsed.flowId` so every downstream effect on
+        // `flowIdMint` (status/minAmount/dailyLimit/inventory/tip) is
+        // provably the flow the signer signed for. See the matching gate
+        // in claimReleaseWithVoucher for rationale.
+        if (!u256.eq(flowIdMint, parsed.flowId)) {
+            throw new Revert('BridgeDepository: voucher flowId mismatch');
+        }
         if (this._flowExists.get(flowIdMint).isZero()) {
             throw new Revert('BridgeDepository: flow not registered');
         }
@@ -2668,13 +3717,18 @@ export class BridgeDepository extends ReentrancyGuard {
 
         let recipientNetAmountMint: u256 = parsed.netAmount;
         if (!parsed.relayerTip.isZero()) {
+            // FINDING-006 (audit 2026-05-26): cross-multiply instead of
+            // floored division so `tipCapBps == 0` cannot still permit a
+            // sub-1-bp tip, and explicitly reject `tip > netAmount` so the
+            // subtraction below cannot underflow on a malformed
+            // signer-bound voucher.
+            if (u256.gt(parsed.relayerTip, parsed.netAmount)) {
+                throw new Revert('BridgeDepository: tip exceeds flow cap');
+            }
             const tipCapBpsMint: u32 = this._flowTipCapBps.get(flowIdMint).toU32();
-            // bps = (tip * 10_000) / netDst — integer divide, mirrors EVM.
-            const bpsMint: u256 = SafeMath.div(
-                SafeMath.mul(parsed.relayerTip, u256.fromU32(10000)),
-                parsed.netAmount,
-            );
-            if (u256.gt(bpsMint, u256.fromU32(tipCapBpsMint))) {
+            const tipScaledMint: u256 = SafeMath.mul(parsed.relayerTip, u256.fromU32(10000));
+            const capScaledMint: u256 = SafeMath.mul(parsed.netAmount, u256.fromU32(tipCapBpsMint));
+            if (u256.gt(tipScaledMint, capScaledMint)) {
                 throw new Revert('BridgeDepository: tip exceeds flow cap');
             }
             // Mint tip to tx.sender FIRST, then mint residual to recipient.
@@ -2733,6 +3787,30 @@ export class BridgeDepository extends ReentrancyGuard {
     public paused(_calldata: Calldata): BytesWriter {
         const response = new BytesWriter(1);
         response.writeBoolean(this._paused.value);
+        return response;
+    }
+
+    @view
+    @returns({ name: 'pauser', type: ABIDataTypes.ADDRESS })
+    public pauser(_calldata: Calldata): BytesWriter {
+        const response = new BytesWriter(ADDRESS_BYTE_LENGTH);
+        response.writeAddress(this._pauser.value);
+        return response;
+    }
+
+    @view
+    @returns({ name: 'treasury', type: ABIDataTypes.ADDRESS })
+    public treasury(_calldata: Calldata): BytesWriter {
+        const response = new BytesWriter(ADDRESS_BYTE_LENGTH);
+        response.writeAddress(this._treasury.value);
+        return response;
+    }
+
+    @view
+    @returns({ name: 'guardian', type: ABIDataTypes.ADDRESS })
+    public guardian(_calldata: Calldata): BytesWriter {
+        const response = new BytesWriter(ADDRESS_BYTE_LENGTH);
+        response.writeAddress(this._guardian.value);
         return response;
     }
 
@@ -2967,6 +4045,20 @@ function buildBurnReplayKey(
 }
 
 /**
+ * #55 — per-burn replay key for the trustless burn-side recovery (`refundBurn`).
+ * `burnId = sha256(burnTxHash(32) ‖ burnNonce(32))`. The (txHash, nonce) tuple
+ * is globally unique per burn, so this key cannot collide across burns even if
+ * a bare nonce could ever be re-assigned under a deep reorg. The SAME derivation
+ * is used by the `isBurnRefunded` view, so off-chain callers can pre-check.
+ */
+function _burnRefundId(burnTxHash: u256, burnNonce: u256): u256 {
+    const buf = new BytesWriter(32 + 32);
+    buf.writeU256(burnTxHash);
+    buf.writeU256(burnNonce);
+    return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
+}
+
+/**
  * sha256 hash of a 32-byte address — used as the StoredMapU256 key for
  * `_wrapMinFee[wrappedToken]`.
  */
@@ -3071,6 +4163,17 @@ function _opnetAddrToU256(addr: Address): u256 {
         out[i] = addr[i];
     }
     return u256.fromUint8ArrayBE(out);
+}
+
+/**
+ * Inverse of `_opnetAddrToU256` — reconstruct a 32-byte OPNet Address from
+ * its big-endian u256 identity representation. Used by the stranded-lock
+ * refund path to recover the recorded locker + token for the payout
+ * transfer. `u256.toUint8Array(true)` yields the 32 big-endian bytes that
+ * `_opnetAddrToU256` packed, so the round trip is exact.
+ */
+function _u256ToOpnetAddr(v: u256): Address {
+    return Address.fromUint8Array(v.toUint8Array(true));
 }
 
 /**

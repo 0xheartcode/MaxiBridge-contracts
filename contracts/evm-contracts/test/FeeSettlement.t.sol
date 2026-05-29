@@ -22,8 +22,7 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 ///         This suite covers the new invariants directly. Tests in the
 ///         original `FeeAccounting.t.sol` that assume lock-time accrual
 ///         (`test_Accrual_*`, `test_WithdrawFees_*` without first warping +
-///         settling) need to be rewritten against the new spec — see
-///         `docs/PR62_FIX_SKETCH.md` for the punch list.
+///         settling) need to be rewritten against the new spec.
 contract FeeSettlementTest is Test {
     TestableBridgeEscrow internal impl;
     TestableBridgeEscrow internal escrow;

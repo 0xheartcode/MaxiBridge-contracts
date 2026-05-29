@@ -42,6 +42,7 @@ const STATUS_DISABLED = 0n;
 const STATUS_ACTIVE = 1n;
 const STATUS_PAUSED = 2n;
 const STATUS_DRAINING = 3n;
+const STATUS_RETIRED = 4n;
 
 async function setupDepository(): Promise<BridgeDepository> {
     const depositoryAddress = Blockchain.generateRandomAddress();
@@ -285,13 +286,10 @@ await opnet('BridgeDepository — PR α — status transitions', async (vm: OPNe
         await expectRevert(() => depository.resumeFlow(flowId), 'not paused');
     });
 
-    await vm.it('drainFlow — one-way (no resume back)', async () => {
+    await vm.it('drainFlow — allowed from active', async () => {
         await depository.drainFlow(flowId);
         const f = await depository.getFlow(flowId);
         Assert.expect(f[1]).toEqual(STATUS_DRAINING);
-
-        await expectRevert(() => depository.resumeFlow(flowId), 'no resume from draining');
-        await expectRevert(() => depository.pauseFlow(flowId), 'no pause from draining');
     });
 
     await vm.it('drainFlow — allowed from paused', async () => {
@@ -299,6 +297,70 @@ await opnet('BridgeDepository — PR α — status transitions', async (vm: OPNe
         await depository.drainFlow(flowId);
         const f = await depository.getFlow(flowId);
         Assert.expect(f[1]).toEqual(STATUS_DRAINING);
+    });
+
+    await vm.it('drainFlow — rejects already draining', async () => {
+        await depository.drainFlow(flowId);
+        await expectRevert(() => depository.drainFlow(flowId), 'already draining');
+    });
+
+    // Draining is REVERSIBLE — resumeFlow flips it back to ACTIVE.
+    await vm.it('drainFlow — reversible (resume back to active)', async () => {
+        await depository.drainFlow(flowId);
+        await depository.resumeFlow(flowId);
+        const f = await depository.getFlow(flowId);
+        Assert.expect(f[1]).toEqual(STATUS_ACTIVE);
+    });
+
+    // Governor can freeze a draining flow (incident response from any state).
+    await vm.it('pauseFlow — allowed from draining', async () => {
+        await depository.drainFlow(flowId);
+        await depository.pauseFlow(flowId);
+        const f = await depository.getFlow(flowId);
+        Assert.expect(f[1]).toEqual(STATUS_PAUSED);
+    });
+
+    // ─── retireFlow (non-terminal decommission flag) ──────────────────────
+
+    await vm.it('retireFlow — governor only', async () => {
+        setSender(stranger);
+        await expectRevert(() => depository.retireFlow(flowId), 'non-gov');
+
+        setSender(deployer);
+        await depository.retireFlow(flowId);
+        const f = await depository.getFlow(flowId);
+        Assert.expect(f[1]).toEqual(STATUS_RETIRED);
+    });
+
+    await vm.it('retireFlow — rejects unknown flowId', async () => {
+        await expectRevert(() => depository.retireFlow(0xdeadbeefn), 'unknown');
+    });
+
+    await vm.it('retireFlow — allowed from draining', async () => {
+        await depository.drainFlow(flowId);
+        await depository.retireFlow(flowId);
+        const f = await depository.getFlow(flowId);
+        Assert.expect(f[1]).toEqual(STATUS_RETIRED);
+    });
+
+    await vm.it('retireFlow — allowed from paused', async () => {
+        await depository.pauseFlow(flowId);
+        await depository.retireFlow(flowId);
+        const f = await depository.getFlow(flowId);
+        Assert.expect(f[1]).toEqual(STATUS_RETIRED);
+    });
+
+    await vm.it('retireFlow — rejects already retired', async () => {
+        await depository.retireFlow(flowId);
+        await expectRevert(() => depository.retireFlow(flowId), 'already retired');
+    });
+
+    // RETIRED is NOT terminal — resumeFlow brings it back to ACTIVE.
+    await vm.it('retireFlow — reversible (resume back to active)', async () => {
+        await depository.retireFlow(flowId);
+        await depository.resumeFlow(flowId);
+        const f = await depository.getFlow(flowId);
+        Assert.expect(f[1]).toEqual(STATUS_ACTIVE);
     });
 });
 

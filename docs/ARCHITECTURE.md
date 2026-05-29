@@ -53,7 +53,7 @@ Used by `BridgeDepository.claimMintWithVoucher`. The contract hashes the preimag
 | `grossDstAmount` | 32B | Destination-side gross (= grossSrcAmount until decimal-aware AmountPolicy lands) |
 | `feeDstAmount` | 32B | 0.5% fee on destination side |
 | `netDstAmount` | 32B | Amount minted to recipient |
-| `relayerTip` | 16B | Permissionless tip (signed over; payout in a future PR) |
+| `relayerTip` | 16B | Permissionless tip — PAID OUT on claim (mint-split on OPNet, transfer-carve on EVM; both emit `RelayerTipPaid`; capped per-flow by `tipCapBps`) |
 | `signerEpoch` | 4B | Must equal current on-chain epoch |
 | `voucherId` | 32B | Unpredictable server nonce — per-voucher replay guard |
 | `flowId` | 32B | Flow binding (#68) — appended last; the depository routes the claim by `_flowMode[flowId]`, not by `_tokenMode` |
@@ -173,24 +173,154 @@ The `bridge_config` SQLite table holds namespaced string keys:
 
 ---
 
-## Token Mode & Dest-Method Tagging
+## Token Mode, Custody/Mint Roles & Call Surface
 
-The bridge supports five token flow modes (on-chain enum on `BridgeEscrow`):
+The bridge supports **five flow modes (0–4)**, chosen **per-flow by `flowId`** — the
+route's mode is read from `_flowMode[flowId]` on BOTH chains (#68 N:M), *not* from a
+per-token stamp. Every mode is **bidirectional**, and one `(evmToken, opnetToken)`
+pair can back several modes at once.
 
-| Mode | Name | EVM → OPNet | OPNet → EVM |
-|------|------|-------------|-------------|
-| 0 | `WRAPPED` | lock → `claimMintWithVoucher` | burn → `claim` |
-| 1 | `INVERSE_WRAPPED` | lock → `claimMintWithVoucher` | burn → `claimReleaseWithVoucher` |
-| 2 | `NATIVE_BURN_MINT` | burn → `claimMintWithVoucher` | burn → `claim` |
-| 3 | `POOLED_LOCK_RELEASE` | lock → `claimMintWrapped` | burn → `claim` |
-| 4 | `POOLED_LOCK_VEST` | lock → `claimMintWrapped` | burn → `claim` → deposits into per-flow `VestingVault` (linear drip) |
+### Why exactly five
 
-Mode 4 is identical to mode 3 on the source/lock side; only the EVM destination
-dispatch differs — the released amount lands in a per-flow `VestingVault` that
-drips linearly to the beneficiary over a fixed block window. See `CLAUDE.md` §5
-for the two-step setup and reorg/clawback procedure.
+The modes are not arbitrary — they enumerate every legal combination of **what kind
+of asset lives on each chain**, plus one payout variant. For any side, the bridge
+either **custodies** the real asset (lock/release moves it in and out of escrow) or
+holds **mint** authority over a wrapped representation (mint/burn creates/destroys
+supply). Two chains × two roles = four combinations, and mode 4 layers a payout shape
+on top of mode 3:
 
-When the indexer processes a deposit or withdrawal event it resolves the token's mode via `GET /api/tokens/:address/mode` (which proxies the on-chain `tokenMode` view) and stores `token_mode`, `source_event_type`, and `dest_method` on the DB row. The dApp reads `dest_method` from the status API and calls the correct claim function — `ClaimButton` never hard-codes a function name.
+```
+Asset NATIVE to one chain (bridge can't mint it — e.g. canonical USDC, MOTO)?
+├── native to EVM   → mode 0  WRAPPED            (EVM custody / OPNet mint)
+└── native to OPNet → mode 1  INVERSE_WRAPPED     (OPNet custody / EVM mint)
+
+Asset is dual-chain native (bridge holds mint authority on BOTH)?
+└── supply MOVES between chains, burn-here = mint-there → mode 2  NATIVE_BURN_MINT
+
+Fixed supply, pre-funded reserves on each side, NO minting?
+├── pay destination all-at-once → mode 3  POOLED_LOCK_RELEASE
+└── destination drips over time → mode 4  POOLED_LOCK_VEST  (= mode 3 + VestingVault)
+```
+
+You don't "pick mode 2" for an existing token — it requires deploying a token whose
+mint authority is handed to the bridge on both chains. Custody modes (0/1) are forced
+by *where the issuance authority already lives* (you can't mint canonical USDC). Pooled
+modes (3/4) are for projects that want one fixed supply shared across chains. Mode 4 is
+the only "payout shape" distinction rather than a custody distinction — it exists as a
+separate mode (not a flag on 3) because its `claim` leg calls `VestingVault.depositFor`
+instead of a plain transfer: different external interface, different clawback semantics.
+
+### Custody vs mint is PER-MODE, not per-chain
+
+"Which chain holds the real asset (lock / pool = **custody**) vs which issues a
+wrapped representation (**mint**)" **flips by mode** — it is NOT a fixed property of
+EVM vs OPNet:
+
+| Mode | EVM role | OPNet role |
+|------|----------|------------|
+| 0 `WRAPPED` | **custody** — locks USDC/USDT | **mint** — wUSDC/wUSDT |
+| 1 `INVERSE_WRAPPED` | **mint** — WrappedERC20 | **custody** — locks canonical OP20 |
+| 2 `NATIVE_BURN_MINT` | mint/burn (no lock) | mint/burn (no lock) |
+| 3 `POOLED_LOCK_RELEASE` | **custody** — pre-funded pool | **custody** — pre-funded pool |
+| 4 `POOLED_LOCK_VEST` | **custody** — pool; release vests | **custody** — pre-funded pool |
+
+Mode 0 (USDC↔wUSDC, the launch flow) is the *only* one where EVM is purely custody
+and OPNet purely mint. Because it dominates today it's tempting to over-generalize
+"EVM = custody, OPNet = mint" — but architecturally either chain can be either role.
+This is precisely **why OPNet carries the same `treasury` / `guardian` /
+`emergencyWithdraw` lattice as EVM**: it genuinely custodies real OP20 in modes 1/3/4,
+so those balances need the same pinned-recovery protection EVM gives its locked reserves.
+
+### Call surface per mode (both directions)
+
+Source side **locks or burns**; destination side **mints or releases**. The mode
+(via `flowId`) decides which:
+
+| Mode | Direction | Source call | Destination call |
+|------|-----------|-------------|------------------|
+| 0 | EVM→OPNet (deposit) | EVM `lock` | OPNet `claimMintWithVoucher` (mint) |
+| 0 | OPNet→EVM (withdraw) | OPNet `burnForRelease` | EVM `claim` (release USDC) |
+| 1 | OPNet→EVM (deposit) | OPNet `lockForBridge` | EVM `claimMintWrapped` (mint) |
+| 1 | EVM→OPNet (withdraw) | EVM `burnForRelease` | OPNet `claimReleaseWithVoucher` (release) |
+| 2 | EVM→OPNet | EVM `burnForRelease` | OPNet `claimMintWithVoucher` (mint) |
+| 2 | OPNet→EVM | OPNet `burnForRelease` | EVM `claimMintWrapped` (mint) |
+| 3 | EVM→OPNet | EVM `lock` | OPNet `claimReleaseWithVoucher` (release from pool) |
+| 3 | OPNet→EVM | OPNet `lockForBridge` | EVM `claim` (release from pool) |
+| 4 | EVM→OPNet | EVM `lock` | OPNet `claimReleaseWithVoucher` (release from pool) |
+| 4 | OPNet→EVM | OPNet `lockForBridge` | EVM `claim` → `VestingVault.depositFor` (linear drip) |
+
+Mode 4 is identical to mode 3 on every leg except the **EVM-release** leg, where the
+released amount lands in a per-flow `VestingVault` that drips linearly to the
+beneficiary over a fixed block window. See `CLAUDE.md` §5 for the two-step setup and
+reorg/clawback procedure.
+
+### Cross-chain symmetry of the entry points
+
+The per-chain call surface pairs **1:1** — each chain has BOTH a mint-claim and a
+release-claim:
+
+| Role | EVM `BridgeEscrow` | OPNet `BridgeDepository` |
+|------|--------------------|--------------------------|
+| source lock | `lock` | `lockForBridge` |
+| claim → **MINT** wrapped | `claimMintWrapped` | `claimMintWithVoucher` |
+| claim → **RELEASE** (escrow/pool/vault) | `claim` | `claimReleaseWithVoucher` |
+| burn wrapped | `WrappedERC20.burnForRelease` | `WrappedOP20.burnForRelease` |
+| provision pool | `provisionInventory` | `provisionInventoryOpNet` |
+| drain pool | `drainFlow` | `drainInventoryOpNet` |
+| lock-refund (stranded lock → return principal) | `markDepositRefundable` + `refundLockedDeposit` | `markLockRefundable` + `refundLock` |
+| burn-refund (re-mint after dest cancelled) | `refundBurn` | `refundBurn` |
+| roles | `setTreasury` / `setGuardian` / `setPauser` / `emergencyWithdraw` / `withdrawFees` | `setTreasury` / `setGuardian` / `setPauser` / `emergencyWithdraw` / `withdrawFees` |
+
+**The transfer AND recovery surfaces are now symmetric, and every mode is bidirectional.**
+The lock-refund pair and the `refundBurn` re-mint exist on BOTH chains; the role lattice
+(rotatable treasury/guardian, freeze-only pauser, treasury-pinned emergency drain) is
+mirrored. `refundBurn` is a mint-authority primitive on both sides → **dedicated re-audit
+before mainnet.** Two deliberate asymmetries remain, each with a reason:
+
+- **Signature scheme** — EVM verifies EIP-712 **ECDSA**; OPNet verifies a 540-byte
+  **ML-DSA** voucher. Intrinsic to the two L1s. A side effect: the OPNet function name
+  is *consensus-bound* (the voucher preimage embeds `sha256('claimMintWithVoucher(bytes,bytes)')`),
+  so OPNet names are verbose (`…WithVoucher`/`…ForBridge`) and can't be renamed freely;
+  EVM's EIP-712 binds the struct not the function name, so EVM names are terser
+  (`claim`, `lock`). Cosmetic divergence, real cause.
+- **`confirmBurn`** — OPNet's positive burn attestation for inverse/pooled inventory
+  accounting (#44) has no EVM twin; EVM's inventory accounting is local to `claim`. This
+  is an accounting-shape difference, not a recovery gap (the recovery primitives above
+  are fully mirrored).
+
+### Mode selection & routing — who decides, and how
+
+The mode is a property of the **flow** (a route), not the token, and it's chosen at
+flow-registration time:
+
+- **Governance decides which flows exist.** Only the governor can call `addFlow`
+  (`BridgeEscrow.addFlow(FlowAddParams{ mode, … })` on EVM,
+  `BridgeDepository.addFlow({ mode, … })` on OPNet), which returns
+  `flowId = keccak256(identity tuple)`. The two sides must agree on the mode or the
+  route's `claim` reverts. **Mode is immutable for a given `flowId`** — there is no
+  `setFlowMode`. To "change a token's mode" you register a new flow and drain the old
+  one (`drainFlow` → DRAINING, no new locks/mints), or leave both live.
+- **The user picks the flow, from a curated menu.** Each transfer carries a `flowId`;
+  the user (really, the dApp) selects from the flows governance already registered for
+  that exact token pair. This is *not* a free choice — an unregistered `flowId`, a
+  token-binding mismatch, an inactive/paused/draining flow, or an over-cap/over-limit
+  transfer all revert. The `flowId` is also baked into the **signed voucher preimage**
+  and recomputed + asserted on claim (FINDING-003), so a user can't repoint a
+  server-signed voucher at a different flow. Think "pick a lane at a toll booth someone
+  else built and approved," not "decide the rules."
+- **N:M routing.** Because the mode lives on the flow, one `(evmToken, opnetToken)`
+  pair can back *several* flows of different modes simultaneously (e.g. MOTO with both
+  a pooled mode-3 route and a vesting mode-4 route); the user picks per transfer. In the
+  common case a pair has exactly one flow and the dApp fills the `flowId` in silently —
+  no mode picker is shown.
+- **Operator responsibility.** Because users select from whatever is registered and
+  `ACTIVE`, a misconfigured flow is a *live* flow the moment it's added. That's why
+  `addFlow` is governor-only, why mode-4 flows defensively reject claims until
+  `setFlowVestingVault` is wired, and why each custody-side flow must be separately
+  funded via `provisionInventory*` (a mode-3 flow with zero inventory rejects every
+  claim even if a sibling flow on the same pair is healthy).
+
+When the indexer processes a deposit or withdrawal event it resolves the flow's mode (via the flowId on the source event, falling back to the on-chain mode view) and stores `token_mode`, `source_event_type`, and `dest_method` on the DB row. The dApp reads `dest_method` from the status API and calls the correct claim function — `ClaimButton` never hard-codes a function name.
 
 ---
 

@@ -403,6 +403,48 @@ await opnet('BridgeDepository — PR β.2.payout-opnet — mint path', async (vm
             await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
         }).toThrow();
     });
+
+    // ─── FINDING-006 regressions (audit 2026-05-26) ─────────────────────────
+
+    await vm.it('FINDING-006: tip > 0 with tipCapBps = 0 reverts (was silently accepted)', async () => {
+        // Pre-fix: bps = (tip * 10_000) / netAmount → floored to 0 when
+        // tip * 10_000 < netAmount → check `0 > 0` is false → PASSED.
+        // Post-fix: cross-multiply `tip * 10_000 > netAmount * 0` → reverts.
+        await registerFlow(setup, { tipCapBps: 0n });
+        const { depository, signerWallet } = setup;
+        // netAmount = 995_000; tip = 1 → tip * 10_000 = 10_000 < 995_000.
+        const fields = { ...defaultFields(setup, alice), relayerTip: 1n };
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        }).toThrow();
+    });
+
+    await vm.it('FINDING-006: tip exactly at cap is accepted (boundary)', async () => {
+        // tipCapBps = 100 → max tip = netAmount * 100 / 10_000 = 1% = 9_950.
+        await registerFlow(setup, { tipCapBps: 100n });
+        const { depository, wusdc, signerWallet } = setup;
+        const fields = { ...defaultFields(setup, alice), relayerTip: 9_950n };
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(alice);
+        await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        Assert.expect(await wusdc.balanceOf(alice)).toEqual(fields.netAmount);
+    });
+
+    await vm.it('FINDING-006: tip > netAmount reverts before underflow', async () => {
+        // Defensive: a malformed signer-bound voucher can name tip > netAmount.
+        // Pre-fix this would underflow `netAmount - tip`. Post-fix the explicit
+        // `tip > netAmount` check fires before the subtraction.
+        await registerFlow(setup, { tipCapBps: 200n });
+        const { depository, signerWallet } = setup;
+        const fields = { ...defaultFields(setup, alice), relayerTip: 1_000_000n }; // > netAmount=995_000
+        const { preimage, hash } = buildVoucher(fields);
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        }).toThrow();
+    });
 });
 
 // ════════════════════════════════════════════════════════════════════════════
