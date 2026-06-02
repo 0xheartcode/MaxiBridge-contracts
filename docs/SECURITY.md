@@ -115,6 +115,25 @@ Even with valid signatures, every flow is bounded: `cap`, rolling 24h `dailyLimi
 `drained` independently. This bounds blast radius per route — a compromised flow can't
 drain the whole bridge.
 
+## 7b. Burn routing — accepted-by-design (auditor notes)
+
+Two burn-side asymmetries are **deliberate, not gaps**:
+
+- **`flowId` is opaque on-chain (BOTH wrappers).** `burnForRelease` records `flowId` in its
+  event but does NOT validate it on-chain. Validation is off-chain (the signer refuses to
+  sign a release for an invalid flow / recipient) and recoverable (`refundBurn` re-mints a
+  stranded burn). An on-chain check was **rejected**: it would require a cross-contract read
+  into the bridge's flow registry — permanent coupling + gas on a NON-upgradeable hot path —
+  is redundant with the signer gate, and still would not catch the likelier user error (a
+  malformed recipient). A wrapper-side `flowId` allowlist was **also rejected**: it would
+  duplicate the registry → drift (the LOW-2 class we just eliminated). Proportionate guard:
+  a **frontend pre-check** of `flowId` + recipient before the user burns.
+- **MED-1 — EVM `WrappedERC20.burnForRelease` has no `destChainId` allowlist.** EVM→OPNet is
+  single-destination (OPNet), so there is no "wrong chain" to gate. OPNet `WrappedOP20` needs
+  its M-01 destChain allowlist only because OPNet burns to MULTIPLE EVM chains — and that
+  check is **self-contained in-wrapper** (`_supportedDestChains`, with a governance-set
+  EVM-family marker per LOW-2), unlike `flowId`, which would require the bridge registry.
+
 ## 8. Reorg defense
 
 - **Confirmations wait** (`EVM_CONFIRMATIONS` / `OPNET_CONFIRMATIONS`) before signing.
