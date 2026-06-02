@@ -56,6 +56,7 @@ export class WrappedOP20 extends OP20 {
         'setSupportedDestChain',
         ABIDataTypes.UINT32,
         ABIDataTypes.BOOL,
+        ABIDataTypes.BOOL,
     );
     private readonly isSupportedDestChainSelector: number = encodeNumericSelector(
         'isSupportedDestChain()',
@@ -244,11 +245,16 @@ export class WrappedOP20 extends OP20 {
 
     // ─── M-01: supported destination chains ─────────────────────────────────
 
-    public async setSupportedDestChain(destChainId: number, enabled: boolean): Promise<void> {
+    public async setSupportedDestChain(
+        destChainId: number,
+        enabled: boolean,
+        isEvmFamily: boolean,
+    ): Promise<void> {
         const w = new BinaryWriter();
         w.writeSelector(this.setSupportedDestChainSelector);
         w.writeU32(destChainId);
         w.writeBoolean(enabled);
+        w.writeBoolean(isEvmFamily);
         await this.getResponse(w.getBuffer());
     }
 

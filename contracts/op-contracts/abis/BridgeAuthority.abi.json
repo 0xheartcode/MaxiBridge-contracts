@@ -120,6 +120,61 @@
             "outputs": []
         },
         {
+            "name": "setUpgradeAuthority",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "newUpgradeAuthority",
+                    "type": "ADDRESS"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "proposeUpgrade",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": []
+        },
+        {
+            "name": "cancelProposedUpgrade",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": []
+        },
+        {
+            "name": "upgradeAuthority",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "upgradeAuthority",
+                    "type": "ADDRESS"
+                }
+            ]
+        },
+        {
+            "name": "pendingUpgradeAuthorized",
+            "type": "View",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "pendingUpgradeAuthorized",
+                    "type": "BOOL"
+                }
+            ]
+        },
+        {
             "name": "governor",
             "type": "View",
             "payable": false,

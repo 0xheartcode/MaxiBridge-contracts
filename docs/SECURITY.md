@@ -96,7 +96,11 @@ The re-mint paths (`refundBurn`) create supply — the scariest surface. Guardra
   signer set can't mint unbounded amounts across fabricated burn tuples.
 - **Mode allowlist** — `refundBurn` only mints where the bridge legitimately holds mint
   authority (modes 0/2 OPNet, 1/2 EVM).
-- **`maxSupply` ceiling** on wrapped tokens — hard cap regardless of voucher.
+- **`maxSupply` ceiling — OPNet `WrappedOP20` only.** Its OP20 base enforces a fixed
+  `maxSupply` (set ~`1e24` at deploy = nominal/non-binding, and permanent since the token
+  is non-upgradeable). **EVM `WrappedERC20` is intentionally uncapped** (no `maxSupply` /
+  `ERC20Capped`) — its mint path is bounded by per-flow `dailyLimit` + the reserve/TVL
+  divergence monitor + guardian pause, not a hard ceiling (E-1).
 - **`whenNotPaused` / `requireNotPaused`** — pause halts mint authority system-wide.
 - **ACTIVE-only** — a DRAINING (winding-down) flow can't be minted into.
 - **`burnId` binds `wrappedToken` + `burner`** — per-token burn nonces can't collide and

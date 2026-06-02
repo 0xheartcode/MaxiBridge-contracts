@@ -183,7 +183,7 @@ export interface IWrappedOP20 extends IOP_NETContract {
     isMinter(): Promise<IsMinter>;
     authorityAddress(): Promise<AuthorityAddress>;
     setPaused(paused: boolean): Promise<SetPaused>;
-    setSupportedDestChain(destChainId: number, enabled: boolean): Promise<SetSupportedDestChain>;
+    setSupportedDestChain(destChainId: number, enabled: boolean, isEvmFamily: boolean): Promise<SetSupportedDestChain>;
     isSupportedDestChain(): Promise<IsSupportedDestChain>;
     mintTo(to: Address, amount: bigint): Promise<MintTo>;
     burnForRelease(

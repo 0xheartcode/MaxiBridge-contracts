@@ -135,8 +135,13 @@ export class WrappedOP20 extends OP20S {
         //
         // Peg authority is ALWAYS the deployer (also governor). Rotate later
         // via transferPegAuthority + acceptPegAuthority if needed.
-        let maxSupply: u256 = u256.fromString('1000000000000000000000000'); // 1e24 (soft cap, per-asset)
-        let decimals: u8 = 6;
+        // Uncapped by default — u256 max. maxSupply is an OP20-mandated field
+        // (a NON-binding sanity ceiling, NOT the supply control). The real,
+        // governance-raisable per-token ceiling is the per-flow `cap` on the
+        // bridge. The deploy script may override this via calldata if a hard
+        // token-level cap is genuinely wanted for a fixed-supply asset.
+        let maxSupply: u256 = u256.Max;
+        let decimals: u8 = 18; // OP20 standard default; stablecoins pass 6 via calldata
         let name: string = 'Wrapped Bridge Token';
         let symbol: string = 'wBRIDGE';
         let initialPegRate: u256 = u256.fromU64(100_000_000); // 1:1 USD, 8 decimals
@@ -357,6 +362,7 @@ export class WrappedOP20 extends OP20S {
     @method(
         { name: 'destChainId', type: ABIDataTypes.UINT32 },
         { name: 'enabled', type: ABIDataTypes.BOOL },
+        { name: 'isEvmFamily', type: ABIDataTypes.BOOL },
     )
     @emit('SupportedDestChainSet')
     public setSupportedDestChain(calldata: Calldata): BytesWriter {
@@ -366,10 +372,21 @@ export class WrappedOP20 extends OP20S {
             throw new Revert('WrappedOP20: zero destChainId');
         }
         const enabled: boolean = calldata.readBoolean();
-        this._supportedDestChains.set(
-            u256.fromU32(destChainId),
-            enabled ? u256.One : u256.Zero,
-        );
+        // LOW-2 — EVM-family is a per-chain GOVERNANCE flag, not a hardcoded
+        // chainId list, so `burnForRelease`'s 20-byte-address padding check can
+        // never drift when a new EVM chain is serviced. This is essential
+        // because the token is NON-UPGRADEABLE: a hardcoded list could never be
+        // extended to a new EVM chain without redeploying the whole wrapper.
+        // Stored marker: 0 = disabled, 1 = enabled non-EVM (32-byte native
+        // recipient), 2 = enabled EVM-family (recipient is a 20-byte address,
+        // high 12 bytes must be zero). Forcing the flag at enable time is
+        // fail-safe — a chain can't be enabled without deciding its encoding.
+        const isEvmFamily: boolean = calldata.readBoolean();
+        let stored: u256 = u256.Zero;
+        if (enabled) {
+            stored = isEvmFamily ? u256.fromU32(2) : u256.One;
+        }
+        this._supportedDestChains.set(u256.fromU32(destChainId), stored);
         this.emitEvent(new SupportedDestChainSet(destChainId, enabled));
         return new BytesWriter(0);
     }
@@ -478,15 +495,18 @@ export class WrappedOP20 extends OP20S {
         // M-01 — only allow burns to a destination the bridge services.
         // A burn to an unsupported chain would destroy tokens with no
         // release voucher ever signed and no on-chain refund path.
-        if (this._supportedDestChains.get(u256.fromU32(destChainId)).isZero()) {
+        const destEntry: u256 = this._supportedDestChains.get(u256.fromU32(destChainId));
+        if (destEntry.isZero()) {
             throw new Revert('WrappedOP20: unsupported destChainId');
         }
 
-        // EVM-family padding check: for Ethereum mainnet (1) and Sepolia
-        // (11155111), the high 12 bytes of the 32-byte recipient must be
-        // zero so the low 20 bytes form a valid 20-byte address the server
-        // can lift into EIP-712.
-        if (destChainId == 1 || destChainId == 11155111) {
+        // LOW-2 — padding is gated on the per-chain EVM-family marker (== 2),
+        // NOT a hardcoded chainId list, so it can never drift when a new EVM
+        // chain is enabled. For an EVM-family destination the 32-byte recipient
+        // is a 20-byte address: the high 12 bytes MUST be zero so the server can
+        // lift the low 20 into EIP-712. Non-EVM destinations (marker == 1) carry
+        // a full 32-byte native recipient and impose no padding constraint.
+        if (destEntry == u256.fromU32(2)) {
             for (let i: i32 = 0; i < 12; i++) {
                 if (ethRecipient[i] != 0) {
                     throw new Revert('WrappedOP20: EVM recipient upper 12 bytes must be zero');

@@ -8,6 +8,7 @@ import {
 import { ReentrancyGuard } from '@btc-vision/btc-runtime/runtime/contracts/ReentrancyGuard';
 import { StoredAddress } from '@btc-vision/btc-runtime/runtime/storage/StoredAddress';
 import { StoredU256 } from '@btc-vision/btc-runtime/runtime/storage/StoredU256';
+import { StoredBoolean } from '@btc-vision/btc-runtime/runtime/storage/StoredBoolean';
 import { ADDRESS_BYTE_LENGTH } from '@btc-vision/btc-runtime/runtime/utils';
 import { EMPTY_POINTER } from '@btc-vision/btc-runtime/runtime/math/bytes';
 import { Revert } from '@btc-vision/btc-runtime/runtime/types/Revert';
@@ -67,12 +68,38 @@ export class BridgeAuthority extends ReentrancyGuard {
     private _wusdc: StoredAddress = new StoredAddress(Blockchain.nextPointer);
     private _wusdt: StoredAddress = new StoredAddress(Blockchain.nextPointer);
 
+    // ── Option C (O-4 fix) — governance-gated upgrade authorization ──
+    // Mirrors BridgeDepository so BOTH governance contracts authorize upgrades
+    // identically. The stock UpdatablePlugin gates submit/applyUpdate on the
+    // WELDED `contractDeployer`; on its own that means handing `_governor` to a
+    // new wallet would leave deployer != governor and FREEZE upgrades — no
+    // single sender could satisfy both the plugin's deployer gate AND a
+    // `tx.sender == governor` onUpdate gate. So we do NOT require deployer ==
+    // governor. Instead we split AUTHORIZE from EXECUTE: governance arms a
+    // one-shot flag via `proposeUpgrade()`, the deployer EXECUTES `applyUpdate`,
+    // and `onUpdate` consumes the flag. Deployer + governance form a 2-of-2 —
+    // neither can upgrade alone, and the governor can be handed off freely.
+    //
+    // Append-only: appended AFTER `_wusdt` (the prior last slot) to preserve
+    // the upgrade discipline. Unset slots read zero (Address.zero / false) =
+    // correct fail-closed base: a zero `_upgradeAuthority` keeps the legacy
+    // deployer-only bootstrap path active until the governor wires it via
+    // `setUpgradeAuthority`.
+    private _upgradeAuthority: StoredAddress = new StoredAddress(Blockchain.nextPointer);
+    private _pendingUpgradeAuthorized: StoredBoolean = new StoredBoolean(
+        Blockchain.nextPointer,
+        false,
+    );
+
     public constructor() {
         super();
 
-        // Phase 2.2 — 7-day upgrade timelock (1008 blocks ≈ 7 days at
-        // 10 min/block). Matches BridgeDepository.ts and WrappedOP20.ts.
-        this.registerPlugin(new UpdatablePlugin(1008));
+        // 3-day upgrade timelock (432 blocks ≈ 3 days at 10 min/block) — matches
+        // BridgeDepository's UpdatablePlugin(432) and the EVM
+        // TimelockController(259200s), so users get the same 3-day exit window
+        // on every governed contract. (WrappedOP20 is non-upgradeable and
+        // registers no plugin.) Aligned from the prior 1008/7d on 2026-06-02.
+        this.registerPlugin(new UpdatablePlugin(432));
     }
 
     public override onDeployment(calldata: Calldata): void {
@@ -87,9 +114,29 @@ export class BridgeAuthority extends ReentrancyGuard {
     public override onUpdate(calldata: Calldata): void {
         super.onUpdate(calldata);
 
-        const gov = this._governor.value;
-        if (gov.isZero() || !Blockchain.tx.sender.equals(gov)) {
-            throw new Revert('BridgeAuthority: not governor');
+        // Option C (O-4 fix) — deployer EXECUTES, governance PRE-AUTHORIZES.
+        // Mirror BridgeDepository.onUpdate exactly (the two contracts MUST
+        // authorize upgrades the same way). The underlying UpdatablePlugin
+        // already gates `applyUpdate` on `onlyDeployer`; we re-check here so the
+        // policy is co-located with the governance gate that follows. NOTE: this
+        // gate is now the DEPLOYER, not the governor — gating on the governor
+        // here (the prior behaviour) collided with the welded plugin deployer
+        // gate and froze upgrades after any governor handoff.
+        if (!Blockchain.tx.sender.equals(this.contractDeployer)) {
+            throw new Revert('BridgeAuthority: not deployer');
+        }
+
+        // Once the governor wires `_upgradeAuthority`, every upgrade must be
+        // authorized via `proposeUpgrade()` first. The one-shot flag is consumed
+        // here so each upgrade needs a fresh hand-shake — a compromised deployer
+        // key alone can no longer push an upgrade. Until the authority is wired,
+        // the legacy deployer-only path stays open (v1 bootstrap window).
+        const upgradeAuthority: Address = this._upgradeAuthority.value;
+        if (!upgradeAuthority.isZero()) {
+            if (!this._pendingUpgradeAuthorized.value) {
+                throw new Revert('BridgeAuthority: upgrade not authorized');
+            }
+            this._pendingUpgradeAuthorized.value = false;
         }
 
         const version = this._storageVersion.value;
@@ -117,6 +164,15 @@ export class BridgeAuthority extends ReentrancyGuard {
         if (!gov.isZero() && sender.equals(gov)) return;
         if (!guardian.isZero() && sender.equals(guardian)) return;
         throw new Revert('BridgeAuthority: not governor or guardian');
+    }
+
+    private onlyGovernorOrUpgradeAuthority(): void {
+        const sender = Blockchain.tx.sender;
+        const gov = this._governor.value;
+        const upAuth = this._upgradeAuthority.value;
+        if (!gov.isZero() && sender.equals(gov)) return;
+        if (!upAuth.isZero() && sender.equals(upAuth)) return;
+        throw new Revert('BridgeAuthority: not governor or upgrade authority');
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -295,6 +351,70 @@ export class BridgeAuthority extends ReentrancyGuard {
         this.emitEvent(new AuthoritySignerAdded(addHash));
         this.emitEvent(new AuthorityThresholdSet(newThreshold));
         return new BytesWriter(0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Governance-gated upgrade authorization (Option C / O-4 fix)
+    //  Mirrors BridgeDepository's setUpgradeAuthority / proposeUpgrade /
+    //  cancelProposedUpgrade so both governance contracts authorize upgrades
+    //  the SAME way. See the storage-field comment + `onUpdate` for the model.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Register the address authorized to gate upgrades for this contract.
+     * Governor-only. Zero disables the gate (legacy deployer-only path) —
+     * emergency hatch only.
+     */
+    @method({ name: 'newUpgradeAuthority', type: ABIDataTypes.ADDRESS })
+    @nonReentrant
+    public setUpgradeAuthority(calldata: Calldata): BytesWriter {
+        this.onlyGovernor();
+        this._upgradeAuthority.value = calldata.readAddress();
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Authorize the next upgrade. One-shot — consumed inside `onUpdate` the
+     * moment the next `applyUpdate` lands. Callable by the governor or the
+     * registered upgrade authority. The plugin's 1008-block timelock still
+     * enforces the wait between submit and apply.
+     */
+    @method()
+    @nonReentrant
+    public proposeUpgrade(_calldata: Calldata): BytesWriter {
+        this.onlyGovernorOrUpgradeAuthority();
+        this._pendingUpgradeAuthorized.value = true;
+        return new BytesWriter(0);
+    }
+
+    /**
+     * Veto a previously proposed upgrade by clearing the authorization flag.
+     * Callable by the governor or the registered upgrade authority. Pairs with
+     * the plugin's `cancelUpdate` (which cancels the queued bytecode pointer);
+     * calling both gives a complete veto.
+     */
+    @method()
+    @nonReentrant
+    public cancelProposedUpgrade(_calldata: Calldata): BytesWriter {
+        this.onlyGovernorOrUpgradeAuthority();
+        this._pendingUpgradeAuthorized.value = false;
+        return new BytesWriter(0);
+    }
+
+    @view
+    @returns({ name: 'upgradeAuthority', type: ABIDataTypes.ADDRESS })
+    public upgradeAuthority(_calldata: Calldata): BytesWriter {
+        const r = new BytesWriter(ADDRESS_BYTE_LENGTH);
+        r.writeAddress(this._upgradeAuthority.value);
+        return r;
+    }
+
+    @view
+    @returns({ name: 'pendingUpgradeAuthorized', type: ABIDataTypes.BOOL })
+    public pendingUpgradeAuthorized(_calldata: Calldata): BytesWriter {
+        const r = new BytesWriter(1);
+        r.writeBoolean(this._pendingUpgradeAuthorized.value);
+        return r;
     }
 
     // ═══════════════════════════════════════════════════════════════════════

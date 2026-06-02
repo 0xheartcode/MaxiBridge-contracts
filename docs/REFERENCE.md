@@ -287,8 +287,8 @@ Plus scripts-dev's cross-codebase consistency audit which caught **2 BLOCKERs + 
 - ✅ Signer epoch invalidation (no deadlines)
 - ✅ Address equality `.equals()/.isZero()` (14 locations fixed)
 - ✅ `VOUCHER_NETWORK_ID` deploy-time initialized via `_networkId` StoredU256
-- ✅ `UpdatablePlugin(144)` registered on both OPNet contracts
-- ✅ ML-DSA blob canonical length checks (`sig.length == 3736`, `pubLen == 1312`)
+- ✅ `UpdatablePlugin` registered on the governance contracts only — `BridgeDepository(432)` + `BridgeAuthority(432)` — both a 3-day timelock (depository per the 2026-05-27 governance decision, was 1008/7d, 144 pre-redesign; authority aligned to 432 on 2026-06-02). `WrappedOP20` is NON-UPGRADEABLE and registers no plugin.
+- ✅ ML-DSA M-of-N blob bounds checks (per-entry `pubLen == 1312` / `sigLen == 2420`; a 1-of-1 blob is 3744 bytes — the legacy fixed 3736-byte single-sig format is NO LONGER accepted, see CLAUDE.md §7)
 - ✅ Widened source-event replay key (chainId + bridgeAddr + tokenAddr + txHash + logIndex)
 - ✅ `WrappedOP20.burnForRelease` pauseable (`_paused` + `setPaused` + `paused()`)
 - ✅ Signer epoch u32 bound check in `rotateSigner`

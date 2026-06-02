@@ -45,6 +45,20 @@ export class BridgeAuthority extends ContractRuntime {
     private readonly wusdtSelector: number = encodeNumericSelector('wusdt()');
     private readonly storageVersionSelector: number = encodeNumericSelector('storageVersion()');
 
+    // Option C (O-4) — governance-gated upgrade authorization surface.
+    private readonly setUpgradeAuthoritySelector: number = encodeSelectorWithParams(
+        'setUpgradeAuthority',
+        ABIDataTypes.ADDRESS,
+    );
+    private readonly proposeUpgradeSelector: number = encodeNumericSelector('proposeUpgrade()');
+    private readonly cancelProposedUpgradeSelector: number = encodeNumericSelector(
+        'cancelProposedUpgrade()',
+    );
+    private readonly upgradeAuthoritySelector: number = encodeNumericSelector('upgradeAuthority()');
+    private readonly pendingUpgradeAuthorizedSelector: number = encodeNumericSelector(
+        'pendingUpgradeAuthorized()',
+    );
+
     constructor(details: ContractDetails) {
         super(details);
     }
@@ -163,6 +177,39 @@ export class BridgeAuthority extends ContractRuntime {
         w.writeSelector(this.storageVersionSelector);
         const r = await this.getResponse(w.getBuffer());
         return r.readU256();
+    }
+
+    public async setUpgradeAuthority(addr: Address): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.setUpgradeAuthoritySelector);
+        w.writeAddress(addr);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async proposeUpgrade(): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.proposeUpgradeSelector);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async cancelProposedUpgrade(): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.cancelProposedUpgradeSelector);
+        await this.getResponse(w.getBuffer());
+    }
+
+    public async upgradeAuthority(): Promise<Address> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.upgradeAuthoritySelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readAddress();
+    }
+
+    public async pendingUpgradeAuthorized(): Promise<boolean> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.pendingUpgradeAuthorizedSelector);
+        const r = await this.getResponse(w.getBuffer());
+        return r.readBoolean();
     }
 
     public override async init(): Promise<void> {

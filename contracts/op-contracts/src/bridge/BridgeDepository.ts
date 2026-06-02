@@ -364,7 +364,7 @@ export class BridgeDepository extends ReentrancyGuard {
     //
     // The actual fee math runs server-side at sign time
     // (computeFee(gross, bps, minFee)) and is recorded as feeAmount /
-    // netAmount in the 460-byte voucher preimage; the contract is the
+    // netAmount in the 540-byte voucher preimage; the contract is the
     // source of truth for the bps value and the server reads it before
     // signing.
     private _wrapFeeBps: StoredU256 = new StoredU256(Blockchain.nextPointer, EMPTY_POINTER);
@@ -1084,7 +1084,7 @@ export class BridgeDepository extends ReentrancyGuard {
      * Modular wrap fee — governor-settable, capped at MAX_WRAP_FEE_BPS
      * (1000 bps = 10%). Default 0. The contract stores the bps; the
      * server reads it before signing each voucher and reflects the
-     * resulting feeAmount in the 460-byte preimage.
+     * resulting feeAmount in the 540-byte preimage.
      */
     @method({ name: 'bps', type: ABIDataTypes.UINT256 })
     public setWrapFeeBps(calldata: Calldata): BytesWriter {
@@ -1895,7 +1895,7 @@ export class BridgeDepository extends ReentrancyGuard {
      * signed by the M-of-N signer set. Used in modes 2 + 4 after the
      * user has burned their wrapped ERC20 on the EVM side.
      *
-     * Reuses the 460-byte voucher preimage shape — `wrappedToken` field
+     * Reuses the 540-byte voucher preimage shape — `wrappedToken` field
      * here is overloaded to mean "the canonical OP20 being released."
      * The selector field binds the voucher to this specific entry point
      * so a release voucher can't be claimed via `claimMintWithVoucher`
@@ -3500,7 +3500,7 @@ export class BridgeDepository extends ReentrancyGuard {
      * `tx.sender`. Reverts on any mismatch, replay, wrong epoch, or invalid
      * signature.
      *
-     * `voucher` is the full 460-byte preimage — the contract parses it
+     * `voucher` is the full 540-byte preimage — the contract parses it
      * directly rather than taking typed args, so the bytes the server
      * signed are exactly the bytes we hash and verify (no re-serialization
      * risk).

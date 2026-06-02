@@ -79,6 +79,41 @@ export type SetBridgeThreshold = CallResult<{}, OPNetEvent<AuthorityThresholdSet
 export type MigrateBridgeSignerSet = CallResult<{}, OPNetEvent<never>[]>;
 
 /**
+ * @description Represents the result of the setUpgradeAuthority function call.
+ */
+export type SetUpgradeAuthority = CallResult<{}, OPNetEvent<never>[]>;
+
+/**
+ * @description Represents the result of the proposeUpgrade function call.
+ */
+export type ProposeUpgrade = CallResult<{}, OPNetEvent<never>[]>;
+
+/**
+ * @description Represents the result of the cancelProposedUpgrade function call.
+ */
+export type CancelProposedUpgrade = CallResult<{}, OPNetEvent<never>[]>;
+
+/**
+ * @description Represents the result of the upgradeAuthority function call.
+ */
+export type UpgradeAuthority = CallResult<
+    {
+        upgradeAuthority: Address;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
+ * @description Represents the result of the pendingUpgradeAuthorized function call.
+ */
+export type PendingUpgradeAuthorized = CallResult<
+    {
+        pendingUpgradeAuthorized: boolean;
+    },
+    OPNetEvent<never>[]
+>;
+
+/**
  * @description Represents the result of the governor function call.
  */
 export type Governor = CallResult<
@@ -151,6 +186,11 @@ export interface IBridgeAuthority extends IOP_NETContract {
     removeBridgeSigner(pubKeyHash: bigint): Promise<RemoveBridgeSigner>;
     setBridgeThreshold(threshold: bigint): Promise<SetBridgeThreshold>;
     migrateBridgeSignerSet(addHash: bigint, newThreshold: bigint): Promise<MigrateBridgeSignerSet>;
+    setUpgradeAuthority(newUpgradeAuthority: Address): Promise<SetUpgradeAuthority>;
+    proposeUpgrade(): Promise<ProposeUpgrade>;
+    cancelProposedUpgrade(): Promise<CancelProposedUpgrade>;
+    upgradeAuthority(): Promise<UpgradeAuthority>;
+    pendingUpgradeAuthorized(): Promise<PendingUpgradeAuthorized>;
     governor(): Promise<Governor>;
     guardian(): Promise<Guardian>;
     depository(): Promise<Depository>;

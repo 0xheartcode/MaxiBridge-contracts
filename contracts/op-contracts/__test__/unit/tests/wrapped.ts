@@ -170,9 +170,9 @@ await opnet('WrappedOP20 — burnForRelease', async (vm: OPNetUnit) => {
         // M-01 — burnForRelease now requires the destChainId to be enabled.
         // Enable the chains exercised by this suite (mainnet, Sepolia, and
         // the synthetic non-EVM chain 42).
-        await token.setSupportedDestChain(1, true);
-        await token.setSupportedDestChain(11155111, true);
-        await token.setSupportedDestChain(42, true);
+        await token.setSupportedDestChain(1, true, true);
+        await token.setSupportedDestChain(11155111, true, true);
+        await token.setSupportedDestChain(42, true, false);
 
         // Pre-mint to alice and bob via the bridge so they have a balance to burn.
         setSender(bridgeAddr);
@@ -311,7 +311,7 @@ await opnet('WrappedOP20 — Fix #6: burnForRelease pause gate', async (vm: OPNe
 
         // M-01 — enable destChainId 1 so the pause-gate test exercises the
         // burn path itself rather than tripping the allowlist.
-        await token.setSupportedDestChain(1, true);
+        await token.setSupportedDestChain(1, true, true);
 
         setSender(bridgeAddr);
         await token.mintTo(alice, 1_000n);
@@ -612,7 +612,7 @@ await opnet('WrappedOP20 — M-01: burnForRelease destChainId allowlist', async 
 
     await vm.it('after setSupportedDestChain(id, true) the burn succeeds', async () => {
         setSender(deployer);
-        await token.setSupportedDestChain(1, true);
+        await token.setSupportedDestChain(1, true, true);
         Assert.expect(await token.isSupportedDestChain(1)).toEqual(true);
 
         setSender(alice);
@@ -623,10 +623,10 @@ await opnet('WrappedOP20 — M-01: burnForRelease destChainId allowlist', async 
 
     await vm.it('isSupportedDestChain reflects enable then disable state', async () => {
         setSender(deployer);
-        await token.setSupportedDestChain(42, true);
+        await token.setSupportedDestChain(42, true, false);
         Assert.expect(await token.isSupportedDestChain(42)).toEqual(true);
 
-        await token.setSupportedDestChain(42, false);
+        await token.setSupportedDestChain(42, false, false);
         Assert.expect(await token.isSupportedDestChain(42)).toEqual(false);
 
         // A burn to a now-disabled chain reverts again.
@@ -641,7 +641,7 @@ await opnet('WrappedOP20 — M-01: burnForRelease destChainId allowlist', async 
     await vm.it('setSupportedDestChain by a non-governor reverts', async () => {
         setSender(alice);
         await Assert.expect(async () => {
-            await token.setSupportedDestChain(1, true);
+            await token.setSupportedDestChain(1, true, true);
         }).toThrow();
         // State unchanged — alice's call had no effect.
         Assert.expect(await token.isSupportedDestChain(1)).toEqual(false);
@@ -649,7 +649,7 @@ await opnet('WrappedOP20 — M-01: burnForRelease destChainId allowlist', async 
 
     await vm.it('enabling one chain does not enable others', async () => {
         setSender(deployer);
-        await token.setSupportedDestChain(1, true);
+        await token.setSupportedDestChain(1, true, true);
         Assert.expect(await token.isSupportedDestChain(1)).toEqual(true);
         Assert.expect(await token.isSupportedDestChain(11155111)).toEqual(false);
 

@@ -117,6 +117,10 @@
                 {
                     "name": "enabled",
                     "type": "BOOL"
+                },
+                {
+                    "name": "isEvmFamily",
+                    "type": "BOOL"
                 }
             ],
             "outputs": []

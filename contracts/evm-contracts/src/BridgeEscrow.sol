@@ -289,7 +289,7 @@ contract BridgeEscrow is
         // exceed this accumulator, so it can never touch user-locked
         // principal or another flow's reserves. Struct-field append (the
         // struct lives in a mapping) — does NOT consume a top-level storage
-        // slot, so the `uint256[42] __gap` is unaffected.
+        // slot, so the `uint256[40] __gap` is unaffected.
         uint128 accruedFees;
     }
 
@@ -1342,6 +1342,11 @@ contract BridgeEscrow is
         uint256 numSigs = uint256(uint8(sig[0]));
         if (numSigs == 0) revert InvalidSigBlob();
         if (sig.length != 1 + numSigs * 65) revert InvalidSigBlob();
+        // LOW-3 — a valid blob can never carry more sigs than there are
+        // authorized signers (distinct-signer + isSigner gating already caps
+        // validCount at signerCount); fail fast instead of allocating + looping
+        // over a hostile oversized blob.
+        if (numSigs > signerCount) revert InvalidSigBlob();
 
         address[] memory seen = new address[](numSigs);
         uint256 validCount = 0;

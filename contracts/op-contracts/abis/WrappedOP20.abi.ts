@@ -130,6 +130,7 @@ export const WrappedOP20Abi = [
         inputs: [
             { name: 'destChainId', type: ABIDataTypes.UINT32 },
             { name: 'enabled', type: ABIDataTypes.BOOL },
+            { name: 'isEvmFamily', type: ABIDataTypes.BOOL },
         ],
         outputs: [],
         type: BitcoinAbiTypes.Function,
