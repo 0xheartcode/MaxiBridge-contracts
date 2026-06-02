@@ -1936,12 +1936,22 @@ export class BridgeDepository extends ReentrancyGuard {
         // field is the canonical OP20 to release. Modes 3 and 4 release
         // identically from the OPNet pool (the vest is EVM-side only).
         // #68 Tier B — route mode derived from the voucher's flowId (NOT the
-        // per-token `_tokenMode`). Require flow exists + ACTIVE + bound to the
-        // wrappedToken before dispatching.
+        // per-token `_tokenMode`). Require flow exists + ACTIVE-or-DRAINING +
+        // bound to the wrappedToken before dispatching.
         if (this._flowExists.get(parsed.flowId).isZero()) {
             throw new Revert('BridgeDepository: flow not found');
         }
-        if (this._flowStatus.get(parsed.flowId).toU32() != FLOW_STATUS_ACTIVE) {
+        // O-3 (Codex pre-audit, 2026-06-01): release claims must honor DRAINING.
+        // DRAINING is the wind-down state that blocks NEW locks/mints while
+        // still letting already-signed release/exit vouchers be claimed. This
+        // early gate previously required ACTIVE only, which made the later
+        // ACTIVE-or-DRAINING check (after the flowId recompute) dead code for
+        // DRAINING flows and stranded in-flight release vouchers during an
+        // orderly wind-down. Accept ACTIVE or DRAINING here, matching that
+        // later gate. (claimMintWithVoucher + refundBurn stay ACTIVE-only by
+        // design — DRAINING must not mint new supply.)
+        const earlyStatusRel: u32 = this._flowStatus.get(parsed.flowId).toU32();
+        if (earlyStatusRel != FLOW_STATUS_ACTIVE && earlyStatusRel != FLOW_STATUS_DRAINING) {
             throw new Revert('BridgeDepository: flow not active');
         }
         if (!u256.eq(this._flowOpnetToken.get(parsed.flowId), _opnetAddrToU256(parsed.wrappedToken))) {
