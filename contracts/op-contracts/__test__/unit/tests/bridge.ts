@@ -563,6 +563,72 @@ await opnet('BridgeDepository — replay by source event', async (vm: OPNetUnit)
             await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
         }).toThrow();
     });
+
+    // ── O-1 (Codex pre-audit, 2026-06-01) ──────────────────────────────────
+    // The replay key must be canonical: a second voucher for the SAME source
+    // event that only differs in the high bits of `sourceChainId` (above 2^64,
+    // truncated by the flowId derivation's `.toU64()`) must still collide on
+    // `_usedSourceEvents`. Before the fix the full 32-byte chainId was hashed,
+    // so the alias produced a distinct replay key and double-minted.
+    await vm.it('O-1: chainId high-bit alias of a used source event reverts', async () => {
+        const { depository, signerWallet } = setup;
+
+        const f1 = { ...defaultFields(setup, alice), voucherId: 200n };
+        const v1 = buildVoucher(f1);
+        setSender(alice);
+        await depository.claimMintWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
+
+        // Same source event, but sourceChainId = ETH (1) + 2^64. `.toU64()`
+        // truncates to 1, so the flowId is unchanged; only the replay key
+        // would differ without canonicalization.
+        const f2 = {
+            ...defaultFields(setup, alice),
+            voucherId: 201n,
+            sourceTxHash: f1.sourceTxHash,
+            sourceLogIndex: f1.sourceLogIndex,
+            sourceChainId: ETH_CHAIN_ID + (1n << 64n),
+        };
+        const v2 = buildVoucher(f2);
+
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
+        }).toThrow('source event already used');
+    });
+
+    // The same property for the EVM address fields: a non-zero right-pad tail
+    // ([20..32)) must not distinguish two otherwise-identical source events,
+    // since the flowId derivation only reads the low 20 bytes.
+    await vm.it('O-1: sourceBridgeAddr padding-tail alias of a used source event reverts', async () => {
+        const { depository, signerWallet } = setup;
+
+        const f1 = { ...defaultFields(setup, alice), voucherId: 202n };
+        const v1 = buildVoucher(f1);
+        setSender(alice);
+        await depository.claimMintWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
+
+        // Same EVM bridge address (low 20 bytes) but with a dirtied padding
+        // tail — must canonicalize to the same replay key.
+        const baseBytes = DEFAULT_SOURCE_BRIDGE as unknown as Uint8Array;
+        const aliasBytes = new Uint8Array(32);
+        for (let i = 0; i < 20; i++) aliasBytes[i] = baseBytes[i]!;
+        aliasBytes[20] = 0xff; // non-zero tail (spec violation)
+        const aliasBridge = new Address(aliasBytes);
+
+        const f2 = {
+            ...defaultFields(setup, alice),
+            voucherId: 203n,
+            sourceTxHash: f1.sourceTxHash,
+            sourceLogIndex: f1.sourceLogIndex,
+            sourceBridgeAddr: aliasBridge,
+        };
+        const v2 = buildVoucher(f2);
+
+        setSender(alice);
+        await Assert.expect(async () => {
+            await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
+        }).toThrow('source event already used');
+    });
 });
 
 // ════════════════════════════════════════════════════════════════════════════

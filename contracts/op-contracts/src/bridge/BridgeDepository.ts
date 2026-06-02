@@ -3633,6 +3633,8 @@ export class BridgeDepository extends ReentrancyGuard {
         // the same (txHash, logIndex) cannot collide across different EVM
         // chains or different bridge / token contracts once we expand beyond
         // Ethereum mainnet. 132 bytes hashed.
+        // O-1 — buildSourceEventKey canonicalizes chainId + EVM addresses so a
+        // padding/high-bit alias maps to the SAME replay key (see its docstring).
         const sourceKey: u256 = buildSourceEventKey(
             parsed.sourceChainId,
             parsed.sourceBridgeAddr,
@@ -4001,6 +4003,45 @@ function slice(src: Uint8Array, start: u32, end: u32): Uint8Array {
  *
  * Layout fed to sha256: 32 + 32 + 32 + 32 + 4 = 132 bytes.
  */
+/**
+ * O-1 (Codex pre-audit, 2026-06-01) — copy ONLY the low 20 bytes of an EVM
+ * source address into a fresh right-padded 32-byte Address ([0..20) = addr,
+ * [20..32) = zero). The voucher spec (CLAUDE.md §6) requires EVM source
+ * addresses to be right-padded with a zero tail, and the flowId derivation
+ * (`_evmAddrRightPadToLeftPadU256`) only ever reads [0..20). Normalizing here
+ * guarantees the replay key consumes the SAME 20 address bytes the flowId
+ * does, so a non-zero padding tail cannot distinguish two otherwise-identical
+ * source events.
+ */
+function _canonicalEvmSourceAddr(addr: Address): Address {
+    const out = new Uint8Array(32);
+    for (let i: u32 = 0; i < 20; i++) {
+        out[i] = addr[i];
+    }
+    return Address.fromUint8Array(out);
+}
+
+/**
+ * O-1 (Codex pre-audit, 2026-06-01) — the source-event replay key MUST be a
+ * pure function of the same canonical identity the flowId is derived from.
+ *
+ * The flowId derivation (`_flowIdFromVoucher`) truncates `sourceChainId` to
+ * u64 (`.toU64()`) and reads only the low 20 bytes of each right-padded EVM
+ * address. Previously this function hashed the FULL 32-byte `sourceChainId`
+ * and the FULL 32-byte address words, so a buggy or partially-compromised
+ * signer could emit two vouchers for the SAME source event — one with
+ * `sourceChainId` set above 2^64, or with a non-zero address padding tail —
+ * that map to the SAME flowId (passing the FINDING-003 `flowId ==
+ * parsed.flowId` equality gate) yet produce DIFFERENT replay keys, defeating
+ * the "each source event drained once" backstop and enabling a double mint /
+ * double release within the per-flow limits.
+ *
+ * Canonicalizing the chainId to its low u64 and each address to its low 20
+ * bytes collapses every such alias onto one replay key, so the existing
+ * `_usedSourceEvents` / `_usedEvmBurnEvents` guard catches the duplicate.
+ * Canonical (spec-conformant) vouchers — chainId < 2^64, zero address tail —
+ * hash to exactly the same bytes as before, so this is a no-op for them.
+ */
 function buildSourceEventKey(
     sourceChainId: u256,
     sourceBridgeAddr: Address,
@@ -4009,9 +4050,11 @@ function buildSourceEventKey(
     sourceLogIndex: u32,
 ): u256 {
     const buf = new BytesWriter(32 + 32 + 32 + 32 + 4);
-    buf.writeU256(sourceChainId);
-    buf.writeAddress(sourceBridgeAddr);
-    buf.writeAddress(sourceTokenAddr);
+    // Canonicalize chainId to its low u64 (zero-extended back to u256): the
+    // flowId derivation drops the high 192 bits, so the replay key must too.
+    buf.writeU256(u256.fromU64(sourceChainId.toU64()));
+    buf.writeAddress(_canonicalEvmSourceAddr(sourceBridgeAddr));
+    buf.writeAddress(_canonicalEvmSourceAddr(sourceTokenAddr));
     buf.writeU256(sourceTxHash);
     buf.writeU32(sourceLogIndex);
     return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
