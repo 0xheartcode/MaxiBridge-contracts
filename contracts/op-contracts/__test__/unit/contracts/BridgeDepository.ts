@@ -853,12 +853,18 @@ export class BridgeDepository extends ContractRuntime {
         await this.getResponse(w.getBuffer());
     }
 
+    // O-2 — calldata shape widened to the full burn identity to match the
+    // contract's `_burnRefundId(wrappedToken, burner, burnTxHash, burnNonce)`.
     public async isBurnRefunded(
+        wrappedToken: Address,
+        burner: Address,
         burnTxHash: bigint,
         burnNonce: bigint,
     ): Promise<boolean> {
         const w = new BinaryWriter();
         w.writeSelector(this.isBurnRefundedSelector);
+        w.writeAddress(wrappedToken);
+        w.writeAddress(burner);
         w.writeU256(burnTxHash);
         w.writeU256(burnNonce);
         const r = await this.getResponse(w.getBuffer());

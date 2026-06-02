@@ -268,7 +268,7 @@ await opnet('BridgeDepository.burn-refund — happy path', async (vm: OPNetUnit)
         const flowId = await registerFlow(setup, 0n);
 
         const aliceBefore = await setup.wusdc.balanceOf(alice);
-        Assert.expect(await depository.isBurnRefunded(BURN_TX_HASH, BURN_NONCE)).toEqual(false);
+        Assert.expect(await depository.isBurnRefunded(setup.wusdcAddress, alice, BURN_TX_HASH, BURN_NONCE)).toEqual(false);
 
         const { hash } = buildBurnRefundAuth(canonicalFields(setup, flowId));
         const auth = buildBurnRefundAuth(canonicalFields(setup, flowId)).preimage;
@@ -282,7 +282,7 @@ await opnet('BridgeDepository.burn-refund — happy path', async (vm: OPNetUnit)
         // Burner got EXACTLY the attested amount re-minted.
         Assert.expect(await setup.wusdc.balanceOf(alice)).toEqual(aliceBefore + AMOUNT);
         // Replay guard set.
-        Assert.expect(await depository.isBurnRefunded(BURN_TX_HASH, BURN_NONCE)).toEqual(true);
+        Assert.expect(await depository.isBurnRefunded(setup.wusdcAddress, alice, BURN_TX_HASH, BURN_NONCE)).toEqual(true);
     });
 
     await vm.it('replay: same burn id twice reverts; NO second mint', async () => {
@@ -351,7 +351,7 @@ await opnet('BridgeDepository.burn-refund — bad attestations (NO mint)', async
         }).toThrow();
         Assert.expect(await setup.wusdc.balanceOf(alice)).toEqual(before);
         // Replay guard must NOT have been set on a revert.
-        Assert.expect(await setup.depository.isBurnRefunded(BURN_TX_HASH, BURN_NONCE)).toEqual(false);
+        Assert.expect(await setup.depository.isBurnRefunded(setup.wusdcAddress, alice, BURN_TX_HASH, BURN_NONCE)).toEqual(false);
     }
 
     await vm.it('wrong signerEpoch reverts', async () => {
@@ -596,7 +596,7 @@ await opnet('BridgeDepository.burn-refund — H-2 mode gate', async (vm: OPNetUn
             await setup.depository.refundBurn(preimage, sig);
         }).toThrow();
         Assert.expect(await setup.wusdc.balanceOf(alice)).toEqual(before);
-        Assert.expect(await setup.depository.isBurnRefunded(BURN_TX_HASH, BURN_NONCE)).toEqual(false);
+        Assert.expect(await setup.depository.isBurnRefunded(setup.wusdcAddress, alice, BURN_TX_HASH, BURN_NONCE)).toEqual(false);
     });
 
     await vm.it('mode-3 (POOLED_LOCK_RELEASE) flow reverts: token not in mintable mode', async () => {
@@ -610,7 +610,7 @@ await opnet('BridgeDepository.burn-refund — H-2 mode gate', async (vm: OPNetUn
             await setup.depository.refundBurn(preimage, sig);
         }).toThrow();
         Assert.expect(await setup.wusdc.balanceOf(alice)).toEqual(before);
-        Assert.expect(await setup.depository.isBurnRefunded(BURN_TX_HASH, BURN_NONCE)).toEqual(false);
+        Assert.expect(await setup.depository.isBurnRefunded(setup.wusdcAddress, alice, BURN_TX_HASH, BURN_NONCE)).toEqual(false);
     });
 });
 
@@ -666,6 +666,98 @@ await opnet('BridgeDepository.burn-refund — A-1 daily limit', async (vm: OPNet
         }).toThrow();
         Assert.expect(await setup.wusdc.balanceOf(alice)).toEqual(before);
         // Replay guard must not have been set on revert (state rolled back).
-        Assert.expect(await setup.depository.isBurnRefunded(BURN_TX_HASH, BURN_NONCE)).toEqual(false);
+        Assert.expect(await setup.depository.isBurnRefunded(setup.wusdcAddress, alice, BURN_TX_HASH, BURN_NONCE)).toEqual(false);
+    });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// O-2 (Codex pre-audit, 2026-06-01) — burnId binds wrappedToken + burner
+// ════════════════════════════════════════════════════════════════════════════
+//
+// `burnNonce` is a counter LOCAL to each WrappedOP20, so two distinct wrapped
+// tokens can legitimately produce burns sharing the SAME (burnTxHash,
+// burnNonce). With the pre-fix key `sha256(burnTxHash‖burnNonce)`, refunding
+// the first burn permanently blocked the second token's legitimate recovery.
+// Binding the wrappedToken (and burner) makes the two refunds independent.
+
+await opnet('BridgeDepository.burn-refund — O-2: burnId binds wrappedToken', async (vm: OPNetUnit) => {
+    let setup: Setup;
+    let wusdt: WrappedOP20;
+    let wusdtAddress: Address;
+
+    vm.beforeEach(async () => {
+        Blockchain.dispose();
+        Blockchain.clearContracts();
+        Blockchain.medianTimestamp = 1_000_000n;
+        await Blockchain.init();
+        setSender(deployer);
+        setup = await setupContracts();
+
+        // Deploy + wire a SECOND wrapped token under the same depository.
+        wusdtAddress = Blockchain.generateRandomAddress();
+        wusdt = new WrappedOP20({
+            file: './build/WrappedOP20.wasm',
+            address: wusdtAddress,
+            decimals: 6,
+            deployer,
+        });
+        Blockchain.register(wusdt);
+        await wusdt.init();
+        setSender(deployer);
+        await wusdt.setBridgeDepository(setup.depositoryAddress);
+        await setup.depository.addWrappedToken(wusdtAddress);
+    });
+
+    vm.afterEach(() => {
+        wusdt.dispose();
+        dispose(setup);
+    });
+
+    await vm.it('two wrapped tokens sharing (burnTxHash, burnNonce) refund independently', async () => {
+        const { depository, signerWallet } = setup;
+
+        // Flow A — opnetToken = wUSDC.
+        const flowA = await registerFlow(setup, 0n);
+        // Flow B — opnetToken = wUSDT (distinct flowId: opnetToken differs).
+        const flowB = await depository.addFlow({
+            mode: 0n,
+            chainId: ETH_CHAIN_ID,
+            evmBridge: evmAddrRightPadToBigInt(SOURCE_BRIDGE),
+            evmToken: evmAddrRightPadToBigInt(SOURCE_TOKEN),
+            evmDecimals: 6n,
+            opnetBridge: opnetAddrToBigInt(setup.depositoryAddress),
+            opnetToken: opnetAddrToBigInt(wusdtAddress),
+            opnetDecimals: 6n,
+            feeBps: FEE_BPS,
+            minFee: 0n,
+            minAmount: 0n,
+            cap: 1_000_000_000_000n,
+            dailyLimit: 1_000_000_000_000n,
+            tipCapBps: 0n,
+        });
+
+        // Refund the wUSDC burn at (BURN_TX_HASH, BURN_NONCE).
+        const aAuth = buildBurnRefundAuth(canonicalFields(setup, flowA));
+        setSender(alice);
+        await depository.refundBurn(aAuth.preimage, signAuth(signerWallet, aAuth.hash));
+        Assert.expect(await setup.wusdc.balanceOf(alice)).toEqual(AMOUNT);
+
+        // Refund the wUSDT burn at the SAME (BURN_TX_HASH, BURN_NONCE).
+        // Pre-fix: reverts "burn already refunded". Post-fix: succeeds.
+        const bAuth = buildBurnRefundAuth({
+            ...canonicalFields(setup, flowB),
+            wrappedToken: wusdtAddress,
+        });
+        setSender(alice);
+        await depository.refundBurn(bAuth.preimage, signAuth(signerWallet, bAuth.hash));
+        Assert.expect(await wusdt.balanceOf(alice)).toEqual(AMOUNT);
+
+        // Both recorded independently under their own identity key.
+        Assert.expect(
+            await depository.isBurnRefunded(setup.wusdcAddress, alice, BURN_TX_HASH, BURN_NONCE),
+        ).toEqual(true);
+        Assert.expect(
+            await depository.isBurnRefunded(wusdtAddress, alice, BURN_TX_HASH, BURN_NONCE),
+        ).toEqual(true);
     });
 });

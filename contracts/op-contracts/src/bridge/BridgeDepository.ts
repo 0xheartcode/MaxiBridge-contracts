@@ -2797,12 +2797,18 @@ export class BridgeDepository extends ReentrancyGuard {
         }
 
         // ── Per-burn replay guard FIRST (cheap revert before the ML-DSA
-        // verify). burnId = sha256(burnTxHash ‖ burnNonce) — globally unique
-        // per burn (the tuple is unique even if a bare nonce could ever collide
-        // under a deep reorg). This is the ONLY thing preventing a double /
-        // infinite re-mint of the same burn, so it is checked here and SET
-        // below strictly BEFORE the external mint (CEI).
-        const burnId: u256 = _burnRefundId(burnTxHash, burnNonce);
+        // verify). O-2 (Codex pre-audit, 2026-06-01): burnId binds
+        // (wrappedToken, burner, burnTxHash, burnNonce). `burnNonce` is a
+        // PER-WrappedOP20 counter, so (burnTxHash, burnNonce) alone is NOT
+        // globally unique — two different wrapped tokens at the same nonce
+        // burning in one tx share the pair, and refunding one would
+        // permanently block the other's legitimate recovery. Binding the
+        // token + burner makes the key per-burn-identity unique and matches
+        // the EVM side + the documented invariant (SECURITY.md §6). This is
+        // the ONLY thing preventing a double / infinite re-mint of the same
+        // burn, so it is checked here and SET below strictly BEFORE the
+        // external mint (CEI).
+        const burnId: u256 = _burnRefundId(wrappedTokenU256, burnerU256, burnTxHash, burnNonce);
         if (!this._refundedBurns.get(burnId).isZero()) {
             throw new Revert('BridgeDepository: burn already refunded');
         }
@@ -2884,12 +2890,18 @@ export class BridgeDepository extends ReentrancyGuard {
         return new BytesWriter(0);
     }
 
+    // O-2 (Codex pre-audit, 2026-06-01): calldata shape widened to the full
+    // burn identity (wrappedToken, burner, burnTxHash, burnNonce) so the view
+    // mirrors the new `_burnRefundId` derivation. Off-chain pre-check callers
+    // (e.g. scripts/src/ops/refund-burn-opnet.ts) must pass all four args.
     @view
     @returns({ name: 'refunded', type: ABIDataTypes.BOOL })
     public isBurnRefunded(calldata: Calldata): BytesWriter {
+        const wrappedToken: u256 = _opnetAddrToU256(calldata.readAddress());
+        const burner: u256 = _opnetAddrToU256(calldata.readAddress());
         const burnTxHash: u256 = calldata.readU256();
         const burnNonce: u256 = calldata.readU256();
-        const burnId: u256 = _burnRefundId(burnTxHash, burnNonce);
+        const burnId: u256 = _burnRefundId(wrappedToken, burner, burnTxHash, burnNonce);
         const r = new BytesWriter(1);
         r.writeBoolean(!this._refundedBurns.get(burnId).isZero());
         return r;
@@ -4046,13 +4058,27 @@ function buildBurnReplayKey(
 
 /**
  * #55 — per-burn replay key for the trustless burn-side recovery (`refundBurn`).
- * `burnId = sha256(burnTxHash(32) ‖ burnNonce(32))`. The (txHash, nonce) tuple
- * is globally unique per burn, so this key cannot collide across burns even if
- * a bare nonce could ever be re-assigned under a deep reorg. The SAME derivation
- * is used by the `isBurnRefunded` view, so off-chain callers can pre-check.
+ *
+ * O-2 (Codex pre-audit, 2026-06-01): the key binds the FULL burn identity —
+ * `burnId = sha256(wrappedToken(32) ‖ burner(32) ‖ burnTxHash(32) ‖ burnNonce(32))`.
+ * `burnNonce` is a counter LOCAL to each WrappedOP20, so (burnTxHash, burnNonce)
+ * alone is not globally unique: two distinct wrapped tokens sitting at the same
+ * nonce that burn in the same transaction would collide, and refunding the first
+ * would permanently brick the second's legitimate recovery. Including the
+ * wrappedToken + burner makes the key collision-proof and matches both the EVM
+ * `BridgeEscrow.refundBurn` replay key and the documented invariant
+ * (SECURITY.md §6). The SAME derivation is used by the `isBurnRefunded` view so
+ * off-chain callers can pre-check.
  */
-function _burnRefundId(burnTxHash: u256, burnNonce: u256): u256 {
-    const buf = new BytesWriter(32 + 32);
+function _burnRefundId(
+    wrappedToken: u256,
+    burner: u256,
+    burnTxHash: u256,
+    burnNonce: u256,
+): u256 {
+    const buf = new BytesWriter(32 + 32 + 32 + 32);
+    buf.writeU256(wrappedToken);
+    buf.writeU256(burner);
     buf.writeU256(burnTxHash);
     buf.writeU256(burnNonce);
     return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
