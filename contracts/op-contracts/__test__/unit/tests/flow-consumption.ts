@@ -692,6 +692,64 @@ await opnet('BridgeDepository — #44 — lockForBridge → claimReleaseWithVouc
             }).toThrow();
         });
 
+        // ───── O-3 (Codex pre-audit, 2026-06-01) regression ───────────────
+        //
+        // DRAINING is the orderly wind-down state: it blocks NEW locks/mints
+        // but MUST keep honoring already-signed release/exit vouchers. Pre-fix,
+        // claimReleaseWithVoucher's early gate required ACTIVE, so a release
+        // voucher reverted "flow not active" the moment the flow was drained,
+        // stranding exit liquidity. After the fix it accepts ACTIVE|DRAINING.
+        await vm.it('O-3: release voucher still claimable when flow is DRAINING', async () => {
+            const { depository, wusdc, wusdcAddress, depositoryAddress, signerWallet } = setup;
+            const releaseSrcBridge = Blockchain.generateRandomAddress();
+            const releaseSrcToken = Blockchain.generateRandomAddress();
+
+            await depository.setTokenMode(wusdcAddress, 1n, MODE1_EVM_COUNTERPART);
+            const flowId = await registerFlow(setup, {
+                mode: 1n,
+                sourceBridgeAddr: releaseSrcBridge,
+                sourceTokenAddr: releaseSrcToken,
+            });
+
+            // Provision inventory via lockForBridge (the sole mode-1 producer).
+            setSender(depositoryAddress);
+            await wusdc.mintTo(alice, 4_000_000n);
+            await wusdc.increaseAllowance(alice, depositoryAddress, 4_000_000n);
+            const evmRecipient = new Uint8Array(32);
+            for (let i = 12; i < 32; i++) evmRecipient[i] = 0xab;
+            setSender(alice);
+            await depository.lockForBridge(flowId, wusdcAddress, 3_000_000n, evmRecipient, 1);
+
+            const invBefore = (await depository.getFlow(flowId))[16]!;
+
+            // Governor winds the flow down → DRAINING.
+            setSender(deployer);
+            await depository.drainFlow(flowId);
+
+            // An already-signed release voucher must STILL claim on the
+            // DRAINING flow (pre-fix this reverted at the early status gate).
+            const rel = buildVoucher({
+                contractSelf: depositoryAddress,
+                selector: releaseSelector(),
+                recipient: alice,
+                sourceBridgeAddr: releaseSrcBridge,
+                sourceTokenAddr: releaseSrcToken,
+                sourceTxHash: 0x7301n,
+                sourceLogIndex: 1,
+                wrappedToken: wusdcAddress,
+                grossAmount: 1_000_000n,
+                feeAmount: 5_000n,
+                netAmount: 995_000n,
+                voucherId: 0x7301n,
+            });
+            setSender(alice);
+            await depository.claimReleaseWithVoucher(rel.preimage, signVoucher(signerWallet, rel.hash));
+
+            // Inventory drew down by gross → the release executed on a DRAINING flow.
+            const invAfter = (await depository.getFlow(flowId))[16]!;
+            Assert.expect(invBefore - invAfter).toEqual(1_000_000n);
+        });
+
         // ───── FINDING-004 regression (audit 2026-05-26) ──────────────────
         //
         // claimReleaseWithVoucher decrements inventory by gross and transfers
