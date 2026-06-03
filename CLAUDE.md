@@ -8,7 +8,7 @@ Master plan: `/Users/dippy/.claude/plans/zesty-sleeping-thacker.md`.
 
 ## 1. What this is
 
-A cross-chain bridge for **USDC/USDT** between **Ethereum mainnet** (chainId 1) and **OPNet testnet** (network id 2). Two directions, both voucher-based (user pays destination-side gas):
+A **general-purpose cross-chain token bridge** between **Ethereum mainnet** (chainId 1) and **OPNet testnet** (network id 2). Governance can onboard almost **any token pair** via the five flow modes (§5) with decimal-aware accounting — **USDC/USDT are the launch flows, not a constraint**. Two directions, both voucher-based (user pays destination-side gas):
 
 ```
 EVM → OPNet (deposit)                    OPNet → EVM (withdraw)

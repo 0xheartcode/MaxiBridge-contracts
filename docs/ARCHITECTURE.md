@@ -6,7 +6,7 @@ For load-bearing rules (storage layout, signer model, selectors, non-negotiables
 
 ## What It Does
 
-Moves USDC/USDT between Ethereum mainnet and OPNet (Bitcoin L1). Lock-and-release on EVM, mint-and-burn on OPNet. Both directions use a **voucher model**: the user pays gas on the destination chain, not the server.
+A **general-purpose token bridge** between Ethereum mainnet and OPNet (Bitcoin L1). Governance can onboard almost **any token pair** through five flow modes (wrapped mint/burn, pooled lock/release, pooled lock/vest) with decimal-aware accounting — **USDC/USDT are the launch flows, not a limit**. Depending on the flow's mode, each side does lock-and-release, mint-and-burn, or pooled custody. Both directions use a **voucher model**: the user pays gas on the destination chain, not the server.
 
 ```
 EVM → OPNet (DEPOSIT)

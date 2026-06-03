@@ -25,12 +25,16 @@ map, not a clean bill.
 
 ## 1. What MaxiBridge is
 
-A two-way cross-chain bridge for stablecoins (USDC/USDT today; arbitrary token pairs by
-governance) between **Ethereum** (EVM, chainId 1) and **OPNet** (Bitcoin L1 smart-contract
-platform; AssemblyScript→WASM contracts). Both directions are **voucher-based**: an
-off-chain signer set produces a signature over a fully source-bound preimage, and the
-**user pays gas on the destination chain** to redeem it. The server never holds user funds
-and never submits destination transactions — it only signs.
+A two-way, **general-purpose cross-chain token bridge** between **Ethereum** (EVM, chainId
+1) and **OPNet** (Bitcoin L1 smart-contract platform; AssemblyScript→WASM contracts).
+Governance can onboard almost **any token pair** — the five flow modes (§1, below) cover
+wrapped mint/burn, pooled lock/release, and pooled lock/vest, and the accounting is
+**decimal-aware**, so source and destination decimals can differ (a stablecoin and an
+18-decimal asset are both first-class). USDC/USDT are simply the **launch flows**, not a
+design constraint. Both directions are **voucher-based**: an off-chain signer set produces a
+signature over a fully source-bound preimage, and the **user pays gas on the destination
+chain** to redeem it. The server never holds user funds and never submits destination
+transactions — it only signs.
 
 ```
 EVM → OPNet (deposit)                        OPNet → EVM (withdraw)
