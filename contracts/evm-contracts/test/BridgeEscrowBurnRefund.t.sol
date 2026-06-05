@@ -66,10 +66,12 @@ contract BridgeEscrowBurnRefundTest is Test {
         wmoto = new WrappedERC20(
             "Wrapped MOTO",
             "wMOTO",
+            18,
             owner,
             address(escrow),
             EXPECTED_OPNET_CHAIN_ID,
-            TEST_OPNET_WMOTO
+            TEST_OPNET_WMOTO,
+            type(uint256).max // E-1 maxSupply — uncapped in tests
         );
 
         vm.startPrank(owner);
@@ -223,7 +225,7 @@ contract BridgeEscrowBurnRefundTest is Test {
     function test_refundBurn_unregisteredWrappedToken_reverts() public {
         // A wrapped token never added to supportedToken.
         WrappedERC20 stray = new WrappedERC20(
-            "Stray", "STRAY", owner, address(escrow), EXPECTED_OPNET_CHAIN_ID, bytes32(uint256(0x1))
+            "Stray", "STRAY", 18, owner, address(escrow), EXPECTED_OPNET_CHAIN_ID, bytes32(uint256(0x1)), type(uint256).max
         );
         BridgeEscrow.BurnRefundAuthorization memory a = _auth(100e6);
         a.wrappedToken = address(stray);
@@ -338,10 +340,12 @@ contract BridgeEscrowBurnRefundTest is Test {
         WrappedERC20 wmoto2 = new WrappedERC20(
             "Wrapped MOTO 2",
             "wMOTO2",
+            18,
             owner,
             address(escrow),
             EXPECTED_OPNET_CHAIN_ID,
-            bytes32(uint256(0xC0FFEE2))
+            bytes32(uint256(0xC0FFEE2)),
+            type(uint256).max // E-1 maxSupply — uncapped in tests
         );
         vm.prank(owner);
         bytes32 wmoto2FlowId = escrow.addFlow(

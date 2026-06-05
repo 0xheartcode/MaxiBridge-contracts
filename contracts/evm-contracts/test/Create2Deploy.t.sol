@@ -5,7 +5,6 @@ import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 import {BridgeEscrow} from "../src/BridgeEscrow.sol";
-import {MockERC20} from "./mocks/MockERC20.sol";
 
 /// @title Create2Deploy
 /// @notice Phase 2.1 — verifies that CREATE2 of the BridgeEscrow ERC1967Proxy

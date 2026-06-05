@@ -26,7 +26,7 @@ import { BridgeDepository } from '../contracts/BridgeDepository.js';
 
 // ─── Constants — must mirror BridgeDepository.ts ──────────────────────
 const VOUCHER_NETWORK_ID: bigint = 2n;
-const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x59893fe6;
+const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x6FBDC887; // sha256('claimWithVoucher(bytes,bytes)')[0:4]
 const VOUCHER_PREIMAGE_LEN = 540; // #68 Tier B — appended flowId u256
 const ETH_CHAIN_ID: bigint = 1n;
 const FLOW_WINDOW_DURATION = 86400n;
@@ -449,11 +449,7 @@ await opnet('BridgeDepository — PR γ.1 — flow consumption (release path)', 
         setSender(deployer);
         await setup.depository.pauseFlow(flowId);
         // Build a voucher; we expect a revert from the status check.
-        const releaseSelector = ((): number => {
-            const enc = new TextEncoder();
-            const b = sha256(enc.encode('claimReleaseWithVoucher(bytes,bytes)'));
-            return ((b[0]! << 24) | (b[1]! << 16) | (b[2]! << 8) | b[3]!) >>> 0;
-        })();
+        const releaseSelector = 0x6FBDC887; // sha256('claimWithVoucher(bytes,bytes)')[0:4]
         const fields: VoucherFields = {
             contractSelf: setup.depositoryAddress,
             selector: releaseSelector,
@@ -470,13 +466,7 @@ await opnet('BridgeDepository — PR γ.1 — flow consumption (release path)', 
             voucherId: 0xb42n,
         };
         const { preimage, hash } = buildVoucher(fields);
-        const { ABIDataTypes } = await import('@btc-vision/transaction');
-        const { encodeSelectorWithParams } = await import('../contracts/utils.js');
-        const sel = encodeSelectorWithParams(
-            'claimReleaseWithVoucher',
-            ABIDataTypes.BYTES,
-            ABIDataTypes.BYTES,
-        );
+        const sel = 0x6FBDC887; // sha256('claimWithVoucher(bytes,bytes)')[0:4]
         const w = new BinaryWriter();
         w.writeSelector(sel);
         w.writeBytesWithLength(preimage);
@@ -511,9 +501,7 @@ const MODE1_EVM_COUNTERPART: bigint =
     0xc0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0fen;
 
 function releaseSelector(): number {
-    const enc = new TextEncoder();
-    const b = sha256(enc.encode('claimReleaseWithVoucher(bytes,bytes)'));
-    return ((b[0]! << 24) | (b[1]! << 16) | (b[2]! << 8) | b[3]!) >>> 0;
+    return 0x6FBDC887; // sha256('claimWithVoucher(bytes,bytes)')[0:4] — unified entry point
 }
 
 await opnet('BridgeDepository — #44 — provision / drain inventory (mode 3 POOLED)',
@@ -632,8 +620,6 @@ await opnet('BridgeDepository — #44 — lockForBridge → claimReleaseWithVouc
             const releaseSrcBridge = Blockchain.generateRandomAddress();
             const releaseSrcToken = Blockchain.generateRandomAddress();
 
-            // Flip the canonical OPNet token to INVERSE_WRAPPED (mode 1).
-            await depository.setTokenMode(wusdcAddress, 1n, MODE1_EVM_COUNTERPART);
             const flowId = await registerFlow(setup, {
                 mode: 1n,
                 sourceBridgeAddr: releaseSrcBridge,
@@ -704,7 +690,6 @@ await opnet('BridgeDepository — #44 — lockForBridge → claimReleaseWithVouc
             const releaseSrcBridge = Blockchain.generateRandomAddress();
             const releaseSrcToken = Blockchain.generateRandomAddress();
 
-            await depository.setTokenMode(wusdcAddress, 1n, MODE1_EVM_COUNTERPART);
             const flowId = await registerFlow(setup, {
                 mode: 1n,
                 sourceBridgeAddr: releaseSrcBridge,
@@ -763,7 +748,6 @@ await opnet('BridgeDepository — #44 — lockForBridge → claimReleaseWithVouc
             const { depository, wusdc, wusdcAddress, depositoryAddress, signerWallet } = setup;
             const releaseSrcBridge = Blockchain.generateRandomAddress();
             const releaseSrcToken = Blockchain.generateRandomAddress();
-            await depository.setTokenMode(wusdcAddress, 1n, MODE1_EVM_COUNTERPART);
             const flowId = await registerFlow(setup, {
                 mode: 1n,
                 sourceBridgeAddr: releaseSrcBridge,
@@ -824,7 +808,6 @@ await opnet('BridgeDepository — #44 — lockForBridge → claimReleaseWithVouc
             const { depository, wusdc, wusdcAddress, depositoryAddress, signerWallet } = setup;
             const releaseSrcBridge = Blockchain.generateRandomAddress();
             const releaseSrcToken = Blockchain.generateRandomAddress();
-            await depository.setTokenMode(wusdcAddress, 1n, MODE1_EVM_COUNTERPART);
             const flowId = await registerFlow(setup, {
                 mode: 1n,
                 sourceBridgeAddr: releaseSrcBridge,
@@ -861,7 +844,6 @@ await opnet('BridgeDepository — #44 — lockForBridge → claimReleaseWithVouc
 
         await vm.it('lockForBridge rejects an unknown flowId before any token moves', async () => {
             const { depository, wusdc, wusdcAddress, depositoryAddress } = setup;
-            await depository.setTokenMode(wusdcAddress, 1n, MODE1_EVM_COUNTERPART);
             await registerFlow(setup, { mode: 1n });
             setSender(depositoryAddress);
             await wusdc.mintTo(alice, 4_000_000n);

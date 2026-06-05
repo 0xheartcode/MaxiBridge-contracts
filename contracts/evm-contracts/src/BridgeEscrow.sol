@@ -13,6 +13,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import {IVestingVault} from "./IVestingVault.sol";
+import {AmountPolicy} from "./AmountPolicy.sol";
 
 /// @notice Minimal interface for the bridge-issued WrappedERC20 (modes
 ///         INVERSE_WRAPPED + NATIVE_BURN_MINT). Defined here so the
@@ -75,28 +76,6 @@ contract BridgeEscrow is
             "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip,bytes32 flowId)"
         );
 
-    /// @notice EIP-712 type for mode-2/3 mints. Differs from ReleaseIntent
-    ///         only by the `wrappedToken` field — binds the mint to a
-    ///         specific WrappedERC20 contract so a sig signed for one
-    ///         wrapped can't be replayed against a different wrapped.
-    struct MintIntent {
-        address wrappedToken;   // WrappedERC20 contract to mint into
-        address to;             // recipient on EVM
-        uint256 amount;         // net amount to mint
-        uint256 srcChainId;     // OPNet network id (1=mainnet, 2=testnet)
-        bytes32 opnetTxHash;
-        uint32 opnetEventIndex;
-        uint256 burnNonce;      // OPNet burn nonce (mode 3) or lock nonce (mode 2)
-        uint32 signerEpoch;
-        bytes32 opnetNonce;
-        bytes32 flowId;         // PR β.2.payout-evm++ — flow binding for mode-dispatch
-    }
-
-    /// @dev keccak256("MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,bytes32 flowId)")
-    bytes32 public constant MINT_INTENT_TYPEHASH =
-        keccak256(
-            "MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,bytes32 flowId)"
-        );
 
     /// @notice EIP-712 type for the M-of-N refund attestation. Authorizes
     ///         `refundLockedDeposit` for ONE specific `depositNonce`. The
@@ -265,7 +244,7 @@ contract BridgeEscrow is
         // Mutable via timelocked governance:
         uint16  feeBps;           // 0..MAX_FEE_BPS
         uint128 minFee;           // dst-side base units
-        uint128 minAmount;        // src-side base units
+        uint128 minAmount;        // EVM-source base units
         uint128 cap;              // total inventory ceiling (mode 0/3/4) or mint ceiling (mode 2)
         uint128 dailyLimit;       // per-flow rolling window
         // Hot fields written by claim/release in PR γ:
@@ -458,8 +437,8 @@ contract BridgeEscrow is
     ///         guardian) but NOT `unpause()` or any other privileged fn.
     ///         Owner-rotatable via `setPauser`; zero address = disabled.
     /// @dev    Roles PR — appended after `lockedDeposits` (append-only). The
-    ///         trailing `__gap` shrinks by 1 (42 → 41) so the layout past this
-    ///         slot is unchanged.
+    ///         trailing `__gap` adjusts accordingly; see `storage-layout.json`
+    ///         for the authoritative slot count (CI-enforced).
     address public pauser;
 
     /// @notice #55 — per-burn replay guard for `refundBurn`. Keyed by
@@ -484,7 +463,7 @@ contract BridgeEscrow is
     ///      flow registry is the source of truth for mode + OPNet counterpart
     ///      binding.)
     ///      50 - 10 = 40.
-    uint256[40] private __gap;
+    uint256[40] private _gap;
 
     // ---------------------------------------------------------------------
     // Events
@@ -697,6 +676,7 @@ contract BridgeEscrow is
     error DailyLimitExceeded();
     error InsufficientFlowInventory();
     error AmountExceedsGross();         // MED-001 — claim() intent.amount > grossSrcAmount
+    error AccruedFeesOverflow();        // #114 — cumulative accruedFees would exceed uint128
     error PermitFailed();               // lockWithPermit — permit reverted and allowance still short
 
     // ─── PR γ.2c — refund lifecycle errors ─────────────────────────────
@@ -768,19 +748,33 @@ contract BridgeEscrow is
     ///         flow/treasury config) remain owner-only — the timelock delay
     ///         IS the safeguard for those.
     modifier onlyOwnerOrGuardian() {
-        if (msg.sender != owner() && msg.sender != guardian) revert NotGuardian();
+        _onlyOwnerOrGuardian();
         _;
+    }
+
+    function _onlyOwnerOrGuardian() internal view {
+        if (msg.sender != owner() && msg.sender != guardian) revert NotGuardian();
     }
 
     // ---------------------------------------------------------------------
     // Core — lock
     // ---------------------------------------------------------------------
 
-    function lock(
+    /// @notice E-2 — `lock` variant with an explicit `refundTo`. Identical to
+    ///         `lock` except the refund-eligible `LockRecord.user` is set to
+    ///         `refundTo` instead of `msg.sender`. Required by the CREATE2
+    ///         `DepositVault` forwarder: the vault holds + approves the tokens
+    ///         (so the balance-delta pull is still from `msg.sender` = vault)
+    ///         but then SELF-DESTRUCTS, so a refund to the vault address would
+    ///         be permanently unrecoverable. The vault commits `refundTo` into
+    ///         its CREATE2 initcode, so the deposit address binds to the
+    ///         user's refund destination — a sweep cannot redirect it.
+    function lockFor(
         address token,
         uint256 amount,
         bytes32 opnetRecipient,
-        bytes32 flowId
+        bytes32 flowId,
+        address refundTo
     )
         public
         whenNotPaused
@@ -790,6 +784,9 @@ contract BridgeEscrow is
         if (!supportedToken[token]) revert TokenNotSupported();
         if (amount == 0) revert AmountZero();
         if (opnetRecipient == bytes32(0)) revert InvalidRecipient();
+        // E-2 — the principal-refund destination if the destination-side mint
+        // is cancelled. Zero is rejected (would strand a refundable deposit).
+        if (refundTo == address(0)) revert ZeroAddress();
 
         // ─── PR γ.2a: flow binding + consumption (lock side) ──────────────
         // All status / minAmount / dailyLimit / cap enforcement happens in
@@ -821,9 +818,10 @@ contract BridgeEscrow is
         // already passed the `_bumpLockInventory` uint128 cap check above,
         // so the cast is safe.
         lockedDeposits[depositNonce_] = LockRecord({
-            user: msg.sender,
+            user: refundTo,
             lockedAt: uint64(block.timestamp),
             status: DepositStatus.Locked,
+            // forge-lint: disable-next-line(unsafe-typecast)
             amount: uint128(amountReceived_),
             token: token,
             flowId: flowId,
@@ -832,6 +830,22 @@ contract BridgeEscrow is
 
         emit Locked(token, msg.sender, amount, amountReceived_, opnetRecipient, depositNonce_);
         emit LockedToFlow(flowId, msg.sender, token, amountReceived_, depositNonce_);
+    }
+
+    /// @notice Lock tokens for a bridge deposit. The refund destination (if the
+    ///         destination-side mint is ever cancelled) is the caller. EOA
+    ///         depositors use this; the CREATE2 `DepositVault` forwarder uses
+    ///         `lockFor` to pin a user-controlled refund address instead.
+    function lock(
+        address token,
+        uint256 amount,
+        bytes32 opnetRecipient,
+        bytes32 flowId
+    )
+        public
+        returns (uint256 depositNonce_, uint256 amountReceived_)
+    {
+        return lockFor(token, amount, opnetRecipient, flowId, msg.sender);
     }
 
     /// @notice EIP-2612 one-transaction bridging: consume an off-chain
@@ -1008,7 +1022,7 @@ contract BridgeEscrow is
             // re-provisions inventory (or never, by design, if the flow is
             // being permanently retired). NO `unchecked` here.
             flow.inventory = flow.inventory - fee;
-            flow.accruedFees = uint128(uint256(flow.accruedFees) + fee);
+            flow.accruedFees = _addFees(flow.accruedFees, fee);
         }
 
         emit DepositSettled(depositNonce_, flowId, fee, msg.sender);
@@ -1049,8 +1063,7 @@ contract BridgeEscrow is
     ///      requested source-side base units) for the enforcement keys —
     ///      identical semantics to the claim path's `grossSrcAmount`.
     function _consumeLockFlow(bytes32 flowId, address token, uint256 amount) internal {
-        FlowRecord storage flow = flows[flowId];
-        if (flow.evmChainId == 0) revert FlowNotFound();
+        FlowRecord storage flow = _requireFlow(flowId);
         // Caller-supplied flowId must match the token being deposited —
         // a flow uniquely names the (mode, chains, both bridges, both
         // tokens) tuple, EVM token field is `flow.evmToken`.
@@ -1083,14 +1096,7 @@ contract BridgeEscrow is
         if (amount < uint256(flow.minAmount)) revert AmountBelowFlowMin();
 
         // 3. dailyLimit (rolling 24h window). Mirrors the claim path.
-        if (amount > type(uint128).max) revert DailyLimitExceeded();
-        if (block.timestamp - uint256(flow.lastWindowStart) > uint256(FLOW_WINDOW_DURATION)) {
-            flow.mintedToday = 0;
-            flow.lastWindowStart = uint64(block.timestamp);
-        }
-        uint256 newMinted = uint256(flow.mintedToday) + amount;
-        if (newMinted > uint256(flow.dailyLimit)) revert DailyLimitExceeded();
-        flow.mintedToday = uint128(newMinted);
+        _advanceDailyWindow(flow, amount);
     }
 
     /// @dev PR γ.2a — cap check + inventory increment, post-pull. Uses the
@@ -1104,6 +1110,8 @@ contract BridgeEscrow is
         FlowRecord storage flow = flows[flowId];
         uint256 newInventory = uint256(flow.inventory) + received;
         if (newInventory > uint256(flow.cap)) revert FlowCapExceeded();
+        // cap is uint128 ⇒ newInventory ≤ cap ≤ uint128.max
+        // forge-lint: disable-next-line(unsafe-typecast)
         flow.inventory = uint128(newInventory);
 
         // ─── #62-fix — per-deposit fee CAPTURE (not promotion) ────────────
@@ -1133,16 +1141,11 @@ contract BridgeEscrow is
         // clamp, which papered over a misconfigured minFee.)
         if (fee >= received) revert FeeExceedsAmount();
         // fee < received <= uint128.max — cast is safe.
+        // forge-lint: disable-next-line(unsafe-typecast)
         lockFee = uint128(fee);
     }
 
-    /// @dev MED-001 — minAmount + rolling-window dailyLimit enforcement for
-    ///      the mint-on-EVM claim path (`claimMintWrapped`). Bounds how much
-    ///      a compromised signer can authorize per 24h window. Keyed on the
-    ///      minted amount — `MintIntent` has no separate gross field.
-    ///      Mirrors the dailyLimit block in `claim()`.
-    function _consumeMintFlowLimits(FlowRecord storage flow, uint256 amount) internal {
-        if (amount < uint256(flow.minAmount)) revert AmountBelowFlowMin();
+    function _advanceDailyWindow(FlowRecord storage flow, uint256 amount) internal {
         if (amount > type(uint128).max) revert DailyLimitExceeded();
         if (block.timestamp - uint256(flow.lastWindowStart) > uint256(FLOW_WINDOW_DURATION)) {
             flow.mintedToday = 0;
@@ -1150,7 +1153,21 @@ contract BridgeEscrow is
         }
         uint256 newMinted = uint256(flow.mintedToday) + amount;
         if (newMinted > uint256(flow.dailyLimit)) revert DailyLimitExceeded();
+        // dailyLimit is uint128 ⇒ newMinted ≤ dailyLimit ≤ uint128.max
+        // forge-lint: disable-next-line(unsafe-typecast)
         flow.mintedToday = uint128(newMinted);
+    }
+
+    function _consumeMintFlowLimits(FlowRecord storage flow, uint256 amount) internal {
+        if (amount < uint256(flow.minAmount)) revert AmountBelowFlowMin();
+        _advanceDailyWindow(flow, amount);
+    }
+
+    function _addFees(uint128 current, uint256 delta) internal pure returns (uint128) {
+        uint256 n = uint256(current) + delta;
+        if (n > type(uint128).max) revert AccruedFeesOverflow();
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return uint128(n);
     }
 
     // ---------------------------------------------------------------------
@@ -1171,16 +1188,15 @@ contract BridgeEscrow is
         if (!supportedToken[intent.token]) revert TokenNotSupported();
         if (intent.to == address(0)) revert InvalidRecipient();
         if (intent.amount == 0) revert AmountZero();
-        // MED-001 — bound the amount actually transferred out by the
-        // cap-checked source gross. The flow's minAmount / dailyLimit /
-        // inventory are all enforced against `grossSrcAmount`, but the
-        // token movement is `intent.amount`; without this a compromised
-        // signer could sign a small gross (under the daily cap) and a huge
-        // amount. Honest vouchers always satisfy net <= gross. This holds
-        // while gross and the EVM-side amount share a decimal basis (true
-        // today — all flows are 6/6); decimal-aware AmountPolicy must
-        // revisit every grossSrc-keyed check here, not just this one.
-        if (intent.amount > intent.grossSrcAmount) revert AmountExceedsGross();
+        // MED-001 / E-3 — the "amount actually transferred out cannot exceed
+        // gross" bound is enforced in DESTINATION units AFTER decimal scaling
+        // (see `grossDst` below), not here. `intent.amount` is an EVM-
+        // destination amount while `grossSrcAmount` is an OPNet-source amount;
+        // comparing them raw is correct only when both legs share decimals.
+        // The flow (loaded post-sig-verify) carries the per-leg decimals, so
+        // this check moved down past the flow lookup. The protection is
+        // unchanged: a compromised signer still cannot sign a small gross +
+        // huge amount — `intent.amount > grossDst` reverts AmountExceedsGross.
         if (intent.srcChainId != expectedOpnetChainId) revert InvalidSrcChainId();
         if (intent.signerEpoch != currentEpoch) revert InvalidSignerEpoch();
         // #49 — cancellation checked BEFORE replay, matching the OPNet
@@ -1203,19 +1219,19 @@ contract BridgeEscrow is
         // (so unauthenticated callers can't spam flow lookups) and
         // before any token movement. Existence flag matches the rest of
         // the registry: chainId == 0 means "not registered".
-        FlowRecord storage flow = flows[intent.flowId];
-        if (flow.evmChainId == 0) revert FlowNotFound();
-        // Mode dispatch — `claim` releases real tokens from the bridge's
-        // balance. Valid for WRAPPED and POOLED_LOCK_RELEASE only. Mint-on-
-        // EVM modes (INVERSE_WRAPPED / NATIVE_BURN_MINT) go through
-        // `claimMintWrapped`. Bind the intent's `token` to `flow.evmToken`
-        // so a release sig can't be replayed against a different token's
-        // pool.
-        if (
-            flow.mode != uint8(TokenMode.WRAPPED)
+        FlowRecord storage flow = _requireFlow(intent.flowId);
+        // Mode dispatch — unified entry point for all five modes.
+        // Mint-on-EVM (INVERSE_WRAPPED / NATIVE_BURN_MINT) calls mintFromBridge
+        // instead of safeTransfer; inventory and fee accrual are skipped
+        // (those are settled on the OPNet source leg). Release modes
+        // (WRAPPED / POOLED_LOCK_RELEASE / POOLED_LOCK_VEST) transfer custodied tokens.
+        bool isMintMode = flow.mode == uint8(TokenMode.INVERSE_WRAPPED)
+                       || flow.mode == uint8(TokenMode.NATIVE_BURN_MINT);
+        if (!isMintMode
+            && flow.mode != uint8(TokenMode.WRAPPED)
             && flow.mode != uint8(TokenMode.POOLED_LOCK_RELEASE)
-            && flow.mode != uint8(TokenMode.POOLED_LOCK_VEST)
-        ) {
+            && flow.mode != uint8(TokenMode.POOLED_LOCK_VEST))
+        {
             revert WrongMode();
         }
         if (flow.evmToken != intent.token) revert WrongMode();
@@ -1233,47 +1249,51 @@ contract BridgeEscrow is
             revert FlowNotActive();
         }
 
-        // 2. minAmount — uses source-side gross from the voucher (PR β.2).
-        if (intent.grossSrcAmount < uint256(flow.minAmount)) revert AmountBelowFlowMin();
+        // E-3 — scale the signed OPNet-source gross to EVM-destination units.
+        // Identity for 6/6 flows; strict shrink (reverts AmountDustOnShrink on
+        // indivisible dust) for e.g. opnet-18 → evm-6; pure multiply on grow.
+        // EVERY destination-side check below (amount bound, dailyLimit,
+        // inventory, fee) keys off `grossDst`, so an arbitrary per-flow decimal
+        // pair accounts correctly. `flow.opnetDecimals` is the source leg here
+        // (claim is the OPNet→EVM direction), `flow.evmDecimals` the dest leg.
+        uint256 grossDst = AmountPolicy.scale(
+            intent.grossSrcAmount, flow.opnetDecimals, flow.evmDecimals
+        );
+        // 2. minAmount — checked in EVM-destination units after scaling (#114).
+        //    lock() also compares in EVM units, so both legs enforce the same floor.
+        if (grossDst < uint256(flow.minAmount)) revert AmountBelowFlowMin();
+        // MED-001 (decimal-correct) — `intent.amount` and `grossDst` are both
+        // EVM-destination units; bound the release by the scaled gross.
+        if (intent.amount > grossDst) revert AmountExceedsGross();
 
-        // 3. dailyLimit (rolling 24h window keyed off `grossSrcAmount`).
-        //    Window rotate: if more than 86400s since last window start,
-        //    reset the bucket. Then assert and consume.
-        uint128 grossDst128 = uint128(intent.grossSrcAmount);
-        if (intent.grossSrcAmount > type(uint128).max) revert DailyLimitExceeded();
-        if (block.timestamp - uint256(flow.lastWindowStart) > uint256(FLOW_WINDOW_DURATION)) {
-            flow.mintedToday = 0;
-            flow.lastWindowStart = uint64(block.timestamp);
-        }
-        // Check + consume. Use uint256 math to avoid uint128 overflow on
-        // the addition itself. We can safely cast back because dailyLimit
-        // is uint128.
-        uint256 newMinted = uint256(flow.mintedToday) + uint256(grossDst128);
-        if (newMinted > uint256(flow.dailyLimit)) revert DailyLimitExceeded();
-        flow.mintedToday = uint128(newMinted);
+        // 3. dailyLimit (rolling 24h window keyed off `grossDst`).
+        _advanceDailyWindow(flow, grossDst);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint128 grossDst128 = uint128(grossDst); // safe: _advanceDailyWindow already bounds to uint128
 
-        // 4. inventory: release direction. Decrement by grossDst. Revert
-        //    if inventory < grossDst (insufficient).
-        if (uint256(flow.inventory) < uint256(grossDst128)) revert InsufficientFlowInventory();
-        unchecked {
-            flow.inventory = flow.inventory - grossDst128;
-        }
+        // 4. inventory + fee — release modes only. Mint modes have no
+        //    custodied balance on the EVM side; fee is collected on OPNet.
+        if (!isMintMode) {
+            if (uint256(flow.inventory) < uint256(grossDst128)) revert InsufficientFlowInventory();
+            unchecked {
+                flow.inventory = flow.inventory - grossDst128;
+            }
 
-        // FINDING-004 (audit 2026-05-26): accrue the release-side fee.
-        // The inventory was decremented by gross, but only
-        // `intent.amount` (= net) leaves the bridge to the recipient and
-        // `tip` to the relayer. The remainder `gross - net = fee`
-        // stays in the bridge's balance. Pre-fix this delta was never
-        // recorded anywhere, so `withdrawFees` couldn't sweep it and the
-        // per-flow invariant `inventory + accruedFees == bridge.balance`
-        // drifted upward on every release.
-        // `intent.amount > intent.grossSrcAmount` is rejected earlier
-        // (AmountExceedsGross), so the subtraction is safe.
-        uint256 feePortion = uint256(intent.grossSrcAmount) - intent.amount;
-        if (feePortion > 0) {
-            // grossDst128 is uint128, feePortion <= grossDst128, so the
-            // cast back to uint128 below is safe.
-            flow.accruedFees = uint128(uint256(flow.accruedFees) + feePortion);
+            // FINDING-004 (audit 2026-05-26): accrue the release-side fee.
+            // The inventory was decremented by gross, but only
+            // `intent.amount` (= net) leaves the bridge to the recipient and
+            // `tip` to the relayer. The remainder `gross - net = fee`
+            // stays in the bridge's balance. Pre-fix this delta was never
+            // recorded anywhere, so `withdrawFees` couldn't sweep it and the
+            // per-flow invariant `inventory + accruedFees == bridge.balance`
+            // drifted upward on every release.
+            // `intent.amount > grossDst` is rejected earlier (AmountExceedsGross),
+            // so the subtraction is safe. Both operands are destination units, so
+            // the accrued fee is destination-correct for asymmetric flows.
+            uint256 feePortion = grossDst - intent.amount;
+            if (feePortion > 0) {
+                flow.accruedFees = _addFees(flow.accruedFees, feePortion);
+            }
         }
 
         // 5. tip cap + carve.
@@ -1305,30 +1325,32 @@ contract BridgeEscrow is
         signaturesUsed[intent.opnetNonce] = true;
         usedSourceEvent[intent.opnetTxHash][intent.opnetEventIndex] = true;
 
-        emit Claimed(intent.token, intent.to, recipientAmount, intent.opnetNonce);
-        if (tip > 0) {
-            // msg.sender — NOT tx.origin — so smart-contract relayers can
-            // sweep into their own balance in the same transaction.
-            emit RelayerTipPaid(intent.flowId, msg.sender, tip);
-            IERC20(intent.token).safeTransfer(msg.sender, tip);
-        }
-
-        // Destination dispatch:
-        //   Mode 4 (POOLED_LOCK_VEST) — deposit into the per-flow VestingVault
-        //     for linear release to `intent.to`. Schedule key is the voucher
-        //     opnetNonce (already replay-guarded above), so each claim opens
-        //     an independent vest. Tip carve happened above; only the
-        //     recipient-bound `recipientAmount` enters the vault.
-        //   Default (modes 0 / 3) — direct release to `intent.to`.
-        if (flow.mode == uint8(TokenMode.POOLED_LOCK_VEST)) {
-            address vault = flow.vestingVault;
-            // addFlow + setFlowVestingVault both enforce non-zero for mode 4;
-            // defensive recheck before granting allowance.
-            if (vault == address(0)) revert VestingVaultNotSet();
-            IERC20(intent.token).safeIncreaseAllowance(vault, recipientAmount);
-            IVestingVault(vault).depositFor(intent.to, recipientAmount, intent.opnetNonce);
+        // Destination dispatch — mint modes call mintFromBridge (separate call
+        // for relayer tip when > 0); release modes transfer custodied tokens
+        // (mode 4 via VestingVault for linear drip, else direct safeTransfer).
+        if (isMintMode) {
+            emit WrappedMintedFromVoucher(intent.token, intent.to, recipientAmount, intent.opnetNonce);
+            if (tip > 0) {
+                emit RelayerTipPaid(intent.flowId, msg.sender, tip);
+                IWrappedERC20(intent.token).mintFromBridge(msg.sender, tip);
+            }
+            IWrappedERC20(intent.token).mintFromBridge(intent.to, recipientAmount);
         } else {
-            IERC20(intent.token).safeTransfer(intent.to, recipientAmount);
+            emit Claimed(intent.token, intent.to, recipientAmount, intent.opnetNonce);
+            if (tip > 0) {
+                // msg.sender — NOT tx.origin — so smart-contract relayers can
+                // sweep into their own balance in the same transaction.
+                emit RelayerTipPaid(intent.flowId, msg.sender, tip);
+                IERC20(intent.token).safeTransfer(msg.sender, tip);
+            }
+            if (flow.mode == uint8(TokenMode.POOLED_LOCK_VEST)) {
+                address vault = flow.vestingVault;
+                if (vault == address(0)) revert VestingVaultNotSet();
+                IERC20(intent.token).safeIncreaseAllowance(vault, recipientAmount);
+                IVestingVault(vault).depositFor(intent.to, recipientAmount, intent.opnetNonce);
+            } else {
+                IERC20(intent.token).safeTransfer(intent.to, recipientAmount);
+            }
         }
     }
 
@@ -1506,8 +1528,7 @@ contract BridgeEscrow is
         onlyOwnerOrGuardian
         nonReentrant
     {
-        FlowRecord storage flow = flows[flowId];
-        if (flow.evmChainId == 0) revert FlowNotFound();
+        FlowRecord storage flow = _requireFlow(flowId);
         if (flow.mode != uint8(TokenMode.POOLED_LOCK_VEST)) revert WrongMode();
         address vault = flow.vestingVault;
         if (vault == address(0)) revert VestingVaultNotSet();
@@ -1610,84 +1631,6 @@ contract BridgeEscrow is
         emit UnwrapMinFeeSet(token, amount);
     }
 
-    // ---------------------------------------------------------------------
-    // Modal extensions — modes 2 + 3 (INVERSE_WRAPPED + NATIVE_BURN_MINT)
-    // ---------------------------------------------------------------------
-
-    /// @notice Claim a mode-2/3 mint authorised by the M-of-N signer set.
-    ///         Mints `intent.amount` WrappedERC20 tokens (the
-    ///         `intent.wrappedToken` contract) to `intent.to`.
-    /// @dev    EIP-712 typehash is `MINT_INTENT_TYPEHASH` (different from
-    ///         the mode-1 `RELEASE_INTENT_TYPEHASH`); a sig signed for one
-    ///         cannot be replayed against the other. Replay protection
-    ///         shares the existing `signaturesUsed` and `usedSourceEvent`
-    ///         maps with `claim()` — opnetNonce + (opnetTxHash,
-    ///         opnetEventIndex) are globally unique on OPNet so no
-    ///         collision risk between flows.
-    function claimMintWrapped(MintIntent calldata intent, bytes calldata sig)
-        external
-        whenNotPaused
-        nonReentrant
-    {
-        if (!supportedToken[intent.wrappedToken]) revert TokenNotSupported();
-        if (intent.to == address(0)) revert InvalidRecipient();
-        if (intent.amount == 0) revert AmountZero();
-        if (intent.srcChainId != expectedOpnetChainId) revert InvalidSrcChainId();
-        if (intent.signerEpoch != currentEpoch) revert InvalidSignerEpoch();
-        // #49 — cancellation checked BEFORE replay, matching the OPNet
-        // claimMintWithVoucher order. For a cancelled-then-claimed voucher
-        // this surfaces VoucherCancelled_ instead of masking it as
-        // AlreadyClaimed, which speeds incident triage.
-        if (cancelledVouchers[intent.opnetNonce]) revert VoucherCancelled_();
-        if (signaturesUsed[intent.opnetNonce]) revert AlreadyClaimed();
-        if (usedSourceEvent[intent.opnetTxHash][intent.opnetEventIndex]) {
-            revert SourceEventAlreadyUsed();
-        }
-
-        bytes32 structHash = _hashMintIntent(intent);
-        bytes32 digest = _hashTypedDataV4(structHash);
-
-        _verifySignatures(digest, sig);
-
-        // PR β.2.payout-evm++ — flow binding. The voucher commits to a
-        // specific flowId via MINT_INTENT_TYPEHASH. Look it up after
-        // sig-verify (so unauthenticated callers can't spam flow
-        // lookups) and assert: (1) the flow exists, (2) its mode is one
-        // of the mint-on-EVM modes, (3) the wrappedToken in the voucher
-        // matches the flow's evmToken — prevents a sig signed for one
-        // wrapped from being replayed against a different wrapped.
-        FlowRecord storage flow = flows[intent.flowId];
-        if (flow.evmChainId == 0) revert FlowNotFound();
-        if (flow.mode != uint8(TokenMode.INVERSE_WRAPPED) && flow.mode != uint8(TokenMode.NATIVE_BURN_MINT)) {
-            revert WrongMode();
-        }
-        if (flow.evmToken != intent.wrappedToken) revert WrongMode();
-        if (flow.status != FLOW_STATUS_ACTIVE && flow.status != FLOW_STATUS_DRAINING) {
-            revert FlowNotActive();
-        }
-
-        // MED-001 — the mint-on-EVM path previously enforced NO flow
-        // limits, so a compromised signer faced no per-window bound.
-        // Apply minAmount + rolling-window dailyLimit, keyed on the minted
-        // amount. (Per-mode `cap`/`inventory` accounting for mint-on-EVM
-        // flows is deliberately not added here — it is entangled with the
-        // mode-1/2 inventory-semantics question in #44 and is tracked
-        // there; dailyLimit is the substantive bad-signer bound.)
-        _consumeMintFlowLimits(flow, intent.amount);
-
-        // Effects BEFORE interaction (CEI).
-        signaturesUsed[intent.opnetNonce] = true;
-        usedSourceEvent[intent.opnetTxHash][intent.opnetEventIndex] = true;
-
-        emit WrappedMintedFromVoucher(
-            intent.wrappedToken,
-            intent.to,
-            intent.amount,
-            intent.opnetNonce
-        );
-
-        IWrappedERC20(intent.wrappedToken).mintFromBridge(intent.to, intent.amount);
-    }
 
     /// @notice #55 — trustless burn-side recovery (MINT-AUTHORITY PRIMITIVE).
     ///         Symmetric EVM counterpart to OPNet `BridgeDepository.refundBurn`.
@@ -1736,6 +1679,7 @@ contract BridgeEscrow is
         // per-`WrappedERC20` (see WrappedERC20.burnNonce), so two different
         // wrappeds can produce overlapping (txHash, nonce) pairs and one
         // legitimate refund would otherwise permanently block the other.
+        // forge-lint: disable-next-line(asm-keccak256)
         bytes32 burnId = keccak256(
             abi.encode(intent.wrappedToken, intent.burner, intent.burnTxHash, intent.burnNonce)
         );
@@ -1750,8 +1694,7 @@ contract BridgeEscrow is
         // a flowId; assert (1) it exists, (2) it is a mint-on-EVM mode (the
         // bridge can only re-mint where it is the minter), (3) the wrapped in
         // the attestation matches the flow's evmToken, (4) the flow is live.
-        FlowRecord storage flow = flows[intent.flowId];
-        if (flow.evmChainId == 0) revert FlowNotFound();
+        FlowRecord storage flow = _requireFlow(intent.flowId);
         if (flow.mode != uint8(TokenMode.INVERSE_WRAPPED) && flow.mode != uint8(TokenMode.NATIVE_BURN_MINT)) {
             revert WrongMode();
         }
@@ -1806,8 +1749,7 @@ contract BridgeEscrow is
     ///         EVM-side inventory — mint-on-EVM modes are rejected.
     function provisionInventory(bytes32 flowId, uint256 amount) external onlyOwner nonReentrant {
         if (amount == 0) revert AmountZero();
-        FlowRecord storage flow = flows[flowId];
-        if (flow.evmChainId == 0) revert FlowNotFound();
+        FlowRecord storage flow = _requireFlow(flowId);
         if (
             flow.mode != uint8(TokenMode.WRAPPED)
             && flow.mode != uint8(TokenMode.POOLED_LOCK_RELEASE)
@@ -1837,6 +1779,8 @@ contract BridgeEscrow is
         // Atomic: tokens in AND accounting up, in the same call.
         uint256 newInventory = uint256(flow.inventory) + received;
         if (newInventory > uint256(flow.cap)) revert FlowCapExceeded();
+        // cap is uint128 ⇒ newInventory ≤ cap ≤ uint128.max
+        // forge-lint: disable-next-line(unsafe-typecast)
         flow.inventory = uint128(newInventory);
 
         emit InventoryProvisioned(flowId, token, msg.sender, received);
@@ -1857,12 +1801,13 @@ contract BridgeEscrow is
         if (msg.sender != guardian) revert NotGuardian();
         if (treasury == address(0)) revert TreasuryNotSet();
         if (amount == 0) revert AmountZero();
-        FlowRecord storage flow = flows[flowId];
-        if (flow.evmChainId == 0) revert FlowNotFound();
+        FlowRecord storage flow = _requireFlow(flowId);
         if (uint256(flow.inventory) < amount) revert InsufficientFlowInventory();
 
         address token = flow.evmToken;
         unchecked {
+            // amount ≤ flow.inventory ≤ uint128.max (checked above)
+            // forge-lint: disable-next-line(unsafe-typecast)
             flow.inventory = flow.inventory - uint128(amount);
         }
         emit InventoryDrained(flowId, token, treasury, amount, msg.sender);
@@ -1902,13 +1847,14 @@ contract BridgeEscrow is
         nonReentrant
     {
         if (treasury == address(0)) revert TreasuryNotSet();
-        FlowRecord storage flow = flows[flowId];
-        if (flow.evmChainId == 0) revert FlowNotFound();
+        FlowRecord storage flow = _requireFlow(flowId);
         if (amount == 0) revert AmountZero();
         if (amount > uint256(flow.accruedFees)) revert InsufficientAccruedFees();
 
         // Effects (CEI): decrement the accumulator before the transfer.
         unchecked {
+            // amount ≤ accruedFees ≤ uint128.max (checked above)
+            // forge-lint: disable-next-line(unsafe-typecast)
             flow.accruedFees = flow.accruedFees - uint128(amount);
         }
 
@@ -1980,6 +1926,11 @@ contract BridgeEscrow is
         if (p.evmChainId == 0) revert FlowZeroChainId();
         if (p.evmBridge == address(0) || p.evmToken == address(0)) revert ZeroAddress();
         if (p.opnetBridge == bytes32(0) || p.opnetToken == bytes32(0)) revert ZeroAddress();
+        // E-3 — per-leg decimals are independent (any pair is allowed). The
+        // claim legs (`claim` modes 0/3/4, `claimMintWrapped` modes 1/2) scale
+        // the signed source amount to EVM-destination units via
+        // AmountPolicy.scale before any accounting (see _grossDst). Bounds
+        // only: 1..MAX_DECIMALS so `10**delta` stays inside uint256.
         if (p.evmDecimals == 0 || p.evmDecimals > 30) revert FlowInvalidDecimals();
         if (p.opnetDecimals == 0 || p.opnetDecimals > 30) revert FlowInvalidDecimals();
         if (p.feeBps > MAX_FEE_BPS) revert FeeBpsTooHigh();
@@ -2042,71 +1993,46 @@ contract BridgeEscrow is
         emit FlowAdded(flowId, p.mode, p.evmChainId, p.evmToken, p.opnetToken);
     }
 
-    /// @notice Guardian-only protective freeze. Immediate (no timelock) so a
-    ///         compromise can be quarantined fast. Valid from any registered
-    ///         non-PAUSED state (active / draining / retired) — the guardian
-    ///         can slam a flow off regardless of its current lifecycle state.
-    ///         FREEZE side of the H-01 freeze-but-never-thaw split: the
-    ///         guardian can push a flow toward "off" but can NEVER re-open it
-    ///         (only the owner's resumeFlow flips back to ACTIVE).
+    function _requireFlow(bytes32 flowId) internal view returns (FlowRecord storage f) {
+        f = flows[flowId];
+        if (f.evmChainId == 0) revert FlowNotFound();
+    }
+
+    function _setFlowStatus(bytes32 flowId, uint8 newStatus) internal {
+        FlowRecord storage f = _requireFlow(flowId);
+        if (f.status == newStatus) revert FlowInvalidStatusTransition();
+        emit FlowStatusChanged(flowId, f.status, newStatus);
+        f.status = newStatus;
+    }
+
+    /// @notice Guardian-only protective freeze. FREEZE side of H-01: guardian
+    ///         can push a flow off but can NEVER re-open it (only resumeFlow).
     function pauseFlow(bytes32 flowId) external {
         if (msg.sender != guardian) revert NotGuardian();
-        FlowRecord storage f = flows[flowId];
-        if (f.evmChainId == 0) revert FlowNotFound();
-        // A registered flow is always in {ACTIVE,PAUSED,DRAINING,RETIRED};
-        // the only illegal move is a self-transition.
-        if (f.status == FLOW_STATUS_PAUSED) revert FlowInvalidStatusTransition();
-        emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_PAUSED);
-        f.status = FLOW_STATUS_PAUSED;
+        _setFlowStatus(flowId, FLOW_STATUS_PAUSED);
     }
 
-    /// @notice Owner-only resume — the SOLE edge back to ACTIVE, from any
-    ///         off-state (paused / draining / retired). THAW side of the
-    ///         H-01 split: re-opening a flow is owner-only, so a guardian
-    ///         freeze can never be self-reversed.
+    /// @notice Owner-only resume — SOLE edge back to ACTIVE. THAW side of H-01:
+    ///         re-opening is owner-only so a guardian freeze can't be self-reversed.
     function resumeFlow(bytes32 flowId) external onlyOwner {
-        FlowRecord storage f = flows[flowId];
-        if (f.evmChainId == 0) revert FlowNotFound();
-        if (f.status == FLOW_STATUS_ACTIVE) revert FlowInvalidStatusTransition();
-        emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_ACTIVE);
-        f.status = FLOW_STATUS_ACTIVE;
+        _setFlowStatus(flowId, FLOW_STATUS_ACTIVE);
     }
 
-    /// @notice Owner-only — wind a route down: blocks new locks but keeps
-    ///         honouring in-flight release/burn claims. Valid from any
-    ///         registered non-DRAINING state. REVERSIBLE — resumeFlow flips
-    ///         it back to ACTIVE (no longer a one-way door), so a wind-down
-    ///         started by mistake or reconsidered can simply be reopened.
+    /// @notice Owner-only — wind down: blocks new locks, honours in-flight claims.
     function drainFlow(bytes32 flowId) external onlyOwner {
-        FlowRecord storage f = flows[flowId];
-        if (f.evmChainId == 0) revert FlowNotFound();
-        if (f.status == FLOW_STATUS_DRAINING) revert FlowInvalidStatusTransition();
-        emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_DRAINING);
-        f.status = FLOW_STATUS_DRAINING;
+        _setFlowStatus(flowId, FLOW_STATUS_DRAINING);
     }
 
-    /// @notice Owner-only — decommission FLAG. Marks a route as deliberately
-    ///         retired (distinct intent from a guardian incident-pause) for
-    ///         clear UI/indexer labelling. Behaves like "off": blocks locks
-    ///         AND claims (a non-active/non-draining status). Valid from any
-    ///         registered non-RETIRED state. NOT terminal — resumeFlow flips
-    ///         it back to ACTIVE exactly like paused/draining. No money-safety
-    ///         guarantee attaches; it is an intent label enforced only by the
-    ///         flow being off while it holds this status.
+    /// @notice Owner-only — decommission flag. Distinct from guardian incident-pause.
     function retireFlow(bytes32 flowId) external onlyOwner {
-        FlowRecord storage f = flows[flowId];
-        if (f.evmChainId == 0) revert FlowNotFound();
-        if (f.status == FLOW_STATUS_RETIRED) revert FlowInvalidStatusTransition();
-        emit FlowStatusChanged(flowId, f.status, FLOW_STATUS_RETIRED);
-        f.status = FLOW_STATUS_RETIRED;
+        _setFlowStatus(flowId, FLOW_STATUS_RETIRED);
     }
 
     /// @notice Governor-only — adjust the per-flow inventory ceiling.
     ///         Cannot drop the cap below current inventory (would brick
     ///         existing locks).
     function setFlowCap(bytes32 flowId, uint128 newCap) external onlyOwner {
-        FlowRecord storage f = flows[flowId];
-        if (f.evmChainId == 0) revert FlowNotFound();
+        FlowRecord storage f = _requireFlow(flowId);
         if (newCap < f.inventory) revert FlowCapBelowInventory();
         emit FlowCapChanged(flowId, f.cap, newCap);
         f.cap = newCap;
@@ -2116,8 +2042,7 @@ contract BridgeEscrow is
     ///         No floor: setting to zero disables new mints (paired with
     ///         pause/drain for soft-shutdown UX).
     function setFlowDailyLimit(bytes32 flowId, uint128 newLimit) external onlyOwner {
-        FlowRecord storage f = flows[flowId];
-        if (f.evmChainId == 0) revert FlowNotFound();
+        FlowRecord storage f = _requireFlow(flowId);
         emit FlowDailyLimitChanged(flowId, f.dailyLimit, newLimit);
         f.dailyLimit = newLimit;
     }
@@ -2126,8 +2051,7 @@ contract BridgeEscrow is
     ///         amount. Helps reject dust deposits that wouldn't pay their
     ///         own gas back out.
     function setFlowMinAmount(bytes32 flowId, uint128 newMin) external onlyOwner {
-        FlowRecord storage f = flows[flowId];
-        if (f.evmChainId == 0) revert FlowNotFound();
+        FlowRecord storage f = _requireFlow(flowId);
         // #62-fix — preserve the addFlow invariant: a non-zero minAmount
         // must exceed minFee, otherwise the smallest lock at the advertised
         // floor reverts with FeeExceedsAmount.
@@ -2140,8 +2064,7 @@ contract BridgeEscrow is
     ///         at MAX_FEE_BPS (10%).
     function setFlowFee(bytes32 flowId, uint16 newBps, uint128 newMinFee) external onlyOwner {
         if (newBps > MAX_FEE_BPS) revert FeeBpsTooHigh();
-        FlowRecord storage f = flows[flowId];
-        if (f.evmChainId == 0) revert FlowNotFound();
+        FlowRecord storage f = _requireFlow(flowId);
         // #62-fix — preserve the addFlow invariant: if a positive minAmount
         // is configured, it must still strictly exceed the (possibly new)
         // minFee. Raising minFee at or above an existing minAmount would
@@ -2158,8 +2081,7 @@ contract BridgeEscrow is
     ///         actual tip payout wiring lands in a follow-up PR.
     function setFlowTipCap(bytes32 flowId, uint16 newBps) external onlyOwner {
         if (newBps > MAX_TIP_BPS) revert TipCapTooHigh();
-        FlowRecord storage f = flows[flowId];
-        if (f.evmChainId == 0) revert FlowNotFound();
+        FlowRecord storage f = _requireFlow(flowId);
         emit FlowTipCapUpdated(flowId, f.tipCapBps, newBps);
         f.tipCapBps = newBps;
     }
@@ -2176,8 +2098,7 @@ contract BridgeEscrow is
     ///         repoint → unpause.
     function setFlowVestingVault(bytes32 flowId, address newVault) external onlyOwner {
         if (newVault == address(0)) revert VestingVaultRequired();
-        FlowRecord storage f = flows[flowId];
-        if (f.evmChainId == 0) revert FlowNotFound();
+        FlowRecord storage f = _requireFlow(flowId);
         if (f.mode != uint8(TokenMode.POOLED_LOCK_VEST)) revert VestingVaultNotPermitted();
         // Defense-in-depth — the vault's immutable underlying asset MUST be
         // this flow's `evmToken`. Without this check, a governor that wires
@@ -2185,7 +2106,7 @@ contract BridgeEscrow is
         // path approve token-A, while the vault's `depositFor` then pulls
         // token-B from the bridge — draining a different flow's pool into
         // the wrong vault. Cheap to enforce, closes the misconfiguration.
-        if (address(IVestingVault(newVault).token()) != f.evmToken) revert VestingVaultTokenMismatch();
+        if (address(IVestingVault(newVault).TOKEN()) != f.evmToken) revert VestingVaultTokenMismatch();
         emit FlowVestingVaultChanged(flowId, f.vestingVault, newVault);
         f.vestingVault = newVault;
     }
@@ -2227,6 +2148,7 @@ contract BridgeEscrow is
 
     function _hashIntent(ReleaseIntent calldata intent) internal pure returns (bytes32) {
         return
+            // forge-lint: disable-next-line(asm-keccak256)
             keccak256(
                 abi.encode(
                     RELEASE_INTENT_TYPEHASH,
@@ -2246,24 +2168,7 @@ contract BridgeEscrow is
             );
     }
 
-    function _hashMintIntent(MintIntent calldata intent) internal pure returns (bytes32) {
-        return
-            keccak256(
-                abi.encode(
-                    MINT_INTENT_TYPEHASH,
-                    intent.wrappedToken,
-                    intent.to,
-                    intent.amount,
-                    intent.srcChainId,
-                    intent.opnetTxHash,
-                    intent.opnetEventIndex,
-                    intent.burnNonce,
-                    intent.signerEpoch,
-                    intent.opnetNonce,
-                    intent.flowId
-                )
-            );
-    }
+
 
     function _hashRefundAuth(uint256 depositNonce_, bytes32 flowId, uint32 signerEpoch)
         internal
@@ -2271,6 +2176,7 @@ contract BridgeEscrow is
         returns (bytes32)
     {
         return
+            // forge-lint: disable-next-line(asm-keccak256)
             keccak256(
                 abi.encode(
                     REFUND_AUTHORIZATION_TYPEHASH,
@@ -2287,6 +2193,7 @@ contract BridgeEscrow is
         returns (bytes32)
     {
         return
+            // forge-lint: disable-next-line(asm-keccak256)
             keccak256(
                 abi.encode(
                     BURN_REFUND_AUTHORIZATION_TYPEHASH,

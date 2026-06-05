@@ -30,7 +30,7 @@ import { BridgeDepository } from '../contracts/BridgeDepository.js';
 // ─────────────────────────────────────────────────────────────────────────────
 
 const VOUCHER_NETWORK_ID: bigint = 2n; // testnet
-const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x59893fe6;
+const CLAIM_WITH_VOUCHER_SELECTOR: number = 0x6FBDC887;
 const VOUCHER_PREIMAGE_LEN = 540; // #68 Tier B — appended flowId u256
 
 const ETH_CHAIN_ID: bigint = 1n; // Ethereum mainnet
@@ -184,7 +184,7 @@ function buildVoucher(v: VoucherFields): { preimage: Uint8Array; hash: Uint8Arra
     const w = new BinaryWriter();
     w.writeU256(v.networkId ?? VOUCHER_NETWORK_ID);
     w.writeAddress(v.contractSelf);
-    w.writeSelector(v.selector ?? CLAIM_MINT_WITH_VOUCHER_SELECTOR);
+    w.writeSelector(v.selector ?? CLAIM_WITH_VOUCHER_SELECTOR);
     w.writeAddress(v.recipient);
     w.writeU256(v.sourceChainId ?? ETH_CHAIN_ID);
     w.writeAddress(v.sourceBridgeAddr ?? Blockchain.generateRandomAddress());
@@ -400,7 +400,7 @@ await opnet('BridgeDepository — happy path', async (vm: OPNetUnit) => {
         const sigBlob = signVoucher(signerWallet, hash);
 
         setSender(alice);
-        await depository.claimMintWithVoucher(preimage, sigBlob);
+        await depository.claimWithVoucher(preimage, sigBlob);
 
         Assert.expect(await wusdc.balanceOf(alice)).toEqual(fields.netAmount);
         Assert.expect(await wusdc.totalSupply()).toEqual(fields.netAmount);
@@ -423,7 +423,7 @@ await opnet('BridgeDepository — happy path', async (vm: OPNetUnit) => {
         const f1 = { ...defaultFields(setup, alice), voucherId: 1n, sourceLogIndex: 1 };
         const v1 = buildVoucher(f1);
         setSender(alice);
-        await depository.claimMintWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
+        await depository.claimWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
 
         // wUSDT voucher
         const f2 = {
@@ -436,7 +436,7 @@ await opnet('BridgeDepository — happy path', async (vm: OPNetUnit) => {
         };
         const v2 = buildVoucher(f2);
         setSender(alice);
-        await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
+        await depository.claimWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
 
         Assert.expect(await wusdc.balanceOf(alice)).toEqual(f1.netAmount);
         Assert.expect(await wusdt.balanceOf(alice)).toEqual(f2.netAmount);
@@ -454,7 +454,7 @@ await opnet('BridgeDepository — happy path', async (vm: OPNetUnit) => {
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(legacy, legacySig);
+            await depository.claimWithVoucher(legacy, legacySig);
         }).toThrow();
     });
 
@@ -482,7 +482,7 @@ await opnet('BridgeDepository — happy path', async (vm: OPNetUnit) => {
         await depository.setFlowTipCap(flowId, 200n); // 2% — accommodates ~100 bps tip
         const { preimage, hash } = buildVoucher(fields);
         setSender(alice);
-        await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        await depository.claimWithVoucher(preimage, signVoucher(signerWallet, hash));
         // alice is BOTH recipient and tx.sender (relayer) — receives tip
         // AND residual, so total balance == netDstAmount.
         Assert.expect(await wusdc.balanceOf(alice)).toEqual(fields.netAmount);
@@ -513,11 +513,11 @@ await opnet('BridgeDepository — replay by voucherId', async (vm: OPNetUnit) =>
         const sigBlob = signVoucher(signerWallet, hash);
 
         setSender(alice);
-        await depository.claimMintWithVoucher(preimage, sigBlob);
+        await depository.claimWithVoucher(preimage, sigBlob);
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, sigBlob);
+            await depository.claimWithVoucher(preimage, sigBlob);
         }).toThrow();
     });
 });
@@ -546,7 +546,7 @@ await opnet('BridgeDepository — replay by source event', async (vm: OPNetUnit)
         const f1 = { ...defaultFields(setup, alice), voucherId: 100n };
         const v1 = buildVoucher(f1);
         setSender(alice);
-        await depository.claimMintWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
+        await depository.claimWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
 
         // Voucher #2 — same source event, different voucherId. MUST revert.
         const f2 = {
@@ -560,7 +560,7 @@ await opnet('BridgeDepository — replay by source event', async (vm: OPNetUnit)
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
+            await depository.claimWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
         }).toThrow();
     });
 
@@ -576,7 +576,7 @@ await opnet('BridgeDepository — replay by source event', async (vm: OPNetUnit)
         const f1 = { ...defaultFields(setup, alice), voucherId: 200n };
         const v1 = buildVoucher(f1);
         setSender(alice);
-        await depository.claimMintWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
+        await depository.claimWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
 
         // Same source event, but sourceChainId = ETH (1) + 2^64. `.toU64()`
         // truncates to 1, so the flowId is unchanged; only the replay key
@@ -592,7 +592,7 @@ await opnet('BridgeDepository — replay by source event', async (vm: OPNetUnit)
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
+            await depository.claimWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
         }).toThrow('source event already used');
     });
 
@@ -605,7 +605,7 @@ await opnet('BridgeDepository — replay by source event', async (vm: OPNetUnit)
         const f1 = { ...defaultFields(setup, alice), voucherId: 202n };
         const v1 = buildVoucher(f1);
         setSender(alice);
-        await depository.claimMintWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
+        await depository.claimWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
 
         // Same EVM bridge address (low 20 bytes) but with a dirtied padding
         // tail — must canonicalize to the same replay key.
@@ -626,7 +626,7 @@ await opnet('BridgeDepository — replay by source event', async (vm: OPNetUnit)
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
+            await depository.claimWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
         }).toThrow('source event already used');
     });
 });
@@ -656,7 +656,7 @@ await opnet('BridgeDepository — wrong networkId', async (vm: OPNetUnit) => {
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, sigBlob);
+            await depository.claimWithVoucher(preimage, sigBlob);
         }).toThrow();
     });
 });
@@ -686,7 +686,7 @@ await opnet('BridgeDepository — wrong recipient', async (vm: OPNetUnit) => {
 
         setSender(bob);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, sigBlob);
+            await depository.claimWithVoucher(preimage, sigBlob);
         }).toThrow();
     });
 });
@@ -717,7 +717,7 @@ await opnet('BridgeDepository — wrong wrappedToken', async (vm: OPNetUnit) => 
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, sigBlob);
+            await depository.claimWithVoucher(preimage, sigBlob);
         }).toThrow();
     });
 });
@@ -747,7 +747,7 @@ await opnet('BridgeDepository — wrong signerEpoch', async (vm: OPNetUnit) => {
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, sigBlob);
+            await depository.claimWithVoucher(preimage, sigBlob);
         }).toThrow();
     });
 
@@ -759,7 +759,7 @@ await opnet('BridgeDepository — wrong signerEpoch', async (vm: OPNetUnit) => {
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, sigBlob);
+            await depository.claimWithVoucher(preimage, sigBlob);
         }).toThrow();
     });
 });
@@ -801,7 +801,7 @@ await opnet('BridgeDepository — rotateSigner', async (vm: OPNetUnit) => {
         // The old-epoch voucher must no longer verify.
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(oldPreimage, oldSigBlob);
+            await depository.claimWithVoucher(oldPreimage, oldSigBlob);
         }).toThrow();
 
         // A voucher re-signed for epoch 2 by the new signer MUST work.
@@ -810,7 +810,7 @@ await opnet('BridgeDepository — rotateSigner', async (vm: OPNetUnit) => {
         const newSigBlob = signVoucher(newWallet, newHash);
 
         setSender(alice);
-        await depository.claimMintWithVoucher(newPreimage, newSigBlob);
+        await depository.claimWithVoucher(newPreimage, newSigBlob);
         Assert.expect(await setup.wusdc.balanceOf(alice)).toEqual(newFields.netAmount);
     });
 
@@ -852,7 +852,7 @@ await opnet('BridgeDepository — bad signatures', async (vm: OPNetUnit) => {
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, sigBlob);
+            await depository.claimWithVoucher(preimage, sigBlob);
         }).toThrow();
     });
 
@@ -869,7 +869,7 @@ await opnet('BridgeDepository — bad signatures', async (vm: OPNetUnit) => {
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(tampered, sigBlob);
+            await depository.claimWithVoucher(tampered, sigBlob);
         }).toThrow();
     });
 
@@ -881,7 +881,7 @@ await opnet('BridgeDepository — bad signatures', async (vm: OPNetUnit) => {
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, sigBlob);
+            await depository.claimWithVoucher(preimage, sigBlob);
         }).toThrow();
     });
 });
@@ -914,14 +914,14 @@ await opnet('BridgeDepository — pause gate', async (vm: OPNetUnit) => {
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, sigBlob);
+            await depository.claimWithVoucher(preimage, sigBlob);
         }).toThrow();
 
         setSender(deployer);
         await depository.setPaused(false);
 
         setSender(alice);
-        await depository.claimMintWithVoucher(preimage, sigBlob);
+        await depository.claimWithVoucher(preimage, sigBlob);
         Assert.expect(await setup.wusdc.balanceOf(alice)).toEqual(fields.netAmount);
     });
 });
@@ -1204,7 +1204,7 @@ await opnet('BridgeDepository — upgrade flow', async (vm: OPNetUnit) => {
         const sigBlob = signVoucher(signerWallet, hash);
 
         setSender(alice);
-        await depository.claimMintWithVoucher(preimage, sigBlob);
+        await depository.claimWithVoucher(preimage, sigBlob);
 
         // Rotate once so epoch becomes 2 and history exists.
         setSender(deployer);
@@ -1314,7 +1314,7 @@ await opnet('BridgeDepository — Fix #5: source-event key includes chain id', a
         };
         const v1 = buildVoucher(f1);
         setSender(alice);
-        await depository.claimMintWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
+        await depository.claimWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
 
         // Identical txHash + logIndex, different chainId → must mint again.
         const f2 = {
@@ -1333,7 +1333,7 @@ await opnet('BridgeDepository — Fix #5: source-event key includes chain id', a
         // #68 Tier B — bind the voucher to the BSC route's flow.
         const v2 = buildVoucher({ ...f2, flowId: bscFlowId });
         setSender(alice);
-        await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
+        await depository.claimWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
 
         Assert.expect(await wusdc.balanceOf(alice)).toEqual(f1.netAmount + f2.netAmount);
 
@@ -1361,7 +1361,7 @@ await opnet('BridgeDepository — Fix #5: source-event key includes chain id', a
         };
         const v1 = buildVoucher(f1);
         setSender(alice);
-        await depository.claimMintWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
+        await depository.claimWithVoucher(v1.preimage, signVoucher(signerWallet, v1.hash));
 
         const f2 = {
             ...defaultFields(setup, alice),
@@ -1378,7 +1378,7 @@ await opnet('BridgeDepository — Fix #5: source-event key includes chain id', a
         // #68 Tier B — bind the voucher to the alt-bridge route's flow.
         const v2 = buildVoucher({ ...f2, flowId: altFlowId });
         setSender(alice);
-        await depository.claimMintWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
+        await depository.claimWithVoucher(v2.preimage, signVoucher(signerWallet, v2.hash));
 
         Assert.expect(await wusdc.balanceOf(alice)).toEqual(f1.netAmount + f2.netAmount);
     });
@@ -1410,7 +1410,7 @@ await opnet('BridgeDepository — Fix #4: ML-DSA blob length checks', async (vm:
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, short);
+            await depository.claimWithVoucher(preimage, short);
         }).toThrow();
     });
 
@@ -1426,7 +1426,7 @@ await opnet('BridgeDepository — Fix #4: ML-DSA blob length checks', async (vm:
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, tooLong);
+            await depository.claimWithVoucher(preimage, tooLong);
         }).toThrow();
     });
 
@@ -1445,7 +1445,7 @@ await opnet('BridgeDepository — Fix #4: ML-DSA blob length checks', async (vm:
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, tampered);
+            await depository.claimWithVoucher(preimage, tampered);
         }).toThrow();
     });
 });
@@ -1558,7 +1558,7 @@ await opnet('BridgeDepository — Phase 1.6 voucher cancellation', async (vm: OP
         }).toThrow();
     });
 
-    await vm.it('claimMintWithVoucher rejects a cancelled voucher', async () => {
+    await vm.it('claimWithVoucher rejects a cancelled voucher', async () => {
         const { depository, signerWallet } = setup;
         const fields = defaultFields(setup, alice);
         const { preimage, hash } = buildVoucher(fields);
@@ -1571,7 +1571,7 @@ await opnet('BridgeDepository — Phase 1.6 voucher cancellation', async (vm: OP
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, sig);
+            await depository.claimWithVoucher(preimage, sig);
         }).toThrow();
     });
 
@@ -1596,14 +1596,14 @@ await opnet('BridgeDepository — Phase 1.6 voucher cancellation', async (vm: OP
         const sigB = signVoucher(signerWallet, builtB.hash);
 
         setSender(bob);
-        await depository.claimMintWithVoucher(builtB.preimage, sigB);
+        await depository.claimWithVoucher(builtB.preimage, sigB);
 
         // Sanity — bob got minted, alice's cancelled voucher cannot be claimed.
         Assert.expect(await wusdc.balanceOf(bob)).toEqual(fieldsB.netAmount);
 
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(built.preimage, sigA);
+            await depository.claimWithVoucher(built.preimage, sigA);
         }).toThrow();
 
         // Touch wusdcAddress to satisfy unused-var lint without changing logic.
@@ -1640,7 +1640,7 @@ await opnet('BridgeDepository — #68 Tier B flowId route binding', async (vm: O
         const { preimage, hash } = buildVoucher(fields);
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+            await depository.claimWithVoucher(preimage, signVoucher(signerWallet, hash));
         }).toThrow();
     });
 
@@ -1650,17 +1650,17 @@ await opnet('BridgeDepository — #68 Tier B flowId route binding', async (vm: O
         const { preimage, hash } = buildVoucher(fields);
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+            await depository.claimWithVoucher(preimage, signVoucher(signerWallet, hash));
         }).toThrow();
     });
 
-    await vm.it('mode-0 flow routes through claimMintWithVoucher (mints)', async () => {
+    await vm.it('mode-0 flow routes through claimWithVoucher (mints)', async () => {
         const { depository, wusdc, signerWallet } = setup;
         // Default wUSDC flow is mode 0 — mint path succeeds.
         const fields = defaultFields(setup, alice);
         const { preimage, hash } = buildVoucher(fields);
         setSender(alice);
-        await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        await depository.claimWithVoucher(preimage, signVoucher(signerWallet, hash));
         Assert.expect(await wusdc.balanceOf(alice)).toEqual(fields.netAmount);
     });
 
@@ -1703,7 +1703,7 @@ await opnet('BridgeDepository — #68 Tier B flowId route binding', async (vm: O
         const { preimage, hash } = buildVoucher(fields);
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+            await depository.claimWithVoucher(preimage, signVoucher(signerWallet, hash));
         }).toThrow();
     });
 
@@ -1714,14 +1714,14 @@ await opnet('BridgeDepository — #68 Tier B flowId route binding', async (vm: O
         const fields = defaultFields(setup, alice);
         const { preimage, hash } = buildVoucher(fields);
         setSender(alice);
-        await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+        await depository.claimWithVoucher(preimage, signVoucher(signerWallet, hash));
         Assert.expect(await wusdc.balanceOf(alice)).toEqual(fields.netAmount);
     });
 
     await vm.it('mode-3 flow rejected on the mint path (not mintable mode)', async () => {
         const { depository, signerWallet } = setup;
         // Register a POOLED_LOCK_RELEASE (mode 3) flow on a distinct route,
-        // bound to wUSDC. A mint voucher (claimMintWithVoucher selector)
+        // bound to wUSDC. A mint voucher (claimWithVoucher selector)
         // carrying this flowId must revert — mode 3 is release-only.
         const altBridge = Blockchain.generateRandomAddress();
         const altToken = Blockchain.generateRandomAddress();
@@ -1741,7 +1741,7 @@ await opnet('BridgeDepository — #68 Tier B flowId route binding', async (vm: O
         const { preimage, hash } = buildVoucher(fields);
         setSender(alice);
         await Assert.expect(async () => {
-            await depository.claimMintWithVoucher(preimage, signVoucher(signerWallet, hash));
+            await depository.claimWithVoucher(preimage, signVoucher(signerWallet, hash));
         }).toThrow();
     });
 });

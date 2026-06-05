@@ -13,7 +13,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 ///         Anyone can call `mint` — this is intentional for testnet faucet
 ///         usage. NEVER deploy on mainnet.
 contract MockERC20 is ERC20, Ownable {
-    uint8 private immutable _decimals;
+    uint8 private immutable _DECIMALS;
 
     /// @dev Emitted on every open mint so the faucet is auditable.
     event Minted(address indexed to, uint256 amount);
@@ -23,11 +23,11 @@ contract MockERC20 is ERC20, Ownable {
         string memory symbol_,
         uint8 decimals_
     ) ERC20(name_, symbol_) Ownable(msg.sender) {
-        _decimals = decimals_;
+        _DECIMALS = decimals_;
     }
 
     function decimals() public view override returns (uint8) {
-        return _decimals;
+        return _DECIMALS;
     }
 
     /// @notice Open faucet — anyone can mint for testnet testing.

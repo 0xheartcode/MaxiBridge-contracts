@@ -3,7 +3,6 @@ pragma solidity 0.8.24;
 
 import {Test, Vm} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {BridgeEscrow} from "../src/BridgeEscrow.sol";
 import {WrappedERC20} from "../src/WrappedERC20.sol";
@@ -607,11 +606,17 @@ contract BridgeEscrowTest is Test {
     function test_Claim_WrongAmountFails() public {
         _fundEscrow(address(usdc), 1_000e6);
 
-        // (a) MED-001 — amount inflated ABOVE the signed grossSrcAmount is
-        //     caught by the AmountExceedsGross guard, before sig-verify.
+        // (a) MED-001 — a (compromised) signer attesting an amount ABOVE the
+        //     scaled destination gross is caught by AmountExceedsGross. E-3
+        //     moved this bound AFTER sig-verify (it is now enforced in
+        //     destination units against the decimal-scaled grossDst, which
+        //     needs the post-sig-verify flow lookup), so the inflated amount
+        //     is SIGNED here (a stale sig over a mutated amount would instead
+        //     fail sig-verify — see case (b)). grossSrcAmount stays 100e6 from
+        //     _defaultIntent; on this 6/6 flow grossDst == 100e6 < 101e6.
         BridgeEscrow.ReleaseIntent memory intent = _defaultIntent(address(usdc), bob, 100e6);
+        intent.amount = 101e6; // signer attests an amount past the signed gross
         bytes memory sig = _sign(signerPk, intent);
-        intent.amount = 101e6; // attacker inflates past the signed gross
         vm.expectRevert(BridgeEscrow.AmountExceedsGross.selector);
         escrow.claim(intent, sig);
 
@@ -1443,16 +1448,6 @@ contract BridgeEscrowTest is Test {
         vm.stopPrank();
     }
 
-    function test_Claim_RevertsForInverseWrappedToken() public {
-        MockERC20 w = new MockERC20("W", "W", 6);
-        bytes32 flowId = _registerFlow(address(w), BridgeEscrow.TokenMode.INVERSE_WRAPPED, bytes32(uint256(1)));
-
-        BridgeEscrow.ReleaseIntent memory intent = _defaultIntent(address(w), bob, 100e6);
-        intent.flowId = flowId;
-        bytes memory sig = _sign(signerPk, intent);
-        vm.expectRevert(BridgeEscrow.WrongMode.selector);
-        escrow.claim(intent, sig);
-    }
 
     function test_ProvisionInventory_AddsToBalanceAndInventory() public {
         MockERC20 moto = new MockERC20("MOTO", "MOTO", 6);
@@ -1520,20 +1515,20 @@ contract BridgeEscrowTest is Test {
         assertEq(escrow.getFlow(flowId).inventory, 900e6, "flow inventory tracks drain");
     }
 
-    function test_ClaimMintWrapped_HappyPath_Mode2() public {
+    function test_Claim_MintMode_HappyPath_Mode1() public {
         // Deploy a WrappedERC20 owned by us, with bridge = escrow proxy.
         WrappedERC20 wmoto = new WrappedERC20(
             "Wrapped MOTO",
             "wMOTO",
+            18,
             owner,
             address(escrow),
             EXPECTED_OPNET_CHAIN_ID,
-            bytes32(uint256(0xC0DE))
+            bytes32(uint256(0xC0DE)),
+            type(uint256).max // E-1 maxSupply — uncapped in tests
         );
 
-        // PR β.2.payout-evm++ — claimMintWrapped binds to a flowId.
-        // Register a flow for wmoto; addFlow auto-whitelists the token,
-        // and the post-sig flow lookup asserts mode + token match.
+        // Register an INVERSE_WRAPPED flow; addFlow auto-whitelists the token.
         vm.prank(owner);
         bytes32 wmotoFlowId = escrow.addFlow(
             BridgeEscrow.FlowAddParams({
@@ -1554,8 +1549,9 @@ contract BridgeEscrowTest is Test {
             })
         );
 
-        BridgeEscrow.MintIntent memory mi = BridgeEscrow.MintIntent({
-            wrappedToken: address(wmoto),
+        // After merge, modes 1/2 use the unified claim() + ReleaseIntent.
+        BridgeEscrow.ReleaseIntent memory ri = BridgeEscrow.ReleaseIntent({
+            token: address(wmoto),
             to: bob,
             amount: 100e6,
             srcChainId: EXPECTED_OPNET_CHAIN_ID,
@@ -1564,21 +1560,23 @@ contract BridgeEscrowTest is Test {
             burnNonce: 1,
             signerEpoch: escrow.currentEpoch(),
             opnetNonce: keccak256("opnet-nonce-mint-1"),
+            grossSrcAmount: 100e6,
+            relayerTip: 0,
             flowId: wmotoFlowId
         });
-        bytes memory sig = _signMintIntent(signerPk, mi);
+        bytes memory sig = _sign(signerPk, ri);
 
-        escrow.claimMintWrapped(mi, sig);
+        escrow.claim(ri, sig);
         assertEq(wmoto.balanceOf(bob), 100e6);
-        assertTrue(escrow.signaturesUsed(mi.opnetNonce));
+        assertTrue(escrow.signaturesUsed(ri.opnetNonce));
     }
 
-    function test_ClaimMintWrapped_RevertsForWrappedFlow() public {
-        // USDC is registered under a WRAPPED flow (mode 0) in setUp. The
-        // sig-verified flow lookup must reject any attempt to mint into a
-        // WRAPPED flow's evmToken — `claimMintWrapped` is mode 1/2 only.
-        BridgeEscrow.MintIntent memory mi = BridgeEscrow.MintIntent({
-            wrappedToken: address(usdc),
+    function test_Claim_RevertsOnTokenMismatch() public {
+        // USDT is a supported token but belongs to usdtFlowId, not usdcFlowId.
+        // Submitting a ReleaseIntent with token=USDT against usdcFlowId must
+        // revert WrongMode because flow.evmToken (USDC) != intent.token (USDT).
+        BridgeEscrow.ReleaseIntent memory ri = BridgeEscrow.ReleaseIntent({
+            token: address(usdt),
             to: bob,
             amount: 100e6,
             srcChainId: EXPECTED_OPNET_CHAIN_ID,
@@ -1587,11 +1585,13 @@ contract BridgeEscrowTest is Test {
             burnNonce: 1,
             signerEpoch: escrow.currentEpoch(),
             opnetNonce: keccak256("y"),
+            grossSrcAmount: 100e6,
+            relayerTip: 0,
             flowId: usdcFlowId
         });
-        bytes memory sig = _signMintIntent(signerPk, mi);
+        bytes memory sig = _sign(signerPk, ri);
         vm.expectRevert(BridgeEscrow.WrongMode.selector);
-        escrow.claimMintWrapped(mi, sig);
+        escrow.claim(ri, sig);
     }
 
     // =====================================================================
@@ -1600,7 +1600,7 @@ contract BridgeEscrowTest is Test {
 
     function test_WrappedERC20_Mint_OnlyBridge() public {
         WrappedERC20 wmoto = new WrappedERC20(
-            "wMOTO", "wMOTO", owner, address(escrow), EXPECTED_OPNET_CHAIN_ID, bytes32(uint256(1))
+            "wMOTO", "wMOTO", 18, owner, address(escrow), EXPECTED_OPNET_CHAIN_ID, bytes32(uint256(1)), type(uint256).max
         );
         vm.expectRevert(WrappedERC20.NotBridge.selector);
         wmoto.mintFromBridge(alice, 100);
@@ -1608,7 +1608,7 @@ contract BridgeEscrowTest is Test {
 
     function test_WrappedERC20_BurnForRelease_EmitsAndDecrements() public {
         WrappedERC20 wmoto = new WrappedERC20(
-            "wMOTO", "wMOTO", owner, address(escrow), EXPECTED_OPNET_CHAIN_ID, bytes32(uint256(1))
+            "wMOTO", "wMOTO", 18, owner, address(escrow), EXPECTED_OPNET_CHAIN_ID, bytes32(uint256(1)), type(uint256).max
         );
         vm.prank(address(escrow));
         wmoto.mintFromBridge(alice, 1_000e6);
@@ -1626,38 +1626,47 @@ contract BridgeEscrowTest is Test {
         assertEq(wmoto.burnNonce(), 1);
     }
 
-    // =====================================================================
-    // EIP-712 helper for MintIntent
-    // =====================================================================
+    // ─── E-1 — WrappedERC20 supply ceiling ───────────────────────────────
 
-    bytes32 internal constant MINT_INTENT_TYPEHASH =
-        keccak256(
-            "MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,bytes32 flowId)"
+    /// @notice A zero maxSupply is rejected at construction (would brick mints).
+    function test_WrappedERC20_ZeroMaxSupply_Reverts() public {
+        vm.expectRevert(bytes("WrappedERC20: zero maxSupply"));
+        new WrappedERC20(
+            "wMOTO", "wMOTO", 18, owner, address(escrow), EXPECTED_OPNET_CHAIN_ID, bytes32(uint256(1)), 0
         );
-
-    function _signMintIntent(uint256 pk, BridgeEscrow.MintIntent memory mi)
-        internal
-        view
-        returns (bytes memory)
-    {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                MINT_INTENT_TYPEHASH,
-                mi.wrappedToken,
-                mi.to,
-                mi.amount,
-                mi.srcChainId,
-                mi.opnetTxHash,
-                mi.opnetEventIndex,
-                mi.burnNonce,
-                mi.signerEpoch,
-                mi.opnetNonce,
-                mi.flowId
-            )
-        );
-        bytes32 d = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(address(escrow)), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, d);
-        bytes memory raw = abi.encodePacked(r, s, v);
-        return abi.encodePacked(uint8(1), raw);
     }
+
+    /// @notice mintFromBridge enforces the cap; a burn frees headroom.
+    function test_WrappedERC20_MaxSupply_EnforcedAndBurnFreesHeadroom() public {
+        uint256 cap = 1_000e6;
+        WrappedERC20 wmoto = new WrappedERC20(
+            "wMOTO", "wMOTO", 18, owner, address(escrow), EXPECTED_OPNET_CHAIN_ID, bytes32(uint256(1)), cap
+        );
+        assertEq(wmoto.MAX_SUPPLY(), cap);
+
+        // Mint exactly to the cap — OK.
+        vm.prank(address(escrow));
+        wmoto.mintFromBridge(alice, cap);
+        assertEq(wmoto.totalSupply(), cap);
+
+        // One more unit over the cap — reverts.
+        vm.prank(address(escrow));
+        vm.expectRevert(WrappedERC20.MaxSupplyExceeded.selector);
+        wmoto.mintFromBridge(alice, 1);
+
+        // Burn frees headroom (cap is on OUTSTANDING supply).
+        vm.prank(alice);
+        wmoto.burnForRelease(bytes32(uint256(0xF1)), bytes32(uint256(0xBEEF)), 400e6);
+        assertEq(wmoto.totalSupply(), cap - 400e6);
+
+        // Now a 400e6 mint fits again; 400e6 + 1 does not.
+        vm.prank(address(escrow));
+        wmoto.mintFromBridge(alice, 400e6);
+        assertEq(wmoto.totalSupply(), cap);
+        vm.prank(address(escrow));
+        vm.expectRevert(WrappedERC20.MaxSupplyExceeded.selector);
+        wmoto.mintFromBridge(alice, 1);
+    }
+
+    // =====================================================================
 }

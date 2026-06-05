@@ -216,53 +216,6 @@
             ]
         },
         {
-            "name": "setTokenMode",
-            "type": "Function",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [
-                {
-                    "name": "token",
-                    "type": "ADDRESS"
-                },
-                {
-                    "name": "mode",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "evmCounterpart",
-                    "type": "UINT256"
-                }
-            ],
-            "outputs": []
-        },
-        {
-            "name": "tokenMode",
-            "type": "View",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [],
-            "outputs": [
-                {
-                    "name": "mode",
-                    "type": "UINT256"
-                }
-            ]
-        },
-        {
-            "name": "evmCounterpartOf",
-            "type": "View",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [],
-            "outputs": [
-                {
-                    "name": "counterpart",
-                    "type": "UINT256"
-                }
-            ]
-        },
-        {
             "name": "computeFlowId",
             "type": "Function",
             "payable": false,
@@ -580,7 +533,7 @@
             "outputs": []
         },
         {
-            "name": "claimReleaseWithVoucher",
+            "name": "claimWithVoucher",
             "type": "Function",
             "payable": false,
             "onlyOwner": false,
@@ -1006,23 +959,6 @@
             "outputs": []
         },
         {
-            "name": "claimMintWithVoucher",
-            "type": "Function",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [
-                {
-                    "name": "voucher",
-                    "type": "BYTES"
-                },
-                {
-                    "name": "mldsaSig",
-                    "type": "BYTES"
-                }
-            ],
-            "outputs": []
-        },
-        {
             "name": "governor",
             "type": "View",
             "payable": false,
@@ -1194,24 +1130,6 @@
                 },
                 {
                     "name": "newSignerHash",
-                    "type": "UINT256"
-                }
-            ],
-            "type": "Event"
-        },
-        {
-            "name": "TokenModeSet",
-            "values": [
-                {
-                    "name": "token",
-                    "type": "ADDRESS"
-                },
-                {
-                    "name": "mode",
-                    "type": "UINT32"
-                },
-                {
-                    "name": "evmCounterpart",
                     "type": "UINT256"
                 }
             ],
@@ -1398,6 +1316,56 @@
             "type": "Event"
         },
         {
+            "name": "MintedFromVoucher",
+            "values": [
+                {
+                    "name": "recipient",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "wrappedToken",
+                    "type": "ADDRESS"
+                },
+                {
+                    "name": "sourceChainId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "sourceTxHash",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "sourceLogIndex",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "grossAmount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "feeAmount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "netAmount",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "voucherId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "signerEpoch",
+                    "type": "UINT32"
+                },
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
             "name": "ReleasedFromVoucher",
             "values": [
                 {
@@ -1439,6 +1407,10 @@
                 {
                     "name": "signerEpoch",
                     "type": "UINT32"
+                },
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
                 }
             ],
             "type": "Event"
@@ -1695,52 +1667,6 @@
                 {
                     "name": "newGuardian",
                     "type": "ADDRESS"
-                }
-            ],
-            "type": "Event"
-        },
-        {
-            "name": "MintedFromVoucher",
-            "values": [
-                {
-                    "name": "recipient",
-                    "type": "ADDRESS"
-                },
-                {
-                    "name": "wrappedToken",
-                    "type": "ADDRESS"
-                },
-                {
-                    "name": "sourceChainId",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "sourceTxHash",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "sourceLogIndex",
-                    "type": "UINT32"
-                },
-                {
-                    "name": "grossAmount",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "feeAmount",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "netAmount",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "voucherId",
-                    "type": "UINT256"
-                },
-                {
-                    "name": "signerEpoch",
-                    "type": "UINT32"
                 }
             ],
             "type": "Event"

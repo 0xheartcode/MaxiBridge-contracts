@@ -118,6 +118,10 @@ export class Unpaused extends NetEvent {
  * Emitted on successful claimMintWithVoucher. Indexed fields: recipient,
  * wrappedToken, voucherId. Net amount minted is `netAmount` (after fee).
  */
+// OPN-M3: `flowId` appended LAST so off-chain indexers can correlate the
+// mint event to the canonical route without re-deriving from token addresses.
+// Old-format readers tolerant of trailing bytes still parse the first 264
+// bytes; flow-aware readers parse 296. Compatible event NAME — data length only.
 export class MintedFromVoucher extends NetEvent {
     constructor(
         recipient: Address,
@@ -130,9 +134,10 @@ export class MintedFromVoucher extends NetEvent {
         netAmount: u256,
         voucherId: u256,
         signerEpoch: u32,
+        flowId: u256, // OPN-M3 — appended LAST for backwards compat
     ) {
-        // 2 addresses + 6 u256 + 2 u32 = 64 + 192 + 8 = 264
-        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32 * 6 + 4 * 2);
+        // 2 addresses + 7 u256 + 2 u32 = 64 + 224 + 8 = 296
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32 * 7 + 4 * 2);
         data.writeAddress(recipient);
         data.writeAddress(wrappedToken);
         data.writeU256(sourceChainId);
@@ -143,19 +148,8 @@ export class MintedFromVoucher extends NetEvent {
         data.writeU256(netAmount);
         data.writeU256(voucherId);
         data.writeU32(signerEpoch);
+        data.writeU256(flowId); // OPN-M3 — appended LAST
         super('MintedFromVoucher', data);
-    }
-}
-
-// ─── Mode dispatch (Phase 1.5 — 4 modes) ───────────────────────────────
-
-export class TokenModeSet extends NetEvent {
-    constructor(token: Address, mode: u32, evmCounterpart: u256) {
-        const data = new BytesWriter(ADDRESS_BYTE_LENGTH + 4 + 32);
-        data.writeAddress(token);
-        data.writeU32(mode);
-        data.writeU256(evmCounterpart);
-        super('TokenModeSet', data);
     }
 }
 
@@ -168,10 +162,10 @@ export class TokenModeSet extends NetEvent {
  */
 // FINDING-002 (audit 2026-05-26): `flowId` appended LAST so off-chain
 // indexers can persist the canonical route identity without re-deriving
-// from the per-token `_tokenMode` (which after PR #76 is no longer the
-// routing authority for N:M). Old-format readers tolerant of trailing
-// bytes still parse the first 168 bytes; flow-aware readers parse 200.
-// Compatible event NAME — only the data length changes.
+// from token addresses. Routing authority is per-flow (#68); flowId
+// appended last for indexer compatibility. Old-format readers tolerant
+// of trailing bytes still parse the first 168 bytes; flow-aware readers
+// parse 200. Compatible event NAME — only the data length changes.
 export class LockedForBridge extends NetEvent {
     constructor(
         canonicalToken: Address,
@@ -213,9 +207,10 @@ export class ReleasedFromVoucher extends NetEvent {
         netAmount: u256,
         voucherId: u256,
         signerEpoch: u32,
+        flowId: u256,
     ) {
-        // Same shape as MintedFromVoucher — 264 bytes total.
-        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32 * 6 + 4 * 2);
+        // Same shape as MintedFromVoucher — 296 bytes total (264 + 32 for flowId).
+        const data = new BytesWriter(ADDRESS_BYTE_LENGTH * 2 + 32 * 7 + 4 * 2);
         data.writeAddress(recipient);
         data.writeAddress(canonicalToken);
         data.writeU256(sourceChainId);
@@ -226,6 +221,7 @@ export class ReleasedFromVoucher extends NetEvent {
         data.writeU256(netAmount);
         data.writeU256(voucherId);
         data.writeU32(signerEpoch);
+        data.writeU256(flowId);
         super('ReleasedFromVoucher', data);
     }
 }

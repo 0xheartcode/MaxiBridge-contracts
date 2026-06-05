@@ -28,19 +28,12 @@ import { BridgeDepository } from '../contracts/BridgeDepository.js';
 
 // ─── Constants — must mirror BridgeDepository.ts ──────────────────────
 const VOUCHER_NETWORK_ID: bigint = 2n;
-const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x59893fe6;
+const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x6FBDC887; // sha256('claimWithVoucher(bytes,bytes)')[0:4]
 const VOUCHER_PREIMAGE_LEN = 540; // #68 Tier B — appended flowId u256
 const ETH_CHAIN_ID: bigint = 1n;
 
-// claimReleaseWithVoucher selector — sha256 of the signature, first 4B.
-function deriveSelector(sig: string): number {
-    const enc = new TextEncoder();
-    const bytes = sha256(enc.encode(sig));
-    return ((bytes[0]! << 24) | (bytes[1]! << 16) | (bytes[2]! << 8) | bytes[3]!) >>> 0;
-}
-const CLAIM_RELEASE_WITH_VOUCHER_SELECTOR: number = deriveSelector(
-    'claimReleaseWithVoucher(bytes,bytes)',
-);
+// Both mint and release paths go through the unified claimWithVoucher entry point.
+const CLAIM_RELEASE_WITH_VOUCHER_SELECTOR: number = 0x6FBDC887; // sha256('claimWithVoucher(bytes,bytes)')[0:4]
 
 // ─── Harness ──────────────────────────────────────────────────────────
 const deployer: Address = Blockchain.generateRandomAddress();
@@ -454,8 +447,8 @@ await opnet('BridgeDepository — PR β.2.payout-opnet — mint path', async (vm
 // inventory and `transfer`s it out (no minting). For testing we reuse the
 // WrappedOP20 contract as a stand-in canonical OP20 — the depository is
 // pre-funded via `mintTo` (allowed because depository is the configured
-// minter), then mode-1 is set via `setTokenMode` and inventory is paid out
-// against a release voucher.
+// minter), then a mode-1 flow is registered and inventory is paid out
+// against a release voucher. Routing is per-flow (#68).
 // ════════════════════════════════════════════════════════════════════════════
 
 await opnet('BridgeDepository — PR β.2.payout-opnet — release path', async (vm: OPNetUnit) => {
@@ -472,29 +465,11 @@ await opnet('BridgeDepository — PR β.2.payout-opnet — release path', async 
     vm.afterEach(() => disposeSetup(setup));
 
     /**
-     * For the release path we need:
-     *   - `_tokenMode[wusdc]` to be 1 (INVERSE_WRAPPED) — so bob can wire
-     *     `setTokenMode` from governor before `_tokenModeFinalized` is set.
-     *   - depository to hold a balance of `wusdc` so `transfer` succeeds.
-     *
-     * Since `setTokenMode` is part of the contract, we drive it via the
-     * test wrapper. To pre-fund the depository we exploit the fact that
-     * WrappedOP20 lets the depository (its minter) call `mintTo(self,...)`
-     * directly. We don't have a wrapper for that here; instead, mode-1
-     * release works against the `transfer(address,uint256)` selector on
-     * the OP20, so we need depository's balance to be at least netAmount.
-     *
-     * The `provisionInventoryOpNet` admin entry pulls tokens from the
-     * caller into the depository — but it requires the caller (deployer)
-     * to have a balance and have approved the depository. Easiest route
-     * here: skip provisioning by minting directly to the depository via a
-     * synthetic mint voucher (mode 0) FIRST, then flip token mode to 1,
-     * THEN issue a release voucher. mode flips to 1 are blocked once
-     * `_tokenModeFinalized` is set, so we must do it BEFORE any setTokenMode.
-     *
-     * Simplest approach for the unit test: mint balance to the depository
-     * via a mode-0 voucher addressed to the depository itself, then flip
-     * mode to 1 and run the release.
+     * For the release path we need depository to hold a balance of `wusdc`
+     * so `transfer` succeeds, and a mode-1 flow must be registered so
+     * claimReleaseWithVoucher is admitted. Routing is per-flow (#68) so no
+     * token-mode flip is needed. We pre-fund via a synthetic mode-0 mint
+     * voucher addressed to the depository itself.
      */
     async function preFundAndFlipMode1(amount: bigint): Promise<void> {
         // Step 1: register a mode-0 flow + mint to the depository.
@@ -512,31 +487,7 @@ await opnet('BridgeDepository — PR β.2.payout-opnet — release path', async 
         const v0 = buildVoucher(f0);
         setSender(depositoryAddress);
         await depository.claimMintWithVoucher(v0.preimage, signVoucher(signerWallet, v0.hash));
-        // Step 2: set token mode = 1 (INVERSE_WRAPPED). Requires governor.
-        // We drive it through the BinaryWriter directly because the wrapper
-        // class has no setTokenMode helper.
-        const { ABIDataTypes } = await import('@btc-vision/transaction');
-        const { encodeSelectorWithParams } = await import('../contracts/utils.js');
-        const setTokenModeSel = encodeSelectorWithParams(
-            'setTokenMode',
-            ABIDataTypes.ADDRESS,
-            ABIDataTypes.UINT256,
-            ABIDataTypes.UINT256,
-        );
-        const w = new BinaryWriter();
-        w.writeSelector(setTokenModeSel);
-        w.writeAddress(setup.wusdcAddress);
-        w.writeU256(1n); // mode=1
-        // evmCounterpart MUST be non-zero for non-WRAPPED modes. Pin to a
-        // synthetic 32-byte identity — content is opaque to the claim
-        // payout logic (PR γ will validate it).
-        w.writeU256(0xc0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0fen);
-        setSender(deployer);
-        await (depository as unknown as {
-            execute: (a: { calldata: Uint8Array }) => Promise<{ error?: Error }>;
-        }).execute({ calldata: w.getBuffer() }).then((r) => {
-            if (r.error) throw r.error;
-        });
+        setSender(deployer); // restore governor for subsequent registerFlow calls
     }
 
     async function callClaimReleaseWithVoucher(
@@ -544,13 +495,7 @@ await opnet('BridgeDepository — PR β.2.payout-opnet — release path', async 
         voucher: Uint8Array,
         sigBlob: Uint8Array,
     ): Promise<void> {
-        const { ABIDataTypes } = await import('@btc-vision/transaction');
-        const { encodeSelectorWithParams } = await import('../contracts/utils.js');
-        const sel = encodeSelectorWithParams(
-            'claimReleaseWithVoucher',
-            ABIDataTypes.BYTES,
-            ABIDataTypes.BYTES,
-        );
+        const sel = 0x6FBDC887; // sha256('claimWithVoucher(bytes,bytes)')[0:4] — unified entry point
         const w = new BinaryWriter();
         w.writeSelector(sel);
         w.writeBytesWithLength(voucher);
@@ -786,8 +731,8 @@ await opnet('BridgeDepository — L-07: release recipient binding gated by tip',
 
     vm.afterEach(() => disposeSetup(setup));
 
-    // Mint balance into the depository via a mode-0 voucher, then flip the
-    // wrapped token to mode-1 (INVERSE_WRAPPED) so the release path is live.
+    // Mint balance into the depository via a mode-0 voucher so the release
+    // path has inventory. Routing is per-flow (#68); no token-mode flip needed.
     async function preFundAndFlipMode1(amount: bigint): Promise<void> {
         await registerFlow(setup, { tipCapBps: 0n });
         const { depository, signerWallet, depositoryAddress } = setup;
@@ -803,26 +748,7 @@ await opnet('BridgeDepository — L-07: release recipient binding gated by tip',
         const v0 = buildVoucher(f0);
         setSender(depositoryAddress);
         await depository.claimMintWithVoucher(v0.preimage, signVoucher(signerWallet, v0.hash));
-
-        const { ABIDataTypes } = await import('@btc-vision/transaction');
-        const { encodeSelectorWithParams } = await import('../contracts/utils.js');
-        const setTokenModeSel = encodeSelectorWithParams(
-            'setTokenMode',
-            ABIDataTypes.ADDRESS,
-            ABIDataTypes.UINT256,
-            ABIDataTypes.UINT256,
-        );
-        const w = new BinaryWriter();
-        w.writeSelector(setTokenModeSel);
-        w.writeAddress(setup.wusdcAddress);
-        w.writeU256(1n);
-        w.writeU256(0xc0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0fen);
-        setSender(deployer);
-        await (depository as unknown as {
-            execute: (a: { calldata: Uint8Array }) => Promise<{ error?: Error }>;
-        }).execute({ calldata: w.getBuffer() }).then((r) => {
-            if (r.error) throw r.error;
-        });
+        setSender(deployer); // restore governor for subsequent registerFlow calls
     }
 
     async function callClaimReleaseWithVoucher(
@@ -830,13 +756,7 @@ await opnet('BridgeDepository — L-07: release recipient binding gated by tip',
         voucher: Uint8Array,
         sigBlob: Uint8Array,
     ): Promise<void> {
-        const { ABIDataTypes } = await import('@btc-vision/transaction');
-        const { encodeSelectorWithParams } = await import('../contracts/utils.js');
-        const sel = encodeSelectorWithParams(
-            'claimReleaseWithVoucher',
-            ABIDataTypes.BYTES,
-            ABIDataTypes.BYTES,
-        );
+        const sel = 0x6FBDC887; // sha256('claimWithVoucher(bytes,bytes)')[0:4] — unified entry point
         const w = new BinaryWriter();
         w.writeSelector(sel);
         w.writeBytesWithLength(voucher);

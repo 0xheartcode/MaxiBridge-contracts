@@ -13,11 +13,6 @@ export type SignerRotatedEvent = {
     readonly newEpoch: number;
     readonly newSignerHash: bigint;
 };
-export type TokenModeSetEvent = {
-    readonly token: Address;
-    readonly mode: number;
-    readonly evmCounterpart: bigint;
-};
 export type FlowAddedEvent = {
     readonly flowId: bigint;
     readonly mode: number;
@@ -67,6 +62,19 @@ export type LockedForBridgeEvent = {
     readonly mode: number;
     readonly flowId: bigint;
 };
+export type MintedFromVoucherEvent = {
+    readonly recipient: Address;
+    readonly wrappedToken: Address;
+    readonly sourceChainId: bigint;
+    readonly sourceTxHash: bigint;
+    readonly sourceLogIndex: number;
+    readonly grossAmount: bigint;
+    readonly feeAmount: bigint;
+    readonly netAmount: bigint;
+    readonly voucherId: bigint;
+    readonly signerEpoch: number;
+    readonly flowId: bigint;
+};
 export type ReleasedFromVoucherEvent = {
     readonly recipient: Address;
     readonly canonicalToken: Address;
@@ -78,6 +86,7 @@ export type ReleasedFromVoucherEvent = {
     readonly netAmount: bigint;
     readonly voucherId: bigint;
     readonly signerEpoch: number;
+    readonly flowId: bigint;
 };
 export type RelayerTipPaidEvent = {
     readonly flowId: bigint;
@@ -148,18 +157,6 @@ export type TreasurySetEvent = {
 export type GuardianSetEvent = {
     readonly oldGuardian: Address;
     readonly newGuardian: Address;
-};
-export type MintedFromVoucherEvent = {
-    readonly recipient: Address;
-    readonly wrappedToken: Address;
-    readonly sourceChainId: bigint;
-    readonly sourceTxHash: bigint;
-    readonly sourceLogIndex: number;
-    readonly grossAmount: bigint;
-    readonly feeAmount: bigint;
-    readonly netAmount: bigint;
-    readonly voucherId: bigint;
-    readonly signerEpoch: number;
 };
 
 // ------------------------------------------------------------------
@@ -282,31 +279,6 @@ export type WrapMinFee = CallResult<
 >;
 
 /**
- * @description Represents the result of the setTokenMode function call.
- */
-export type SetTokenMode = CallResult<{}, OPNetEvent<TokenModeSetEvent>[]>;
-
-/**
- * @description Represents the result of the tokenMode function call.
- */
-export type TokenMode = CallResult<
-    {
-        mode: bigint;
-    },
-    OPNetEvent<never>[]
->;
-
-/**
- * @description Represents the result of the evmCounterpartOf function call.
- */
-export type EvmCounterpartOf = CallResult<
-    {
-        counterpart: bigint;
-    },
-    OPNetEvent<never>[]
->;
-
-/**
  * @description Represents the result of the computeFlowId function call.
  */
 export type ComputeFlowId = CallResult<
@@ -407,9 +379,12 @@ export type GetFlow = CallResult<
 export type LockForBridge = CallResult<{}, OPNetEvent<LockedForBridgeEvent>[]>;
 
 /**
- * @description Represents the result of the claimReleaseWithVoucher function call.
+ * @description Represents the result of the claimWithVoucher function call.
  */
-export type ClaimReleaseWithVoucher = CallResult<{}, OPNetEvent<ReleasedFromVoucherEvent | RelayerTipPaidEvent>[]>;
+export type ClaimWithVoucher = CallResult<
+    {},
+    OPNetEvent<MintedFromVoucherEvent | ReleasedFromVoucherEvent | RelayerTipPaidEvent>[]
+>;
 
 /**
  * @description Represents the result of the provisionInventoryOpNet function call.
@@ -592,11 +567,6 @@ export type SetTreasury = CallResult<{}, OPNetEvent<TreasurySetEvent>[]>;
 export type SetGuardian = CallResult<{}, OPNetEvent<GuardianSetEvent>[]>;
 
 /**
- * @description Represents the result of the claimMintWithVoucher function call.
- */
-export type ClaimMintWithVoucher = CallResult<{}, OPNetEvent<MintedFromVoucherEvent | RelayerTipPaidEvent>[]>;
-
-/**
  * @description Represents the result of the governor function call.
  */
 export type Governor = CallResult<
@@ -727,9 +697,6 @@ export interface IBridgeDepository extends IOP_NETContract {
     setWrapMinFee(wrappedToken: Address, amount: bigint): Promise<SetWrapMinFee>;
     wrapFeeBps(): Promise<WrapFeeBps>;
     wrapMinFee(): Promise<WrapMinFee>;
-    setTokenMode(token: Address, mode: bigint, evmCounterpart: bigint): Promise<SetTokenMode>;
-    tokenMode(): Promise<TokenMode>;
-    evmCounterpartOf(): Promise<EvmCounterpartOf>;
     computeFlowId(
         mode: bigint,
         evmChainId: bigint,
@@ -773,7 +740,7 @@ export interface IBridgeDepository extends IOP_NETContract {
         evmRecipient: Uint8Array,
         destChainId: number,
     ): Promise<LockForBridge>;
-    claimReleaseWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<ClaimReleaseWithVoucher>;
+    claimWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<ClaimWithVoucher>;
     provisionInventoryOpNet(flowId: bigint, token: Address, amount: bigint): Promise<ProvisionInventoryOpNet>;
     drainInventoryOpNet(
         flowId: bigint,
@@ -806,7 +773,6 @@ export interface IBridgeDepository extends IOP_NETContract {
     setPauser(newPauser: Address): Promise<SetPauser>;
     setTreasury(newTreasury: Address): Promise<SetTreasury>;
     setGuardian(newGuardian: Address): Promise<SetGuardian>;
-    claimMintWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<ClaimMintWithVoucher>;
     governor(): Promise<Governor>;
     paused(): Promise<Paused>;
     pauser(): Promise<Pauser>;

@@ -31,7 +31,6 @@ import {
     Paused,
     Unpaused,
     MintedFromVoucher,
-    TokenModeSet,
     LockedForBridge,
     ReleasedFromVoucher,
     InventoryProvisionedOpNet,
@@ -52,25 +51,24 @@ import {
 } from './events';
 
 /**
- * SHA-256 selector of `claimMintWithVoucher(bytes,bytes)` — bound into the
- * preimage so a voucher can only be consumed by this method on this
- * contract.
+ * SHA-256 selector of `claimWithVoucher(bytes,bytes)` — unified entry point
+ * for all five flow modes. Bound into the preimage at offset 64 so a voucher
+ * can only be consumed by this method on this contract.
  */
-// SHA-256('claimMintWithVoucher(bytes,bytes)') first 4 bytes, as computed
-// by the OPNet transform. Verified at build time — see npm run build output.
-const CLAIM_MINT_WITH_VOUCHER_SELECTOR: u32 = 0x59893fe6;
+// SHA-256('claimWithVoucher(bytes,bytes)') first 4 bytes.
+// Verified in onDeployment against encodeSelector() to catch drift.
+const CLAIM_WITH_VOUCHER_SELECTOR: u32 = 0x6FBDC887;
 
 /**
  * Canonical ML-DSA Level-2 byte sizes. Used as hard bounds when parsing the
- * sig blob so truncated / oversized payloads revert before any slicing.
- *   pubKey      = 1312 bytes
- *   raw sig     = 2420 bytes
- *   length prefix (u32 BE on pubLen) = 4 bytes
- *   total blob  = 3736 bytes
+ * M-of-N sig blob so truncated / oversized payloads revert before any slicing.
+ *   pubKey  = 1312 bytes
+ *   raw sig = 2420 bytes
+ * The M-of-N blob is variable-length (see §7 of CLAUDE.md). The legacy
+ * single-sig size (3736 bytes) is no longer accepted.
  */
 const MLDSA_LEVEL2_PUBKEY_LEN: u32 = 1312;
 const MLDSA_LEVEL2_SIG_LEN: u32 = 2420;
-const MLDSA_SIG_BLOB_LEN: u32 = 4 + MLDSA_LEVEL2_PUBKEY_LEN + MLDSA_LEVEL2_SIG_LEN; // 3736
 
 /**
  * Hard cap on the governor-settable wrap fee, in basis points
@@ -259,7 +257,9 @@ const LOCK_STATUS_REFUNDED: u32 = 3;
  *
  * Every identity field is inside the signed bytes, so any tampering (amount /
  * burner / token / flowId / epoch / burnNonce / burnTxHash) makes the ML-DSA
- * verify fail → NO mint. The on-chain replay key is sha256(burnTxHash‖burnNonce).
+ * verify fail → NO mint. The on-chain replay key is
+ * sha256(wrappedToken‖burner‖burnTxHash‖burnNonce) (O-2 — token + burner bound
+ * in so per-`WrappedOP20` burnNonces can't collide across wrappeds).
  */
 const BURN_REFUND_AUTHORIZATION_LEN: i32 = 296;
 
@@ -374,35 +374,9 @@ export class BridgeDepository extends ReentrancyGuard {
     // Default 0.
     private _wrapMinFee: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
-    // ─── Token bridging modes (5-mode dispatch) ────────────────────────
-    // Per-token mode encoded as u256 (matching the EVM-side enum value
-    // space):
-    //   0 WRAPPED              — canonical on EVM, wrapped on OPNet (USDC/USDT)
-    //   1 INVERSE_WRAPPED      — canonical on OPNet, wrapped on EVM
-    //   2 NATIVE_BURN_MINT     — bridge issues both sides, burn-and-mint
-    //   3 POOLED_LOCK_RELEASE  — lock+release on both, no minting; project
-    //                            funds inventory (e.g. MOTO)
-    //   4 POOLED_LOCK_VEST     — identical to mode 3 on OPNet (lock/release/
-    //                            provision/inventory); differs only on the EVM
-    //                            destination, where claim deposits into a
-    //                            VestingVault that drips over a block window.
-    // Set-once per token via `setTokenMode`. Default 0 (WRAPPED) so existing
-    // wUSDC/wUSDT keep working.
-    private _tokenMode: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
-    private _tokenModeFinalized: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
-    // For mode-2/3/4: 32-byte EVM counterpart identity, stored as u256.
-    // Mode 1 leaves this at zero. Indexer-only — used to bind events
-    // across chains.
-    private _evmCounterpart: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
-
     // ─── Mode-2/4 lock state (canonical OP20 escrow on OPNet) ──────────
     // Monotonic lock nonce — gives each lockForBridge a unique id.
     private _lockNonce: StoredU256 = new StoredU256(Blockchain.nextPointer, EMPTY_POINTER);
-    // Replay guard for claimReleaseWithVoucher. Same shape as
-    // _usedVoucherIds + _usedSourceEvents but separated so the two
-    // claim paths can't accidentally share state.
-    private _usedReleaseVoucherIds: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
-    private _usedEvmBurnEvents: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
     // ─── PR α — Flow Registry (storage + governance only) ─────────────
     // A flow is the smallest atom of bridge routing — keyed by:
@@ -587,9 +561,11 @@ export class BridgeDepository extends ReentrancyGuard {
 
     // ─── Trustless burn-side recovery replay guard (#55) ───────────────
     // burnId → u256.One once that burn has been re-minted via `refundBurn`.
-    // burnId = sha256(burnTxHash(32) ‖ burnNonce(32)) — globally-unique per
-    // burn (the (txHash, nonce) tuple is unique even if a bare nonce could
-    // ever collide across a deep reorg). This map is the ONLY thing
+    // burnId = sha256(wrappedToken(32) ‖ burner(32) ‖ burnTxHash(32) ‖ burnNonce(32))
+    // — see `_burnRefundId` (O-2 fix). burnNonce is a per-WrappedOP20 counter,
+    // so the wrappedToken + burner MUST be bound in to stay globally unique
+    // (two wrappeds at the same nonce burning in one tx would otherwise
+    // collide). This map is the ONLY thing
     // preventing a double / infinite re-mint of the same burn, so it is set
     // BEFORE the cross-contract mint (CEI) and an already-set slot reverts.
     //
@@ -656,8 +632,8 @@ export class BridgeDepository extends ReentrancyGuard {
         // every attestation silently mismatches the contract's REBUILT
         // preimage hash and reverts with cryptic errors. Pay the gas once
         // at deploy to surface drift loud at the ceremony.
-        if (encodeSelector('claimMintWithVoucher(bytes,bytes)') != CLAIM_MINT_WITH_VOUCHER_SELECTOR) {
-            throw new Revert('BridgeDepository: CLAIM_MINT_WITH_VOUCHER_SELECTOR drift');
+        if (encodeSelector('claimWithVoucher(bytes,bytes)') != CLAIM_WITH_VOUCHER_SELECTOR) {
+            throw new Revert('BridgeDepository: CLAIM_WITH_VOUCHER_SELECTOR drift');
         }
         if (encodeSelector('confirmBurn(uint256,bytes,bytes)') != CONFIRM_BURN_SELECTOR) {
             throw new Revert('BridgeDepository: CONFIRM_BURN_SELECTOR drift');
@@ -1142,62 +1118,6 @@ export class BridgeDepository extends ReentrancyGuard {
     //  WRAPPED (0) / INVERSE_WRAPPED (1) / NATIVE_BURN_MINT (2) /
     //  POOLED_LOCK_RELEASE (3)
     // ═══════════════════════════════════════════════════════════════════════
-
-    /**
-     * Register a token's bridging mode. Set-once per token. The
-     * `evmCounterpart` is the 32-byte EVM address (or for non-mode-1
-     * tokens, a 32-byte identifier) of the EVM-side asset this token
-     * pairs with — the indexer uses it to bind events across chains.
-     */
-    @method(
-        { name: 'token', type: ABIDataTypes.ADDRESS },
-        { name: 'mode', type: ABIDataTypes.UINT256 },
-        { name: 'evmCounterpart', type: ABIDataTypes.UINT256 },
-    )
-    @emit('TokenModeSet')
-    public setTokenMode(calldata: Calldata): BytesWriter {
-        this.onlyGovernor();
-        const token: Address = calldata.readAddress();
-        if (token.isZero()) throw new Revert('BridgeDepository: zero token');
-        const mode: u256 = calldata.readU256();
-        // 0..4 — POOLED_LOCK_VEST (4) shares OPNet semantics with
-        // POOLED_LOCK_RELEASE (3); it only differs on the EVM destination.
-        if (u256.gt(mode, u256.fromU32(4))) {
-            throw new Revert('BridgeDepository: invalid token mode');
-        }
-        const evmCounterpart: u256 = calldata.readU256();
-        const key: u256 = _addrKey(token);
-        if (!this._tokenModeFinalized.get(key).isZero()) {
-            throw new Revert('BridgeDepository: token mode finalized');
-        }
-        // Modes 1/2/3 require evmCounterpart; mode 0 (WRAPPED) does not.
-        if (!mode.isZero() && evmCounterpart.isZero()) {
-            throw new Revert('BridgeDepository: evmCounterpart required for non-WRAPPED');
-        }
-        this._tokenMode.set(key, mode);
-        this._tokenModeFinalized.set(key, u256.One);
-        this._evmCounterpart.set(key, evmCounterpart);
-        this.emitEvent(new TokenModeSet(token, mode.toU32(), evmCounterpart));
-        return new BytesWriter(0);
-    }
-
-    @view
-    @returns({ name: 'mode', type: ABIDataTypes.UINT256 })
-    public tokenMode(calldata: Calldata): BytesWriter {
-        const token: Address = calldata.readAddress();
-        const r = new BytesWriter(32);
-        r.writeU256(this._tokenMode.get(_addrKey(token)));
-        return r;
-    }
-
-    @view
-    @returns({ name: 'counterpart', type: ABIDataTypes.UINT256 })
-    public evmCounterpartOf(calldata: Calldata): BytesWriter {
-        const token: Address = calldata.readAddress();
-        const r = new BytesWriter(32);
-        r.writeU256(this._evmCounterpart.get(_addrKey(token)));
-        return r;
-    }
 
     // ═══════════════════════════════════════════════════════════════════════
     //  PR α — Flow Registry (storage + governance only; consumed by PR γ)
@@ -1891,23 +1811,27 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     /**
-     * Release canonical OP20 to the recipient against an ML-DSA voucher
-     * signed by the M-of-N signer set. Used in modes 2 + 4 after the
-     * user has burned their wrapped ERC20 on the EVM side.
+     * Unified claim entry point for all five flow modes, dispatched internally
+     * by `_flowMode[voucher.flowId]`:
+     *   - Modes 0 (WRAPPED) + 2 (NATIVE_BURN_MINT): mint-on-OPNet — mints
+     *     wrapped tokens; ACTIVE-only; no inventory mutation.
+     *   - Modes 1 (INVERSE_WRAPPED) + 3 (POOLED_LOCK_RELEASE) + 4 (POOLED_LOCK_VEST):
+     *     release-on-OPNet — transfers custodied OP20 from pool; ACTIVE or DRAINING;
+     *     decrements inventory + accrues release fee.
      *
-     * Reuses the 540-byte voucher preimage shape — `wrappedToken` field
-     * here is overloaded to mean "the canonical OP20 being released."
-     * The selector field binds the voucher to this specific entry point
-     * so a release voucher can't be claimed via `claimMintWithVoucher`
-     * or vice-versa.
+     * Selector `0x6FBDC887` (sha256('claimWithVoucher(bytes,bytes)')[0:4]) is
+     * baked into every signed voucher at offset 64 so it cannot be replayed
+     * against any other method.
+     *
+     * Replay guards unified: `_usedVoucherIds` + `_usedSourceEvents` for all modes.
      */
     @method(
         { name: 'voucher', type: ABIDataTypes.BYTES },
         { name: 'mldsaSig', type: ABIDataTypes.BYTES },
     )
-    @emit('ReleasedFromVoucher', 'RelayerTipPaid')
+    @emit('MintedFromVoucher', 'ReleasedFromVoucher', 'RelayerTipPaid')
     @nonReentrant
-    public claimReleaseWithVoucher(calldata: Calldata): BytesWriter {
+    public claimWithVoucher(calldata: Calldata): BytesWriter {
         this.requireNotPaused();
 
         const voucher: Uint8Array = calldata.readBytesWithLength();
@@ -1918,72 +1842,72 @@ export class BridgeDepository extends ReentrancyGuard {
         }
         const parsed = parseVoucher(voucher);
 
+        // Network + selector + contract self binding
         if (!u256.eq(parsed.networkId, this._networkId.value)) {
             throw new Revert('BridgeDepository: wrong networkId');
         }
         if (!parsed.contractSelf.equals(this.address)) {
             throw new Revert('BridgeDepository: wrong contractSelf');
         }
-        // Bind to a DIFFERENT selector than claimMintWithVoucher so a
-        // mint voucher cannot be replayed against this method.
-        const releaseSelector: u32 = encodeSelector('claimReleaseWithVoucher(bytes,bytes)');
-        if (parsed.selector != releaseSelector) {
+        if (parsed.selector != CLAIM_WITH_VOUCHER_SELECTOR) {
             throw new Revert('BridgeDepository: wrong selector');
         }
 
-        // Mode dispatch — release path valid for INVERSE_WRAPPED (1),
-        // POOLED_LOCK_RELEASE (3), or POOLED_LOCK_VEST (4). The `wrappedToken`
-        // field is the canonical OP20 to release. Modes 3 and 4 release
-        // identically from the OPNet pool (the vest is EVM-side only).
-        // #68 Tier B — route mode derived from the voucher's flowId (NOT the
-        // per-token `_tokenMode`). Require flow exists + ACTIVE-or-DRAINING +
-        // bound to the wrappedToken before dispatching.
-        if (this._flowExists.get(parsed.flowId).isZero()) {
-            throw new Revert('BridgeDepository: flow not found');
-        }
-        // O-3 (Codex pre-audit, 2026-06-01): release claims must honor DRAINING.
-        // DRAINING is the wind-down state that blocks NEW locks/mints while
-        // still letting already-signed release/exit vouchers be claimed. This
-        // early gate previously required ACTIVE only, which made the later
-        // ACTIVE-or-DRAINING check (after the flowId recompute) dead code for
-        // DRAINING flows and stranded in-flight release vouchers during an
-        // orderly wind-down. Accept ACTIVE or DRAINING here, matching that
-        // later gate. (claimMintWithVoucher + refundBurn stay ACTIVE-only by
-        // design — DRAINING must not mint new supply.)
-        const earlyStatusRel: u32 = this._flowStatus.get(parsed.flowId).toU32();
-        if (earlyStatusRel != FLOW_STATUS_ACTIVE && earlyStatusRel != FLOW_STATUS_DRAINING) {
-            throw new Revert('BridgeDepository: flow not active');
-        }
-        if (!u256.eq(this._flowOpnetToken.get(parsed.flowId), _opnetAddrToU256(parsed.wrappedToken))) {
-            throw new Revert('BridgeDepository: flow token mismatch');
-        }
-        const releaseMode: u256 = this._flowMode.get(parsed.flowId);
-        const isInverse2: bool = u256.eq(releaseMode, u256.fromU32(1));
-        const isPooled2: bool =
-            u256.eq(releaseMode, u256.fromU32(3)) || u256.eq(releaseMode, u256.fromU32(4));
-        if (!isInverse2 && !isPooled2) {
-            throw new Revert('BridgeDepository: token not in releasable mode');
-        }
-
+        // Signer epoch binding
         const currentEpoch: u256 = this._signerEpoch.value;
         if (parsed.signerEpoch != currentEpoch.toU32()) {
             throw new Revert('BridgeDepository: wrong signerEpoch');
         }
 
-        // L-07 — mirror claimMintWithVoucher: enforce the recipient==sender
-        // binding only for DIY claims (relayerTip == 0). A non-zero
-        // relayerTip means the user opted into permissionless submission —
-        // any tx.sender may relay; funds still go to the ML-DSA-bound
-        // `parsed.recipient` (the release transfer below) and the relayer
-        // collects the signed tip. Without this the relayer-tip path on the
-        // release leg is unreachable (only the recipient could ever submit).
+        // Mode dispatch — derive from the signed flowId (#68 Tier B: NOT per-token _tokenMode)
+        if (this._flowExists.get(parsed.flowId).isZero()) {
+            throw new Revert('BridgeDepository: flow not found');
+        }
+        const mode: u256 = this._flowMode.get(parsed.flowId);
+        const isMintMode: bool = mode.isZero() || u256.eq(mode, u256.fromU32(2)); // 0 or 2
+        const isReleaseMode: bool =
+            u256.eq(mode, u256.fromU32(1)) ||
+            u256.eq(mode, u256.fromU32(3)) ||
+            u256.eq(mode, u256.fromU32(4)); // 1, 3, or 4
+        if (!isMintMode && !isReleaseMode) {
+            throw new Revert('BridgeDepository: unknown flow mode');
+        }
+
+        // Early status — mint requires ACTIVE (DRAINING blocks new supply);
+        // release accepts ACTIVE or DRAINING (in-flight exit vouchers must settle).
+        const earlyStatus: u32 = this._flowStatus.get(parsed.flowId).toU32();
+        if (isMintMode) {
+            if (earlyStatus != FLOW_STATUS_ACTIVE) {
+                throw new Revert('BridgeDepository: flow not active');
+            }
+        } else {
+            if (earlyStatus != FLOW_STATUS_ACTIVE && earlyStatus != FLOW_STATUS_DRAINING) {
+                throw new Revert('BridgeDepository: flow not active');
+            }
+        }
+
+        // Flow token binding
+        if (!u256.eq(this._flowOpnetToken.get(parsed.flowId), _opnetAddrToU256(parsed.wrappedToken))) {
+            throw new Revert('BridgeDepository: flow token mismatch');
+        }
+
+        // Mint modes additionally require the token to be in the wrapped allowlist
+        if (isMintMode) {
+            if (this._wrappedTokens.get(parsed.wrappedToken).isZero()) {
+                throw new Revert('BridgeDepository: unknown wrappedToken');
+            }
+        }
+
+        // Recipient binding — DIY claims only; tipped vouchers are open to any relayer.
+        // L-07 / #2: a non-zero relayerTip means the user opted into permissionless
+        // submission — funds still go to parsed.recipient, relayer gets the tip.
         if (parsed.relayerTip.isZero()) {
-            const sender: Address = Blockchain.tx.sender;
-            if (!parsed.recipient.equals(sender)) {
+            if (!parsed.recipient.equals(Blockchain.tx.sender)) {
                 throw new Revert('BridgeDepository: wrong recipient');
             }
         }
 
+        // Fee math invariant
         const sum: u256 = SafeMath.add(parsed.feeAmount, parsed.netAmount);
         if (!u256.eq(sum, parsed.grossAmount)) {
             throw new Revert('BridgeDepository: gross != fee + net');
@@ -1992,14 +1916,16 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: zero netAmount');
         }
 
-        // PR γ.2b — M-of-N ML-DSA verification via shared helper.
+        // ML-DSA M-of-N verification
         this._verifyMofN(sig, voucher);
 
-        // Cancellation + replay guards
+        // Cancellation checked BEFORE replay guard (Phase 1.6 — Tier-3 refund)
         if (!this._cancelledVouchers.get(parsed.voucherId).isZero()) {
             throw new Revert('BridgeDepository: voucher cancelled');
         }
-        if (!this._usedReleaseVoucherIds.get(parsed.voucherId).isZero()) {
+
+        // Unified replay guards — same maps for all modes
+        if (!this._usedVoucherIds.get(parsed.voucherId).isZero()) {
             throw new Revert('BridgeDepository: voucher already used');
         }
         const sourceKey: u256 = buildSourceEventKey(
@@ -2009,144 +1935,159 @@ export class BridgeDepository extends ReentrancyGuard {
             parsed.sourceTxHash,
             parsed.sourceLogIndex,
         );
-        if (!this._usedEvmBurnEvents.get(sourceKey).isZero()) {
+        if (!this._usedSourceEvents.get(sourceKey).isZero()) {
             throw new Revert('BridgeDepository: source event already used');
         }
 
-        // CEI — mark used BEFORE the external transfer.
-        this._usedReleaseVoucherIds.set(parsed.voucherId, u256.One);
-        this._usedEvmBurnEvents.set(sourceKey, u256.One);
+        // CEI — mark both replay guards BEFORE any external call
+        this._usedVoucherIds.set(parsed.voucherId, u256.One);
+        this._usedSourceEvents.set(sourceKey, u256.One);
 
-        // PR β.2.payout-opnet — flow lookup + tip payout (mode-1/3 inverse
-        // path). Mirrors `claimMintWithVoucher` semantics: the relayer is
-        // paid the tip in the same canonical OP20 being released; the
-        // recipient receives `netAmount - tip`. `Blockchain.tx.sender` —
-        // protocol-neutral, NOT a stored relayer.
-        const flowIdRel: u256 = _flowIdFromVoucher(
-            releaseMode.toU32(),
+        // FINDING-003: recompute flowId from voucher source-chain fields and require
+        // equality with parsed.flowId so every downstream storage mutation is on the
+        // exact flow the signer attested to.
+        const flowId: u256 = _flowIdFromVoucher(
+            mode.toU32(),
             parsed.sourceChainId,
             parsed.sourceBridgeAddr,
             parsed.sourceTokenAddr,
             this.address,
             parsed.wrappedToken,
         );
-        // FINDING-003 (audit 2026-05-26): the early gate above validated
-        // `parsed.flowId` (token binding, mode, status). All subsequent
-        // effects (status/minAmount/dailyLimit/inventory/tip) read storage
-        // keyed by `flowIdRel`, the value recomputed from the voucher's
-        // source-chain fields. If those two flow ids disagree the contract
-        // would mutate a DIFFERENT flow than the one the signer attested
-        // to. Require equality so every effect is provably governed by the
-        // signed flowId.
-        if (!u256.eq(flowIdRel, parsed.flowId)) {
+        if (!u256.eq(flowId, parsed.flowId)) {
             throw new Revert('BridgeDepository: voucher flowId mismatch');
         }
-        if (this._flowExists.get(flowIdRel).isZero()) {
+        if (this._flowExists.get(flowId).isZero()) {
             throw new Revert('BridgeDepository: flow not registered');
         }
 
-        // PR γ.1 — flow consumption (release path: inventory decreases).
-        // Order: status → minAmount → dailyLimit window → inventory check
-        // + decrement → tip cap/carve → transfer.
-        const flowStatusRel: u32 = this._flowStatus.get(flowIdRel).toU32();
-        if (flowStatusRel != FLOW_STATUS_ACTIVE && flowStatusRel != FLOW_STATUS_DRAINING) {
-            throw new Revert('BridgeDepository: flow not active');
+        // Post-recompute status (catches races; mirrors early gate)
+        const flowStatus: u32 = this._flowStatus.get(flowId).toU32();
+        if (isMintMode) {
+            if (flowStatus != FLOW_STATUS_ACTIVE) {
+                throw new Revert('BridgeDepository: flow not active');
+            }
+        } else {
+            if (flowStatus != FLOW_STATUS_ACTIVE && flowStatus != FLOW_STATUS_DRAINING) {
+                throw new Revert('BridgeDepository: flow not active');
+            }
         }
-        const flowMinAmountRel: u256 = this._flowMinAmount.get(flowIdRel);
-        if (u256.lt(parsed.grossSrcAmount, flowMinAmountRel)) {
+
+        // minAmount on source-side gross (PR β.2 — grossSrcAmount)
+        const flowMinAmount: u256 = this._flowMinAmount.get(flowId);
+        if (u256.lt(parsed.grossSrcAmount, flowMinAmount)) {
             throw new Revert('BridgeDepository: amount below flow min');
         }
-        const nowRel: u64 = Blockchain.block.medianTimestamp;
-        const windowStartRel: u64 = this._flowLastWindowStart.get(flowIdRel).toU64();
-        let mintedTodayRel: u256 = this._flowMintedToday.get(flowIdRel);
-        if (nowRel - windowStartRel > FLOW_WINDOW_DURATION) {
-            mintedTodayRel = u256.Zero;
-            this._flowLastWindowStart.set(flowIdRel, u256.fromU64(nowRel));
+
+        // Rolling 24h daily limit (keyed on grossDstAmount via parsed.grossAmount)
+        const now: u64 = Blockchain.block.medianTimestamp;
+        const windowStart: u64 = this._flowLastWindowStart.get(flowId).toU64();
+        let mintedToday: u256 = this._flowMintedToday.get(flowId);
+        if (now - windowStart > FLOW_WINDOW_DURATION) {
+            mintedToday = u256.Zero;
+            this._flowLastWindowStart.set(flowId, u256.fromU64(now));
         }
-        const newMintedRel: u256 = SafeMath.add(mintedTodayRel, parsed.grossAmount);
-        const flowDailyLimitRel: u256 = this._flowDailyLimit.get(flowIdRel);
-        if (u256.gt(newMintedRel, flowDailyLimitRel)) {
+        const newMinted: u256 = SafeMath.add(mintedToday, parsed.grossAmount);
+        const flowDailyLimit: u256 = this._flowDailyLimit.get(flowId);
+        if (u256.gt(newMinted, flowDailyLimit)) {
             throw new Revert('BridgeDepository: daily limit exceeded');
         }
-        this._flowMintedToday.set(flowIdRel, newMintedRel);
+        this._flowMintedToday.set(flowId, newMinted);
 
-        // Inventory ↓ (release). Revert if insufficient.
-        const inventoryRelBefore: u256 = this._flowInventory.get(flowIdRel);
-        if (u256.lt(inventoryRelBefore, parsed.grossAmount)) {
-            throw new Revert('BridgeDepository: insufficient flow inventory');
-        }
-        this._flowInventory.set(
-            flowIdRel,
-            SafeMath.sub(inventoryRelBefore, parsed.grossAmount),
-        );
+        // Release-mode only: inventory decrement + fee accrual.
+        // M-02: mint modes have no EVM-locked pool on OPNet; wrapped token maxSupply is the bound.
+        if (isReleaseMode) {
+            const inventoryBefore: u256 = this._flowInventory.get(flowId);
+            if (u256.lt(inventoryBefore, parsed.grossAmount)) {
+                throw new Revert('BridgeDepository: insufficient flow inventory');
+            }
+            this._flowInventory.set(flowId, SafeMath.sub(inventoryBefore, parsed.grossAmount));
 
-        // FINDING-004 (audit 2026-05-26): accrue the release-side fee.
-        // Inventory was decremented by gross, but only `parsed.netAmount`
-        // leaves the bridge (split into recipient + tip). The remainder
-        // `parsed.feeAmount` (= gross - net, validated at the head of this
-        // function) stays in the bridge's balance. Pre-fix this delta was
-        // never recorded anywhere, so `withdrawFees` couldn't sweep it
-        // and the per-flow invariant
-        // `_flowInventory + _flowAccruedFees == bridge balance` drifted
-        // upward on every release.
-        if (!parsed.feeAmount.isZero()) {
-            const accruedBeforeRel: u256 = this._flowAccruedFees.get(flowIdRel);
-            this._flowAccruedFees.set(
-                flowIdRel,
-                SafeMath.add(accruedBeforeRel, parsed.feeAmount),
-            );
+            // FINDING-004: accrue the fee portion so withdrawFees can sweep it and
+            // the per-flow invariant `_flowInventory + _flowAccruedFees == balance` holds.
+            if (!parsed.feeAmount.isZero()) {
+                const accruedBefore: u256 = this._flowAccruedFees.get(flowId);
+                this._flowAccruedFees.set(flowId, SafeMath.add(accruedBefore, parsed.feeAmount));
+            }
         }
 
-        let recipientNetAmountRel: u256 = parsed.netAmount;
+        // Tip carve — FINDING-006: cross-multiply to avoid floored-ratio bypass
+        let recipientNetAmount: u256 = parsed.netAmount;
         if (!parsed.relayerTip.isZero()) {
-            // FINDING-006 (audit 2026-05-26): cross-multiply instead of
-            // floored division so `tipCapBps == 0` cannot still permit a
-            // sub-1-bp tip, and explicitly reject `tip > netAmount` so the
-            // subtraction below cannot underflow on a malformed
-            // signer-bound voucher.
             if (u256.gt(parsed.relayerTip, parsed.netAmount)) {
                 throw new Revert('BridgeDepository: tip exceeds flow cap');
             }
-            const tipCapBpsRel: u32 = this._flowTipCapBps.get(flowIdRel).toU32();
-            const tipScaledRel: u256 = SafeMath.mul(parsed.relayerTip, u256.fromU32(10000));
-            const capScaledRel: u256 = SafeMath.mul(parsed.netAmount, u256.fromU32(tipCapBpsRel));
-            if (u256.gt(tipScaledRel, capScaledRel)) {
+            const tipCapBps: u32 = this._flowTipCapBps.get(flowId).toU32();
+            const tipScaled: u256 = SafeMath.mul(parsed.relayerTip, u256.fromU32(10000));
+            const capScaled: u256 = SafeMath.mul(parsed.netAmount, u256.fromU32(tipCapBps));
+            if (u256.gt(tipScaled, capScaled)) {
                 throw new Revert('BridgeDepository: tip exceeds flow cap');
             }
-            const relayerRel: Address = Blockchain.tx.sender;
-            const transferSelectorTip: u32 = encodeSelector('transfer(address,uint256)');
-            const tipWriter = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
-            tipWriter.writeSelector(transferSelectorTip);
-            tipWriter.writeAddress(relayerRel);
-            tipWriter.writeU256(parsed.relayerTip);
-            Blockchain.call(parsed.wrappedToken, tipWriter);
+            const relayer: Address = Blockchain.tx.sender;
+            this.emitEvent(new RelayerTipPaid(flowId, relayer, parsed.relayerTip));
 
-            this.emitEvent(new RelayerTipPaid(flowIdRel, relayerRel, parsed.relayerTip));
-
-            recipientNetAmountRel = SafeMath.sub(parsed.netAmount, parsed.relayerTip);
+            if (isMintMode) {
+                const mintSelTip: u32 = encodeSelector('mintTo(address,uint256)');
+                const tipW = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+                tipW.writeSelector(mintSelTip);
+                tipW.writeAddress(relayer);
+                tipW.writeU256(parsed.relayerTip);
+                Blockchain.call(parsed.wrappedToken, tipW);
+            } else {
+                const transferSelTip: u32 = encodeSelector('transfer(address,uint256)');
+                const tipW = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+                tipW.writeSelector(transferSelTip);
+                tipW.writeAddress(relayer);
+                tipW.writeU256(parsed.relayerTip);
+                Blockchain.call(parsed.wrappedToken, tipW);
+            }
+            recipientNetAmount = SafeMath.sub(parsed.netAmount, parsed.relayerTip);
         }
 
-        // Cross-contract call: OP20.transfer(recipient, netAmount - tip)
-        // — bridge holds the canonical OP20 and sends to recipient.
-        const transferSelector: u32 = encodeSelector('transfer(address,uint256)');
-        const tWriter = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
-        tWriter.writeSelector(transferSelector);
-        tWriter.writeAddress(parsed.recipient);
-        tWriter.writeU256(recipientNetAmountRel);
-        Blockchain.call(parsed.wrappedToken, tWriter);
+        // Final dispatch — mint or transfer, then appropriate event
+        if (isMintMode) {
+            const mintSel: u32 = encodeSelector('mintTo(address,uint256)');
+            const mintW = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+            mintW.writeSelector(mintSel);
+            mintW.writeAddress(parsed.recipient);
+            mintW.writeU256(recipientNetAmount);
+            Blockchain.call(parsed.wrappedToken, mintW);
 
-        this.emitEvent(new ReleasedFromVoucher(
-            parsed.recipient,
-            parsed.wrappedToken,
-            parsed.sourceChainId,
-            parsed.sourceTxHash,
-            parsed.sourceLogIndex,
-            parsed.grossAmount,
-            parsed.feeAmount,
-            parsed.netAmount,
-            parsed.voucherId,
-            parsed.signerEpoch,
-        ));
+            this.emitEvent(new MintedFromVoucher(
+                parsed.recipient,
+                parsed.wrappedToken,
+                parsed.sourceChainId,
+                parsed.sourceTxHash,
+                parsed.sourceLogIndex,
+                parsed.grossAmount,
+                parsed.feeAmount,
+                parsed.netAmount,
+                parsed.voucherId,
+                parsed.signerEpoch,
+                flowId,
+            ));
+        } else {
+            const transferSel: u32 = encodeSelector('transfer(address,uint256)');
+            const tW = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
+            tW.writeSelector(transferSel);
+            tW.writeAddress(parsed.recipient);
+            tW.writeU256(recipientNetAmount);
+            Blockchain.call(parsed.wrappedToken, tW);
+
+            this.emitEvent(new ReleasedFromVoucher(
+                parsed.recipient,
+                parsed.wrappedToken,
+                parsed.sourceChainId,
+                parsed.sourceTxHash,
+                parsed.sourceLogIndex,
+                parsed.grossAmount,
+                parsed.feeAmount,
+                parsed.netAmount,
+                parsed.voucherId,
+                parsed.signerEpoch,
+                flowId,
+            ));
+        }
 
         return new BytesWriter(0);
     }
@@ -2741,7 +2682,8 @@ export class BridgeDepository extends ReentrancyGuard {
      *                  = 7×32 + 4 = 228 attestation bytes.
      *
      * CEI + @nonReentrant + per-burn replay guard. The replay key
-     * `burnId = sha256(burnTxHash ‖ burnNonce)` is set to One BEFORE the mint;
+     * `burnId = sha256(wrappedToken ‖ burner ‖ burnTxHash ‖ burnNonce)` (see
+     * `_burnRefundId`, O-2 fix) is set to One BEFORE the mint;
      * an already-set slot reverts. This guard is the ENTIRE protection against
      * a double / infinite re-mint — make sure it stays airtight.
      */
@@ -3203,6 +3145,9 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: flow not active');
         }
 
+        // CEI — mark replay before any state mutation.
+        this._confirmedBurns.set(replayKey, u256.One);
+
         // Inventory effect by mode (#44 — single-count invariant):
         //   mode 3 / 4 = decrement (release-side ack against the pooled OPNet
         //            inventory provisioned via provisionInventoryOpNet).
@@ -3220,9 +3165,6 @@ export class BridgeDepository extends ReentrancyGuard {
         } else if (mode != 1) {
             throw new Revert('BridgeDepository: confirmBurn unsupported mode');
         }
-
-        // CEI — mark replay before any further work (no external call here).
-        this._confirmedBurns.set(replayKey, u256.One);
 
         this.emitEvent(new BurnConfirmed(flowId, depositId, releasedAmount, Blockchain.tx.sender));
         return new BytesWriter(0);
@@ -3492,309 +3434,6 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    //  User: claim mint with voucher (CEI + nonReentrant)
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /**
-     * Consume a server-signed ML-DSA voucher and mint wrapped tokens to
-     * `tx.sender`. Reverts on any mismatch, replay, wrong epoch, or invalid
-     * signature.
-     *
-     * `voucher` is the full 540-byte preimage — the contract parses it
-     * directly rather than taking typed args, so the bytes the server
-     * signed are exactly the bytes we hash and verify (no re-serialization
-     * risk).
-     *
-     * @param calldata voucher (bytesU32) || mldsaSig (bytesU32)
-     */
-    @method(
-        { name: 'voucher', type: ABIDataTypes.BYTES },
-        { name: 'mldsaSig', type: ABIDataTypes.BYTES },
-    )
-    @emit('MintedFromVoucher', 'RelayerTipPaid')
-    @nonReentrant
-    public claimMintWithVoucher(calldata: Calldata): BytesWriter {
-        this.requireNotPaused();
-
-        const voucher: Uint8Array = calldata.readBytesWithLength();
-        const sig: Uint8Array = calldata.readBytesWithLength();
-
-        // ── Step 1: parse & validate shape ──
-        if (voucher.length != VOUCHER_PREIMAGE_LEN) {
-            throw new Revert('BridgeDepository: bad voucher length');
-        }
-
-        // Parse the fixed-layout preimage. Every field is at a hard-coded
-        // offset so there's no ambiguity with the server builder.
-        const parsed = parseVoucher(voucher);
-
-        // ── Step 2: network + selector + contract self binding ──
-        if (!u256.eq(parsed.networkId, this._networkId.value)) {
-            throw new Revert('BridgeDepository: wrong networkId');
-        }
-        if (!parsed.contractSelf.equals(this.address)) {
-            throw new Revert('BridgeDepository: wrong contractSelf');
-        }
-        if (parsed.selector != CLAIM_MINT_WITH_VOUCHER_SELECTOR) {
-            throw new Revert('BridgeDepository: wrong selector');
-        }
-
-        // ── Step 3: signer epoch binding ──
-        const currentEpoch: u256 = this._signerEpoch.value;
-        if (parsed.signerEpoch != currentEpoch.toU32()) {
-            throw new Revert('BridgeDepository: wrong signerEpoch');
-        }
-
-        // ── Step 4: recipient binding (front-run safe) ──
-        // #2 — the sender==recipient binding is enforced ONLY for DIY
-        // claims (relayerTip == 0): a tip-less voucher signed for alice
-        // cannot be claimed by bob. When the user signed a non-zero
-        // relayerTip they explicitly opted into the relayer path — any
-        // tx.sender may submit, the mint still goes to parsed.recipient
-        // (Step 11) and tx.sender collects the signed tip (Step 10). The
-        // voucher's ML-DSA signature already binds `recipient`, so funds
-        // are never redirected — a stolen tip-bearing voucher only lets a
-        // thief waste gas. The security relaxation is itself opt-in, per
-        // voucher; tip-less vouchers keep the full theft-proof binding.
-        if (parsed.relayerTip.isZero()) {
-            const sender: Address = Blockchain.tx.sender;
-            if (!parsed.recipient.equals(sender)) {
-                throw new Revert('BridgeDepository: wrong recipient');
-            }
-        }
-
-        // ── Step 5: wrappedToken must be allowlisted ──
-        if (this._wrappedTokens.get(parsed.wrappedToken).isZero()) {
-            throw new Revert('BridgeDepository: unknown wrappedToken');
-        }
-
-        // ── Step 5b: route mode derived from the voucher's flowId (#68 Tier B) ──
-        // The signed voucher carries an explicit flowId; the claim mode comes
-        // from `_flowMode[flowId]` (NOT the per-token `_tokenMode`). We require
-        // the flow to exist + be ACTIVE and enforce a flowId ↔ wrappedToken
-        // binding so one wrapped token's claims are pinned to a specific flow.
-        // Valid for WRAPPED (0) and NATIVE_BURN_MINT (2) only.
-        // INVERSE_WRAPPED (1) and POOLED_LOCK_RELEASE (3) use claimReleaseWithVoucher.
-        if (this._flowExists.get(parsed.flowId).isZero()) {
-            throw new Revert('BridgeDepository: flow not found');
-        }
-        if (this._flowStatus.get(parsed.flowId).toU32() != FLOW_STATUS_ACTIVE) {
-            throw new Revert('BridgeDepository: flow not active');
-        }
-        if (!u256.eq(this._flowOpnetToken.get(parsed.flowId), _opnetAddrToU256(parsed.wrappedToken))) {
-            throw new Revert('BridgeDepository: flow token mismatch');
-        }
-        const mintMode: u256 = this._flowMode.get(parsed.flowId);
-        const isMintableWrapped: bool = mintMode.isZero();
-        const isMintableNative: bool = u256.eq(mintMode, u256.fromU32(2));
-        if (!isMintableWrapped && !isMintableNative) {
-            throw new Revert('BridgeDepository: token not in mintable mode');
-        }
-
-        // ── Step 6: fee math invariant ──
-        // gross must equal fee + net exactly. Prevents a rogue signer from
-        // splitting a voucher into fields that don't add up.
-        const sum: u256 = SafeMath.add(parsed.feeAmount, parsed.netAmount);
-        if (!u256.eq(sum, parsed.grossAmount)) {
-            throw new Revert('BridgeDepository: gross != fee + net');
-        }
-        if (parsed.netAmount.isZero()) {
-            throw new Revert('BridgeDepository: zero netAmount');
-        }
-
-        // ── Step 7: ML-DSA signature verify ──
-        // Signer pubkey is identified by the hash stored for the current
-        // epoch. We don't accept an arbitrary pubkey from the voucher —
-        // the caller hashes the pubkey off-chain and includes it in the
-        // ML-DSA verify call; the hash must match the on-chain record.
-        //
-        // Blockchain.verifyMLDSASignature takes (level, pubkey, sig, hash).
-        // We reconstruct the pubkey by requiring the caller to pass it
-        // alongside the voucher — BUT that would let them swap signers.
-        // Instead, we take the sig and require it to verify under the
-        // stored pubkey-hash-bound signer. Since the runtime API needs a
-        // concrete pubkey, we adopt the convention from the slohm
-        // BondDepository: embed signer pubkey in the mldsaSig argument
-        // structure. Concretely, `sig` here is the raw ML-DSA signature
-        // bytes; the pubkey is pinned by epoch.
-        //
-        // OPNet's ReentrancyGuard base wraps every entry automatically, so
-        // no further manual lock is required here. We still order state
-        // writes BEFORE the external mintTo call (CEI).
-        //
-        // ── M-of-N ML-DSA verification (no-legacy v2) ──
-        // Sig blob layout:
-        //   [u32 BE numSigs]
-        //   for each i in [0, numSigs):
-        //     [u32 BE pubLen_i] [pubKey_i bytes] [u32 BE sigLen_i] [rawSig_i bytes]
-        //
-        // Each pubKey must be the canonical ML-DSA L2 size (1312) and each
-        // rawSig the canonical sig size (2420). At numSigs=1 the total
-        // blob is 3744 bytes; at numSigs=N it is 4 + N * (8 + 1312 + 2420).
-        // Each signer must be in the authorized set, must not appear twice
-        // in the same blob, and the count of valid recovers must be at
-        // least `_requiredSignatures.value`.
-        // PR γ.2b — M-of-N ML-DSA verification via shared helper.
-        this._verifyMofN(sig, voucher);
-
-        // ── Step 7b: voucher cancellation (Phase 1.6 — Tier-3 refund) ──
-        // Cancellation is checked BEFORE the replay guard so a cancelled
-        // voucher always surfaces a clear, distinct error.
-        if (!this._cancelledVouchers.get(parsed.voucherId).isZero()) {
-            throw new Revert('BridgeDepository: voucher cancelled');
-        }
-
-        // ── Step 8: voucherId replay guard ──
-        if (!this._usedVoucherIds.get(parsed.voucherId).isZero()) {
-            throw new Revert('BridgeDepository: voucher already used');
-        }
-
-        // ── Step 9: (sourceChainId, sourceBridgeAddr, sourceTokenAddr,
-        //          sourceTxHash, sourceLogIndex) replay guard ──
-        // Fix #5 — widen the replay key to the full source-event identity so
-        // the same (txHash, logIndex) cannot collide across different EVM
-        // chains or different bridge / token contracts once we expand beyond
-        // Ethereum mainnet. 132 bytes hashed.
-        // O-1 — buildSourceEventKey canonicalizes chainId + EVM addresses so a
-        // padding/high-bit alias maps to the SAME replay key (see its docstring).
-        const sourceKey: u256 = buildSourceEventKey(
-            parsed.sourceChainId,
-            parsed.sourceBridgeAddr,
-            parsed.sourceTokenAddr,
-            parsed.sourceTxHash,
-            parsed.sourceLogIndex,
-        );
-        if (!this._usedSourceEvents.get(sourceKey).isZero()) {
-            throw new Revert('BridgeDepository: source event already used');
-        }
-
-        // ── Step 10: mark both replay guards BEFORE the external mint call (CEI) ──
-        this._usedVoucherIds.set(parsed.voucherId, u256.One);
-        this._usedSourceEvents.set(sourceKey, u256.One);
-
-        // ── Step 10b: PR β.2.payout-opnet + PR γ.1 — flow lookup + consumption ──
-        // Derive the canonical flowId, enforce ALL per-flow knobs (status,
-        // minAmount, cap, dailyLimit, inventory), then carve the tip and
-        // mint. Order: flow lookup → status → minAmount → cap → dailyLimit
-        // window → inventory bump → tip cap/carve → mint.
-        const flowIdMint: u256 = _flowIdFromVoucher(
-            mintMode.toU32(),
-            parsed.sourceChainId,
-            parsed.sourceBridgeAddr,
-            parsed.sourceTokenAddr,
-            this.address,
-            parsed.wrappedToken,
-        );
-        // FINDING-003 (audit 2026-05-26): require the recomputed flowId
-        // to equal `parsed.flowId` so every downstream effect on
-        // `flowIdMint` (status/minAmount/dailyLimit/inventory/tip) is
-        // provably the flow the signer signed for. See the matching gate
-        // in claimReleaseWithVoucher for rationale.
-        if (!u256.eq(flowIdMint, parsed.flowId)) {
-            throw new Revert('BridgeDepository: voucher flowId mismatch');
-        }
-        if (this._flowExists.get(flowIdMint).isZero()) {
-            throw new Revert('BridgeDepository: flow not registered');
-        }
-
-        // PR γ.1 — status enforced for ALL claims (tip-zero too). Mint
-        // path requires ACTIVE; DRAINING blocks new mints (winding down).
-        const flowStatusMint: u32 = this._flowStatus.get(flowIdMint).toU32();
-        if (flowStatusMint != FLOW_STATUS_ACTIVE) {
-            throw new Revert('BridgeDepository: flow not active');
-        }
-
-        // PR γ.1 — minAmount on source-side gross.
-        const flowMinAmountMint: u256 = this._flowMinAmount.get(flowIdMint);
-        if (u256.lt(parsed.grossSrcAmount, flowMinAmountMint)) {
-            throw new Revert('BridgeDepository: amount below flow min');
-        }
-
-        // M-02 — mode-0/2 (mint-on-OPNet) flows have NO inventory-decrement
-        // path on the OPNet side: burns happen on WrappedOP20, off the flow
-        // ledger. The pre-M-02 code incremented `_flowInventory` on every
-        // mint and capped against it, so `cap` acted as a LIFETIME ceiling
-        // that permanently bricked the mint path once cumulative volume
-        // reached it. `_flowInventory` is therefore left untouched for these
-        // modes (stays 0 — unambiguous: "not tracked on this side"); the
-        // rolling `dailyLimit` below is the mint bound, and the wrapped
-        // token's own `maxSupply` is the hard supply ceiling.
-
-        // PR γ.1 — rolling 24h dailyLimit. Reset bucket if older than
-        // FLOW_WINDOW_DURATION (86400s); then assert and consume.
-        const nowMint: u64 = Blockchain.block.medianTimestamp;
-        const windowStartMint: u64 = this._flowLastWindowStart.get(flowIdMint).toU64();
-        let mintedTodayMint: u256 = this._flowMintedToday.get(flowIdMint);
-        if (nowMint - windowStartMint > FLOW_WINDOW_DURATION) {
-            mintedTodayMint = u256.Zero;
-            this._flowLastWindowStart.set(flowIdMint, u256.fromU64(nowMint));
-        }
-        const newMintedMint: u256 = SafeMath.add(mintedTodayMint, parsed.grossAmount);
-        const flowDailyLimitMint: u256 = this._flowDailyLimit.get(flowIdMint);
-        if (u256.gt(newMintedMint, flowDailyLimitMint)) {
-            throw new Revert('BridgeDepository: daily limit exceeded');
-        }
-        this._flowMintedToday.set(flowIdMint, newMintedMint);
-
-        // M-02 — no `_flowInventory` mutation for mint-on-OPNet modes
-        // (see the note above the dailyLimit block).
-
-        let recipientNetAmountMint: u256 = parsed.netAmount;
-        if (!parsed.relayerTip.isZero()) {
-            // FINDING-006 (audit 2026-05-26): cross-multiply instead of
-            // floored division so `tipCapBps == 0` cannot still permit a
-            // sub-1-bp tip, and explicitly reject `tip > netAmount` so the
-            // subtraction below cannot underflow on a malformed
-            // signer-bound voucher.
-            if (u256.gt(parsed.relayerTip, parsed.netAmount)) {
-                throw new Revert('BridgeDepository: tip exceeds flow cap');
-            }
-            const tipCapBpsMint: u32 = this._flowTipCapBps.get(flowIdMint).toU32();
-            const tipScaledMint: u256 = SafeMath.mul(parsed.relayerTip, u256.fromU32(10000));
-            const capScaledMint: u256 = SafeMath.mul(parsed.netAmount, u256.fromU32(tipCapBpsMint));
-            if (u256.gt(tipScaledMint, capScaledMint)) {
-                throw new Revert('BridgeDepository: tip exceeds flow cap');
-            }
-            // Mint tip to tx.sender FIRST, then mint residual to recipient.
-            const relayer: Address = Blockchain.tx.sender;
-            const mintSelectorTip = encodeSelector('mintTo(address,uint256)');
-            const tipCalldata = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
-            tipCalldata.writeSelector(mintSelectorTip);
-            tipCalldata.writeAddress(relayer);
-            tipCalldata.writeU256(parsed.relayerTip);
-            Blockchain.call(parsed.wrappedToken, tipCalldata);
-
-            this.emitEvent(new RelayerTipPaid(flowIdMint, relayer, parsed.relayerTip));
-
-            recipientNetAmountMint = SafeMath.sub(parsed.netAmount, parsed.relayerTip);
-        }
-
-        // ── Step 11: cross-contract mintTo(recipient, netAmount - tip) ──
-        // mintTo(address,uint256) — Solidity-style selector.
-        const mintSelector = encodeSelector('mintTo(address,uint256)');
-        const mintCalldata = new BytesWriter(4 + ADDRESS_BYTE_LENGTH + 32);
-        mintCalldata.writeSelector(mintSelector);
-        mintCalldata.writeAddress(parsed.recipient);
-        mintCalldata.writeU256(recipientNetAmountMint);
-        Blockchain.call(parsed.wrappedToken, mintCalldata);
-
-        this.emitEvent(new MintedFromVoucher(
-            parsed.recipient,
-            parsed.wrappedToken,
-            parsed.sourceChainId,
-            parsed.sourceTxHash,
-            parsed.sourceLogIndex,
-            parsed.grossAmount,
-            parsed.feeAmount,
-            parsed.netAmount,
-            parsed.voucherId,
-            parsed.signerEpoch,
-        ));
-
-        return new BytesWriter(0);
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
     //  Views
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -4060,7 +3699,7 @@ function _canonicalEvmSourceAddr(addr: Address): Address {
  *
  * Canonicalizing the chainId to its low u64 and each address to its low 20
  * bytes collapses every such alias onto one replay key, so the existing
- * `_usedSourceEvents` / `_usedEvmBurnEvents` guard catches the duplicate.
+ * `_usedSourceEvents` guard catches the duplicate.
  * Canonical (spec-conformant) vouchers — chainId < 2^64, zero address tail —
  * hash to exactly the same bytes as before, so this is a no-op for them.
  */
@@ -4145,11 +3784,7 @@ function _wrapMinFeeKey(wrappedToken: Address): u256 {
     return _addrKey(wrappedToken);
 }
 
-/**
- * Generic sha256 of a 32-byte address — keys for `_tokenMode`,
- * `_tokenModeFinalized`, `_evmCounterpart` (and `_wrapMinFee` via the
- * compat shim above).
- */
+/** Generic sha256 of a 32-byte address — used as a StoredMapU256 key by `_wrapMinFee`. */
 function _addrKey(addr: Address): u256 {
     const buf = new BytesWriter(32);
     buf.writeAddress(addr);
@@ -4261,9 +3896,9 @@ function _u256ToOpnetAddr(v: u256): Address {
  * padded (matching the EIP-712 / signing convention) so we re-encode them
  * into the addFlow convention before hashing.
  *
- * Caller passes `mode` (read from `_tokenMode[wrappedToken]`) and
- * `contractSelf` (this depository's identity, which `addFlow` consumed as
- * `opnetBridge`).
+ * Caller passes `mode` (read from `_flowMode[flowId]`, the per-flow routing
+ * authority since #68) and `contractSelf` (this depository's identity, which
+ * `addFlow` consumed as `opnetBridge`).
  */
 function _flowIdFromVoucher(
     mode: u32,

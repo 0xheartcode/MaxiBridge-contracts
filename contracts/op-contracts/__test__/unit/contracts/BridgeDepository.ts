@@ -41,7 +41,7 @@ export class BridgeDepository extends ContractRuntime {
     private readonly pauserSelector: number = encodeNumericSelector('pauser()');
 
     private readonly claimMintWithVoucherSelector: number = encodeSelectorWithParams(
-        'claimMintWithVoucher',
+        'claimWithVoucher',
         ABIDataTypes.BYTES,
         ABIDataTypes.BYTES,
     );
@@ -185,6 +185,10 @@ export class BridgeDepository extends ContractRuntime {
         w.writeBytesWithLength(voucher);
         w.writeBytesWithLength(mldsaSig);
         await this.getResponse(w.getBuffer());
+    }
+
+    public async claimWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<void> {
+        return this.claimMintWithVoucher(voucher, mldsaSig);
     }
 
     public async governor(): Promise<Address> {
@@ -643,14 +647,8 @@ export class BridgeDepository extends ContractRuntime {
         ABIDataTypes.BYTES32,
         ABIDataTypes.UINT32,
     );
-    private readonly setTokenModeSelector: number = encodeSelectorWithParams(
-        'setTokenMode',
-        ABIDataTypes.ADDRESS,
-        ABIDataTypes.UINT256,
-        ABIDataTypes.UINT256,
-    );
     private readonly claimReleaseWithVoucherSelector: number = encodeSelectorWithParams(
-        'claimReleaseWithVoucher',
+        'claimWithVoucher',
         ABIDataTypes.BYTES,
         ABIDataTypes.BYTES,
     );
@@ -735,19 +733,6 @@ export class BridgeDepository extends ContractRuntime {
         w.writeU32(destChainId);
         const r = await this.getResponse(w.getBuffer());
         return r.readU256();
-    }
-
-    public async setTokenMode(
-        token: Address,
-        mode: bigint,
-        evmCounterpart: bigint,
-    ): Promise<void> {
-        const w = new BinaryWriter();
-        w.writeSelector(this.setTokenModeSelector);
-        w.writeAddress(token);
-        w.writeU256(mode);
-        w.writeU256(evmCounterpart);
-        await this.getResponse(w.getBuffer());
     }
 
     public async claimReleaseWithVoucher(

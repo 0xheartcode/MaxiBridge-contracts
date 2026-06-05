@@ -12,10 +12,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 ///         duplicates indicate replay attempts and the vault rejects them.
 interface IVestingVault {
     /// @notice The single ERC20 asset this vault is configured to hold.
-    ///         BridgeEscrow asserts `token() == flow.evmToken` in
+    ///         BridgeEscrow asserts `TOKEN() == flow.evmToken` in
     ///         `setFlowVestingVault` so a vault wired by a misconfigured
     ///         governor can never drain a different flow's inventory.
-    function token() external view returns (IERC20);
+    function TOKEN() external view returns (IERC20);
 
     /// @notice Open a new linear-vest schedule on behalf of `beneficiary`.
     ///         Caller (the bridge) must have approved `amount` to the vault.

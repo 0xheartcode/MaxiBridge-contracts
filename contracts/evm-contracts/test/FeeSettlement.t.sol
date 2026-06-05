@@ -245,8 +245,8 @@ contract FeeSettlementTest is Test {
         vm.warp(block.timestamp + escrow.SETTLEMENT_WINDOW() + 1);
         escrow.settleLockedDeposit(nonceA);
 
-        uint128 invA_before = escrow.getFlow(flowA).inventory;
-        uint128 invB_before = escrow.getFlow(flowB).inventory;
+        uint128 invABefore = escrow.getFlow(flowA).inventory;
+        uint128 invBBefore = escrow.getFlow(flowB).inventory;
         uint128 accruedA   = escrow.getFlow(flowA).accruedFees;
 
         uint256 treasuryBefore = usdc.balanceOf(treasury);
@@ -256,8 +256,8 @@ contract FeeSettlementTest is Test {
         assertEq(usdc.balanceOf(treasury) - treasuryBefore, uint256(accruedA), "treasury delta != fee");
         assertEq(escrow.getFlow(flowA).accruedFees, 0, "A accruedFees not cleared");
         // Critical: flow B's inventory must be untouched and physically backed.
-        assertEq(escrow.getFlow(flowB).inventory, invB_before, "B inventory drift");
-        assertEq(escrow.getFlow(flowA).inventory, invA_before, "A inventory should be unchanged by sweep itself");
+        assertEq(escrow.getFlow(flowB).inventory, invBBefore, "B inventory drift");
+        assertEq(escrow.getFlow(flowA).inventory, invABefore, "A inventory should be unchanged by sweep itself");
     }
 
     /// Settlement must REVERT (not silently wrap inventory) when guardian

@@ -3,7 +3,6 @@ pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {BridgeEscrow} from "../src/BridgeEscrow.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
@@ -13,14 +12,14 @@ import {TestableBridgeEscrow} from "./mocks/TestableBridgeEscrow.sol";
 ///         `test_Claim_TipPaidToMsgSender_NotTxOrigin`. The tip MUST land
 ///         on `msg.sender` (this contract), NOT `tx.origin` (the EOA).
 contract RelayerProxy {
-    BridgeEscrow public immutable escrow;
+    BridgeEscrow public immutable ESCROW;
 
     constructor(BridgeEscrow _escrow) {
-        escrow = _escrow;
+        ESCROW = _escrow;
     }
 
     function relay(BridgeEscrow.ReleaseIntent calldata intent, bytes calldata sig) external {
-        escrow.claim(intent, sig);
+        ESCROW.claim(intent, sig);
     }
 }
 
@@ -339,6 +338,7 @@ contract RelayerTipTest is Test {
         //   delta(inventory + accruedFees) = -gross + fee = -net == delta(bridge_balance)
         int256 dInv = int256(uint256(fAfter.inventory)) - int256(uint256(invBefore));
         int256 dAccrued = int256(uint256(fAfter.accruedFees)) - int256(uint256(accruedBefore));
+        // forge-lint: disable-next-line(unsafe-typecast)
         int256 dBal = int256(usdc.balanceOf(address(escrow))) - int256(balBefore);
         assertEq(dInv + dAccrued, dBal, "inventory + accruedFees delta == bridge balance delta");
     }

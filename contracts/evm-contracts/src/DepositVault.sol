@@ -6,9 +6,15 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 /// @notice Minimal BridgeEscrow surface the vault forwards into.
 interface IBridgeEscrowLock {
-    function lock(address token, uint256 amount, bytes32 opnetRecipient, bytes32 flowId)
-        external
-        returns (uint256 depositNonce, uint256 amountReceived);
+    /// @dev E-2 — `lockFor` (not `lock`) so the refund destination is the
+    ///      user-controlled `refundTo`, NOT this self-destructing vault.
+    function lockFor(
+        address token,
+        uint256 amount,
+        bytes32 opnetRecipient,
+        bytes32 flowId,
+        address refundTo
+    ) external returns (uint256 depositNonce, uint256 amountReceived);
 }
 
 /// @title  DepositVault
@@ -28,13 +34,25 @@ interface IBridgeEscrowLock {
 contract DepositVault {
     using SafeERC20 for IERC20;
 
-    constructor(address token, address escrow, bytes32 opnetRecipient, bytes32 flowId) {
+    constructor(
+        address token,
+        address escrow,
+        bytes32 opnetRecipient,
+        bytes32 flowId,
+        address refundTo
+    ) {
         uint256 bal = IERC20(token).balanceOf(address(this));
-        if (bal > 0) {
-            // forceApprove handles USDT's approve-from-nonzero quirk.
-            IERC20(token).forceApprove(escrow, bal);
-            IBridgeEscrowLock(escrow).lock(token, bal, opnetRecipient, flowId);
-        }
+        // Revert on zero balance so the constructor call fails, the CREATE2
+        // deployment rolls back, and the salt is preserved for the real sweep.
+        // A silent no-op would consume gas and give no feedback to the caller.
+        require(bal > 0, "DepositVault: zero balance");
+        // forceApprove handles USDT's approve-from-nonzero quirk.
+        IERC20(token).forceApprove(escrow, bal);
+        // E-2 — `lockFor` pins the refund destination to `refundTo` (a
+        // user-controlled address committed into this vault's CREATE2
+        // initcode), NOT this vault — which is about to self-destruct, so
+        // a refund here would be unrecoverable.
+        IBridgeEscrowLock(escrow).lockFor(token, bal, opnetRecipient, flowId, refundTo);
         // Free the address for a future deposit (EIP-6780: same-tx
         // create+destruct still clears code). Any stray ETH → escrow.
         selfdestruct(payable(escrow));

@@ -21,6 +21,8 @@ contract DepositAddressFactoryTest is Test {
     uint256 internal signerPk = 0xA1B2C3D4;
     bytes32 internal flowId;
     bytes32 internal constant RECIPIENT = keccak256("opnet-rcp");
+    // E-2 — the user-controlled refund destination committed into the vault.
+    address internal refundUser = address(0x5EFD);
 
     function setUp() public {
         usdc = new MockERC20("USD Coin", "USDC", 6);
@@ -60,14 +62,14 @@ contract DepositAddressFactoryTest is Test {
         bytes32 salt = keccak256("deposit-1");
         uint256 amount = 7_500e6;
 
-        address depositAddr = factory.predict(salt, address(usdc), RECIPIENT, flowId);
+        address depositAddr = factory.predict(salt, address(usdc), RECIPIENT, flowId, refundUser);
 
         // User sends tokens to the predicted address — no dApp, no approve.
         usdc.mint(depositAddr, amount);
         assertEq(usdc.balanceOf(depositAddr), amount);
 
         // Anyone sweeps.
-        address vault = factory.sweep(salt, address(usdc), RECIPIENT, flowId);
+        address vault = factory.sweep(salt, address(usdc), RECIPIENT, flowId, refundUser);
 
         assertEq(vault, depositAddr, "predict must match the deployed vault");
         assertEq(usdc.balanceOf(address(escrow)), amount, "escrow received the deposit");
@@ -75,22 +77,41 @@ contract DepositAddressFactoryTest is Test {
         assertEq(escrow.depositNonce(), 1, "a lock was recorded");
         assertEq(escrow.getFlow(flowId).inventory, amount, "flow inventory bumped");
         assertEq(depositAddr.code.length, 0, "vault self-destructed");
+
+        // E-2 — the refund-eligible LockRecord.user is the user's refundTo,
+        // NOT the (now self-destructed) vault. This is the whole fix: a later
+        // refundLockedDeposit returns the principal to a recoverable address.
+        (address recUser,,,,,,) = escrow.lockedDeposits(1);
+        assertEq(recUser, refundUser, "refund destination is the user, not the vault");
+        assertTrue(recUser != vault, "refund destination is NOT the dead vault");
     }
 
     function test_PredictIsParamBound() public view {
         bytes32 salt = keccak256("deposit-x");
-        address a = factory.predict(salt, address(usdc), RECIPIENT, flowId);
+        address a = factory.predict(salt, address(usdc), RECIPIENT, flowId, refundUser);
         // A different opnetRecipient → a different deposit address: the
         // address commits to where the bridged funds will go.
-        address b = factory.predict(salt, address(usdc), keccak256("other"), flowId);
+        address b = factory.predict(salt, address(usdc), keccak256("other"), flowId, refundUser);
         assertTrue(a != b, "deposit address commits to opnetRecipient");
+        // E-2 — a different refundTo → a different deposit address: a sweep
+        // cannot redirect the refund to an attacker's address.
+        address c = factory.predict(salt, address(usdc), RECIPIENT, flowId, address(0xBAD));
+        assertTrue(a != c, "deposit address commits to refundTo");
+    }
+
+    function test_Sweep_ZeroRefundTo_Reverts() public {
+        // E-2 — a zero refundTo is rejected up front (a refund to address(0)
+        // would strand the principal).
+        bytes32 salt = keccak256("zero-refund");
+        vm.expectRevert(DepositAddressFactory.ZeroAddress.selector);
+        factory.sweep(salt, address(usdc), RECIPIENT, flowId, address(0));
     }
 
     function test_Sweep_EmptyAddress_RecordsNoLock() public {
         // Sweeping an unfunded address still deploys+destructs the vault,
         // but the constructor's bal==0 branch records no lock.
         bytes32 salt = keccak256("empty");
-        factory.sweep(salt, address(usdc), RECIPIENT, flowId);
+        factory.sweep(salt, address(usdc), RECIPIENT, flowId, refundUser);
         assertEq(escrow.depositNonce(), 0, "no lock for an empty deposit address");
     }
 }

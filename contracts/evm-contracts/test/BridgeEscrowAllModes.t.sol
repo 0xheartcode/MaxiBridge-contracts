@@ -18,10 +18,9 @@ import {TestableBridgeEscrow} from "./mocks/TestableBridgeEscrow.sol";
 ///             that an insufficient-inventory claim reverts cleanly
 ///             before any token transfer (CEI invariant).
 ///
-///           - Mode 2 (NATIVE_BURN_MINT) `claimMintWrapped` happy path.
-///             The existing BridgeEscrow.t.sol covers the
-///             INVERSE_WRAPPED case (mode 1) — this is the sister
-///             coverage for the bridge-as-canonical-issuer mode.
+///           - Mode 2 (NATIVE_BURN_MINT) `claim()` happy path (mint-on-EVM
+///             path through the unified claim() entry point). The existing
+///             BridgeEscrow.t.sol covers the INVERSE_WRAPPED case (mode 1).
 ///
 ///           - lock() mode dispatch: modes 1/2 are NOT lockable
 ///             (they go through WrappedERC20.burnForRelease on the
@@ -35,9 +34,6 @@ contract BridgeEscrowAllModesTest is Test {
         "ReleaseIntent(address token,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,uint256 grossSrcAmount,uint128 relayerTip,bytes32 flowId)"
     );
 
-    bytes32 internal constant MINT_INTENT_TYPEHASH = keccak256(
-        "MintIntent(address wrappedToken,address to,uint256 amount,uint256 srcChainId,bytes32 opnetTxHash,uint32 opnetEventIndex,uint256 burnNonce,uint32 signerEpoch,bytes32 opnetNonce,bytes32 flowId)"
-    );
 
     uint256 internal constant EXPECTED_OPNET_CHAIN_ID = 2;
     uint64 internal constant TEST_EVM_CHAIN_ID = 1;
@@ -80,10 +76,12 @@ contract BridgeEscrowAllModesTest is Test {
         wmoto = new WrappedERC20(
             "Wrapped MOTO",
             "wMOTO",
+            18,
             owner,
             address(escrow),
             EXPECTED_OPNET_CHAIN_ID,
-            TEST_OPNET_WMOTO
+            TEST_OPNET_WMOTO,
+            type(uint256).max // E-1 maxSupply — uncapped in tests
         );
 
         vm.startPrank(owner);
@@ -218,12 +216,12 @@ contract BridgeEscrowAllModesTest is Test {
     }
 
     // =====================================================================
-    // Mode 2 — NATIVE_BURN_MINT claimMintWrapped happy path
+    // Mode 2 — NATIVE_BURN_MINT claim happy path (unified claim())
     // =====================================================================
 
-    function test_claimMintWrapped_nativeBurnMint_happyPath() public {
-        BridgeEscrow.MintIntent memory mi = BridgeEscrow.MintIntent({
-            wrappedToken: address(wmoto),
+    function test_claim_nativeBurnMint_happyPath() public {
+        BridgeEscrow.ReleaseIntent memory ri = BridgeEscrow.ReleaseIntent({
+            token: address(wmoto),
             to: bob,
             amount: 100e6,
             srcChainId: EXPECTED_OPNET_CHAIN_ID,
@@ -232,15 +230,17 @@ contract BridgeEscrowAllModesTest is Test {
             burnNonce: 1,
             signerEpoch: escrow.currentEpoch(),
             opnetNonce: keccak256("opnet-nonce-mint-nbm"),
+            grossSrcAmount: 100e6,
+            relayerTip: 0,
             flowId: wmotoFlowId
         });
-        bytes memory sig = _signMintIntent(signerPk, mi);
+        bytes memory sig = _signIntent(signerPk, ri);
 
-        escrow.claimMintWrapped(mi, sig);
+        escrow.claim(ri, sig);
 
         assertEq(wmoto.balanceOf(bob), 100e6, "wmoto minted to bob");
         assertTrue(
-            escrow.signaturesUsed(mi.opnetNonce),
+            escrow.signaturesUsed(ri.opnetNonce),
             "opnet nonce marked used"
         );
     }
@@ -300,30 +300,4 @@ contract BridgeEscrowAllModesTest is Test {
         return abi.encodePacked(uint8(1), r, s, v);
     }
 
-    function _signMintIntent(uint256 pk, BridgeEscrow.MintIntent memory mi)
-        internal
-        view
-        returns (bytes memory)
-    {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                MINT_INTENT_TYPEHASH,
-                mi.wrappedToken,
-                mi.to,
-                mi.amount,
-                mi.srcChainId,
-                mi.opnetTxHash,
-                mi.opnetEventIndex,
-                mi.burnNonce,
-                mi.signerEpoch,
-                mi.opnetNonce,
-                mi.flowId
-            )
-        );
-        bytes32 digest = keccak256(
-            abi.encodePacked("\x19\x01", escrow.domainSeparator(), structHash)
-        );
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(uint8(1), r, s, v);
-    }
 }

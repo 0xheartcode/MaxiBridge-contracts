@@ -22,7 +22,7 @@ import { BridgeDepository } from '../contracts/BridgeDepository.js';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 const VOUCHER_NETWORK_ID: bigint = 2n;
-const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x59893fe6;
+const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x6FBDC887; // sha256('claimWithVoucher(bytes,bytes)')[0:4]
 const VOUCHER_PREIMAGE_LEN = 540; // #68 Tier B — appended flowId u256
 const ETH_CHAIN_ID: bigint = 1n;
 

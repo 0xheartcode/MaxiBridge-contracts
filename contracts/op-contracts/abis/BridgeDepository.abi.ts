@@ -19,15 +19,6 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
-        name: 'TokenModeSet',
-        values: [
-            { name: 'token', type: ABIDataTypes.ADDRESS },
-            { name: 'mode', type: ABIDataTypes.UINT32 },
-            { name: 'evmCounterpart', type: ABIDataTypes.UINT256 },
-        ],
-        type: BitcoinAbiTypes.Event,
-    },
-    {
         name: 'FlowAdded',
         values: [
             { name: 'flowId', type: ABIDataTypes.UINT256 },
@@ -109,6 +100,23 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'MintedFromVoucher',
+        values: [
+            { name: 'recipient', type: ABIDataTypes.ADDRESS },
+            { name: 'wrappedToken', type: ABIDataTypes.ADDRESS },
+            { name: 'sourceChainId', type: ABIDataTypes.UINT256 },
+            { name: 'sourceTxHash', type: ABIDataTypes.UINT256 },
+            { name: 'sourceLogIndex', type: ABIDataTypes.UINT32 },
+            { name: 'grossAmount', type: ABIDataTypes.UINT256 },
+            { name: 'feeAmount', type: ABIDataTypes.UINT256 },
+            { name: 'netAmount', type: ABIDataTypes.UINT256 },
+            { name: 'voucherId', type: ABIDataTypes.UINT256 },
+            { name: 'signerEpoch', type: ABIDataTypes.UINT32 },
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'ReleasedFromVoucher',
         values: [
             { name: 'recipient', type: ABIDataTypes.ADDRESS },
@@ -121,6 +129,7 @@ export const BridgeDepositoryEvents = [
             { name: 'netAmount', type: ABIDataTypes.UINT256 },
             { name: 'voucherId', type: ABIDataTypes.UINT256 },
             { name: 'signerEpoch', type: ABIDataTypes.UINT32 },
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
         ],
         type: BitcoinAbiTypes.Event,
     },
@@ -254,22 +263,6 @@ export const BridgeDepositoryEvents = [
         ],
         type: BitcoinAbiTypes.Event,
     },
-    {
-        name: 'MintedFromVoucher',
-        values: [
-            { name: 'recipient', type: ABIDataTypes.ADDRESS },
-            { name: 'wrappedToken', type: ABIDataTypes.ADDRESS },
-            { name: 'sourceChainId', type: ABIDataTypes.UINT256 },
-            { name: 'sourceTxHash', type: ABIDataTypes.UINT256 },
-            { name: 'sourceLogIndex', type: ABIDataTypes.UINT32 },
-            { name: 'grossAmount', type: ABIDataTypes.UINT256 },
-            { name: 'feeAmount', type: ABIDataTypes.UINT256 },
-            { name: 'netAmount', type: ABIDataTypes.UINT256 },
-            { name: 'voucherId', type: ABIDataTypes.UINT256 },
-            { name: 'signerEpoch', type: ABIDataTypes.UINT32 },
-        ],
-        type: BitcoinAbiTypes.Event,
-    },
 ];
 
 export const BridgeDepositoryAbi = [
@@ -382,30 +375,6 @@ export const BridgeDepositoryAbi = [
         constant: true,
         inputs: [],
         outputs: [{ name: 'amount', type: ABIDataTypes.UINT256 }],
-        type: BitcoinAbiTypes.Function,
-    },
-    {
-        name: 'setTokenMode',
-        inputs: [
-            { name: 'token', type: ABIDataTypes.ADDRESS },
-            { name: 'mode', type: ABIDataTypes.UINT256 },
-            { name: 'evmCounterpart', type: ABIDataTypes.UINT256 },
-        ],
-        outputs: [],
-        type: BitcoinAbiTypes.Function,
-    },
-    {
-        name: 'tokenMode',
-        constant: true,
-        inputs: [],
-        outputs: [{ name: 'mode', type: ABIDataTypes.UINT256 }],
-        type: BitcoinAbiTypes.Function,
-    },
-    {
-        name: 'evmCounterpartOf',
-        constant: true,
-        inputs: [],
-        outputs: [{ name: 'counterpart', type: ABIDataTypes.UINT256 }],
         type: BitcoinAbiTypes.Function,
     },
     {
@@ -546,7 +515,7 @@ export const BridgeDepositoryAbi = [
         type: BitcoinAbiTypes.Function,
     },
     {
-        name: 'claimReleaseWithVoucher',
+        name: 'claimWithVoucher',
         inputs: [
             { name: 'voucher', type: ABIDataTypes.BYTES },
             { name: 'mldsaSig', type: ABIDataTypes.BYTES },
@@ -746,15 +715,6 @@ export const BridgeDepositoryAbi = [
     {
         name: 'setGuardian',
         inputs: [{ name: 'newGuardian', type: ABIDataTypes.ADDRESS }],
-        outputs: [],
-        type: BitcoinAbiTypes.Function,
-    },
-    {
-        name: 'claimMintWithVoucher',
-        inputs: [
-            { name: 'voucher', type: ABIDataTypes.BYTES },
-            { name: 'mldsaSig', type: ABIDataTypes.BYTES },
-        ],
         outputs: [],
         type: BitcoinAbiTypes.Function,
     },

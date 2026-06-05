@@ -6,7 +6,6 @@ import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {VestingVault} from "../src/VestingVault.sol";
-import {IVestingVault} from "../src/IVestingVault.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 
 /// @notice Stand-alone ERC20 that under-delivers on transferFrom (1% skim)
@@ -14,9 +13,9 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 ///         self-contained because the shared MockERC20 doesn't declare
 ///         transferFrom virtual.
 contract MockSkimmingERC20 {
-    string public constant name = "SKIM";
-    string public constant symbol = "SKIM";
-    uint8 public constant decimals = 18;
+    string public constant NAME = "SKIM";
+    string public constant SYMBOL = "SKIM";
+    uint8 public constant DECIMALS = 18;
     uint256 public totalSupply;
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
@@ -90,9 +89,9 @@ contract VestingVaultTest is Test {
     // ------------------------------------------------------------------
 
     function test_Constructor_StoresImmutables() public view {
-        assertEq(address(vault.token()), address(token));
-        assertEq(vault.bridge(), bridge);
-        assertEq(vault.vestingBlocks(), VESTING_BLOCKS);
+        assertEq(address(vault.TOKEN()), address(token));
+        assertEq(vault.BRIDGE(), bridge);
+        assertEq(vault.VESTING_BLOCKS(), VESTING_BLOCKS);
     }
 
     function test_Constructor_RejectsZeroToken() public {
@@ -156,6 +155,7 @@ contract VestingVaultTest is Test {
         emit VestingVault.Deposited(
             alice,
             key,
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint128(amount),
             uint64(block.number),
             uint64(block.number) + VESTING_BLOCKS
@@ -165,6 +165,7 @@ contract VestingVaultTest is Test {
         vault.depositFor(alice, amount, key);
 
         VestingVault.Schedule memory s = vault.getSchedule(alice, key);
+        // forge-lint: disable-next-line(unsafe-typecast)
         assertEq(s.total, uint128(amount));
         assertEq(s.claimed, 0);
         assertEq(s.startBlock, uint64(block.number));

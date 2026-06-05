@@ -4,9 +4,9 @@ pragma solidity 0.8.24;
 /// @notice Minimal non-ERC20-compliant token mimicking mainnet USDT
 ///         (transfer/transferFrom return no bool). Used to verify SafeERC20.
 contract MockUSDT {
-    string public constant name = "Mock USDT";
-    string public constant symbol = "mUSDT";
-    uint8 public constant decimals = 6;
+    string public constant NAME = "Mock USDT";
+    string public constant SYMBOL = "mUSDT";
+    uint8 public constant DECIMALS = 6;
 
     uint256 public totalSupply;
     mapping(address => uint256) public balanceOf;

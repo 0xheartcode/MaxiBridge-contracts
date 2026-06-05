@@ -47,14 +47,14 @@ contract VestingVault is IVestingVault, ReentrancyGuard {
     // ---------------------------------------------------------------------
 
     /// @notice The single ERC20 this vault vests. Locked at deploy.
-    IERC20 public immutable token;
+    IERC20 public immutable TOKEN;
 
     /// @notice The only address allowed to `depositFor` and `clawback`.
     ///         Set to the BridgeEscrow proxy at deploy.
-    address public immutable bridge;
+    address public immutable BRIDGE;
 
     /// @notice Linear-vest window in blocks. 50_400 ≈ 7 days at 12s/block.
-    uint64 public immutable vestingBlocks;
+    uint64 public immutable VESTING_BLOCKS;
 
     // ---------------------------------------------------------------------
     // Storage
@@ -119,8 +119,12 @@ contract VestingVault is IVestingVault, ReentrancyGuard {
     // ---------------------------------------------------------------------
 
     modifier onlyBridge() {
-        if (msg.sender != bridge) revert NotBridge();
+        _onlyBridge();
         _;
+    }
+
+    function _onlyBridge() internal view {
+        if (msg.sender != BRIDGE) revert NotBridge();
     }
 
     // ---------------------------------------------------------------------
@@ -130,9 +134,9 @@ contract VestingVault is IVestingVault, ReentrancyGuard {
     constructor(IERC20 token_, address bridge_, uint64 vestingBlocks_) {
         if (address(token_) == address(0) || bridge_ == address(0)) revert ZeroAddress();
         if (vestingBlocks_ == 0) revert ZeroVestingDuration();
-        token = token_;
-        bridge = bridge_;
-        vestingBlocks = vestingBlocks_;
+        TOKEN = token_;
+        BRIDGE = bridge_;
+        VESTING_BLOCKS = vestingBlocks_;
     }
 
     // ---------------------------------------------------------------------
@@ -157,26 +161,28 @@ contract VestingVault is IVestingVault, ReentrancyGuard {
         // Pull the tokens. Balance-delta verifies the bridge actually paid
         // in full (no fee-on-transfer leakage). Reverts loudly on shortfall
         // rather than opening an under-funded schedule.
-        uint256 balBefore = token.balanceOf(address(this));
-        token.safeTransferFrom(msg.sender, address(this), amount);
+        uint256 balBefore = TOKEN.balanceOf(address(this));
+        TOKEN.safeTransferFrom(msg.sender, address(this), amount);
         uint256 received;
         unchecked {
-            received = token.balanceOf(address(this)) - balBefore;
+            received = TOKEN.balanceOf(address(this)) - balBefore;
         }
         if (received != amount) revert TokenTransferIncomplete();
 
         uint64 startBlock = uint64(block.number);
         uint64 endBlock;
         unchecked {
-            // vestingBlocks ≤ 2^64-1 by type; block.number realistically <<
+            // VESTING_BLOCKS ≤ 2^64-1 by type; block.number realistically <<
             // 2^63, so the sum cannot overflow uint64.
-            endBlock = startBlock + vestingBlocks;
+            endBlock = startBlock + VESTING_BLOCKS;
         }
 
+        // forge-lint: disable-next-line(unsafe-typecast) — AmountOverflow() guard at function start
         s.total = uint128(amount);
         s.startBlock = startBlock;
         s.endBlock = endBlock;
 
+        // forge-lint: disable-next-line(unsafe-typecast) — AmountOverflow() guard at function start
         emit Deposited(beneficiary, scheduleKey, uint128(amount), startBlock, endBlock);
     }
 
@@ -210,10 +216,10 @@ contract VestingVault is IVestingVault, ReentrancyGuard {
 
         // Interactions.
         if (unvested > 0) {
-            token.safeTransfer(msg.sender, unvested);
+            TOKEN.safeTransfer(msg.sender, unvested);
         }
         if (owedToBeneficiary > 0) {
-            token.safeTransfer(beneficiary, owedToBeneficiary);
+            TOKEN.safeTransfer(beneficiary, owedToBeneficiary);
             emit Claimed(beneficiary, scheduleKey, owedToBeneficiary);
         }
         emit ClawedBack(beneficiary, scheduleKey, unvested, owedToBeneficiary);
@@ -244,7 +250,7 @@ contract VestingVault is IVestingVault, ReentrancyGuard {
         s.claimed = vested;
 
         emit Claimed(msg.sender, scheduleKey, claimedAmount);
-        token.safeTransfer(msg.sender, claimedAmount);
+        TOKEN.safeTransfer(msg.sender, claimedAmount);
     }
 
     // ---------------------------------------------------------------------
@@ -295,6 +301,7 @@ contract VestingVault is IVestingVault, ReentrancyGuard {
         // total is uint128, elapsed < duration ≤ uint64.max, so product fits
         // in uint256 with margin; division yields a uint128.
         uint256 vested = (uint256(s.total) * elapsed) / duration;
+        // forge-lint: disable-next-line(unsafe-typecast) — vested ≤ s.total ≤ uint128.max (elapsed < duration)
         return uint128(vested);
     }
 }

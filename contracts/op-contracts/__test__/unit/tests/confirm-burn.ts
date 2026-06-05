@@ -33,21 +33,14 @@ import { BridgeDepository } from '../contracts/BridgeDepository.js';
 
 // ─── Constants — must mirror BridgeDepository.ts ──────────────────────────
 const VOUCHER_NETWORK_ID: bigint = 2n;
-const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x59893fe6;
+const CLAIM_MINT_WITH_VOUCHER_SELECTOR: number = 0x6FBDC887; // sha256('claimWithVoucher(bytes,bytes)')[0:4]
 const CONFIRM_BURN_SELECTOR: number = 0x9cffeea6;
 const VOUCHER_PREIMAGE_LEN = 540; // #68 Tier B — appended flowId u256
 const BURN_ATTESTATION_LEN = 252;
 const ETH_CHAIN_ID: bigint = 1n;
 
-// claimReleaseWithVoucher selector — sha256 of signature, first 4B.
-function deriveSelector(sig: string): number {
-    const enc = new TextEncoder();
-    const bytes = sha256(enc.encode(sig));
-    return ((bytes[0]! << 24) | (bytes[1]! << 16) | (bytes[2]! << 8) | bytes[3]!) >>> 0;
-}
-const CLAIM_RELEASE_WITH_VOUCHER_SELECTOR: number = deriveSelector(
-    'claimReleaseWithVoucher(bytes,bytes)',
-);
+// Both mint and release paths go through the unified claimWithVoucher entry point.
+const CLAIM_RELEASE_WITH_VOUCHER_SELECTOR: number = 0x6FBDC887; // sha256('claimWithVoucher(bytes,bytes)')[0:4]
 
 // ─── Harness ──────────────────────────────────────────────────────────────
 const deployer: Address = Blockchain.generateRandomAddress();

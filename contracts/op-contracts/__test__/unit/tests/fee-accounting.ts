@@ -175,7 +175,6 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
 
     await vm.it('mode-1 lock accrues exact bps fee; inventory == received - fee (HIGH-002)', async () => {
         const { depository, wusdcAddress } = setup;
-        await depository.setTokenMode(wusdcAddress, 1n, 0xc0ffeen);
         const flowId = await registerFlow(setup, { mode: 1n, feeBps: 50n });
 
         await fundAndApprove(setup, 4_000_000n);
@@ -199,7 +198,6 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
         // attributable to this flow. Pre-fix the sweep dropped balance but
         // left inventory unchanged, breaking the equality.
         const { depository, depositoryAddress, wusdcAddress, wusdc } = setup;
-        await depository.setTokenMode(wusdcAddress, 1n, 0xc0ffeen);
         const flowId = await registerFlow(setup, { mode: 1n, feeBps: 50n });
 
         await fundAndApprove(setup, 4_000_000n);
@@ -230,7 +228,6 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
 
     await vm.it('minFee floor wins when bps-derived fee is lower', async () => {
         const { depository, wusdcAddress } = setup;
-        await depository.setTokenMode(wusdcAddress, 1n, 0xc0ffeen);
         // bps fee on 1_000_000 @ 10bps = 1_000; minFee 7_500 dominates.
         const flowId = await registerFlow(setup, { mode: 1n, feeBps: 10n, minFee: 7_500n });
 
@@ -242,7 +239,6 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
 
     await vm.it('zero-fee flow accrues nothing', async () => {
         const { depository, wusdcAddress } = setup;
-        await depository.setTokenMode(wusdcAddress, 1n, 0xc0ffeen);
         const flowId = await registerFlow(setup, { mode: 1n, feeBps: 0n, minFee: 0n });
 
         await fundAndApprove(setup, 2_000_000n);
@@ -253,7 +249,6 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
 
     await vm.it('accrual accumulates across multiple locks', async () => {
         const { depository, wusdcAddress } = setup;
-        await depository.setTokenMode(wusdcAddress, 1n, 0xc0ffeen);
         const flowId = await registerFlow(setup, { mode: 1n, feeBps: 50n });
 
         await fundAndApprove(setup, 6_000_000n);
@@ -265,11 +260,9 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
     });
 
     await vm.it('mode-3 (POOLED) lock also accrues a source-side fee', async () => {
-        // Mode 3 keeps the canonical token mode at WRAPPED-incompatible? No —
-        // lockForBridge dispatches on the TOKEN mode (_tokenMode). Set it to
-        // mode 3 so the lock is admitted, and register a mode-3 flow.
+        // lockForBridge dispatches on the flow's mode (per-flow, #68); register
+        // a mode-3 flow so the lock is admitted.
         const { depository, wusdcAddress } = setup;
-        await depository.setTokenMode(wusdcAddress, 3n, 0xc0ffeen);
         const flowId = await registerFlow(setup, { mode: 3n, feeBps: 50n });
 
         await fundAndApprove(setup, 2_000_000n);
@@ -305,7 +298,6 @@ await opnet('BridgeDepository — #62 — withdrawFees', async (vm: OPNetUnit) =
     // Common arrangement: a mode-1 flow with 10_000 accrued from a 2_000_000 lock.
     async function arrange(): Promise<bigint> {
         const { depository, wusdcAddress } = setup;
-        await depository.setTokenMode(wusdcAddress, 1n, 0xc0ffeen);
         const flowId = await registerFlow(setup, { mode: 1n, feeBps: 50n });
         await fundAndApprove(setup, 2_000_000n);
         setSender(alice);
