@@ -297,9 +297,11 @@ await opnet('BridgeDepository.stranded-lock-refund — mode-1 happy path', async
 
         const lockNonce = await fundLock(setup, flowId, amount);
 
-        // After lock: mode-1 credited NET to inventory, FEE to accruedFees.
-        Assert.expect(await flowInventory(setup, flowId)).toEqual(net);
-        Assert.expect(await depository.accruedFees(flowId)).toEqual(fee);
+        // PVE001 — after lock: mode-1 credits the GROSS to inventory and the
+        // fee is DEFERRED (not accrued until settleLock). A refundable lock is
+        // never settled, so accruedFees stays 0 and the full gross is reversed.
+        Assert.expect(await flowInventory(setup, flowId)).toEqual(amount);
+        Assert.expect(await depository.accruedFees(flowId)).toEqual(0n);
         // Bridge physically holds the full gross (invariant: inv + fee == bal).
         Assert.expect(await bridgeBalance(setup)).toEqual(amount);
         Assert.expect(net + fee).toEqual(await bridgeBalance(setup));
@@ -396,14 +398,14 @@ await opnet('BridgeDepository.stranded-lock-refund — mode-3 happy path', async
         const { depository } = setup;
         const flowId = await registerFlow(setup, 3n);
         const amount = 2_000_000n;
-        const fee = (amount * FEE_BPS) / 10_000n;
 
         const lockNonce = await fundLock(setup, flowId, amount);
 
         // Mode 3 credits NO OPNet inventory at lock time (release pool lives
-        // on the EVM counterpart). Only the fee accrues.
+        // on the EVM counterpart). PVE001 — the fee is DEFERRED, so accrued is
+        // 0 at lock (a refundable lock is never settled).
         Assert.expect(await flowInventory(setup, flowId)).toEqual(0n);
-        Assert.expect(await depository.accruedFees(flowId)).toEqual(fee);
+        Assert.expect(await depository.accruedFees(flowId)).toEqual(0n);
         Assert.expect(await bridgeBalance(setup)).toEqual(amount);
 
         const rec = await depository.lockRecord(lockNonce);

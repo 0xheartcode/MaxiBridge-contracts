@@ -637,7 +637,6 @@ export class BridgeDepository extends ContractRuntime {
             ABIDataTypes.UINT256,
             ABIDataTypes.ADDRESS,
             ABIDataTypes.UINT256,
-            ABIDataTypes.ADDRESS,
         );
     private readonly lockForBridgeSelector: number = encodeSelectorWithParams(
         'lockForBridge',
@@ -706,14 +705,12 @@ export class BridgeDepository extends ContractRuntime {
         flowId: bigint,
         token: Address,
         amount: bigint,
-        recipient: Address,
     ): Promise<void> {
         const w = new BinaryWriter();
         w.writeSelector(this.drainInventoryOpNetSelector);
         w.writeU256(flowId);
         w.writeAddress(token);
         w.writeU256(amount);
-        w.writeAddress(recipient);
         await this.getResponse(w.getBuffer());
     }
 
@@ -783,6 +780,19 @@ export class BridgeDepository extends ContractRuntime {
     public async refundLock(lockNonce: bigint): Promise<void> {
         const w = new BinaryWriter();
         w.writeSelector(this.refundLockSelector);
+        w.writeU256(lockNonce);
+        await this.getResponse(w.getBuffer());
+    }
+
+    private readonly settleLockSelector: number = encodeSelectorWithParams(
+        'settleLock',
+        ABIDataTypes.UINT256,
+    );
+
+    // PVE001 — promote a LOCKED lock's deferred fee after the settlement window.
+    public async settleLock(lockNonce: bigint): Promise<void> {
+        const w = new BinaryWriter();
+        w.writeSelector(this.settleLockSelector);
         w.writeU256(lockNonce);
         await this.getResponse(w.getBuffer());
     }

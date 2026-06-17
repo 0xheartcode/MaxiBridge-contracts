@@ -178,8 +178,12 @@ await opnet('BridgeDepository — #68 — mode-per-flow lock', async (vm: OPNetU
         await depository.lockForBridge(flow3, wusdcAddress, 2_000_000n, evmRecipient(), 1);
         await depository.lockForBridge(flow4, wusdcAddress, 2_000_000n, evmRecipient(), 1);
 
-        // Each flow accrued its own source-side fee independently — proof both
-        // locks actually executed against their own flowId.
+        // PVE001 — fees are deferred; settle both locks (nonces 1 & 2) past the
+        // window so each flow's source-side fee promotes independently — proof
+        // both locks executed against their own flowId.
+        Blockchain.blockNumber += 2_016n;
+        await depository.settleLock(1n);
+        await depository.settleLock(2n);
         Assert.expect(await depository.accruedFees(flow3)).toEqual(10_000n);
         Assert.expect(await depository.accruedFees(flow4)).toEqual(10_000n);
     });

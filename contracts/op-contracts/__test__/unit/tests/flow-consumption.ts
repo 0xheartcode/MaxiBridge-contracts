@@ -535,9 +535,12 @@ await opnet('BridgeDepository — #44 — provision / drain inventory (mode 3 PO
             Assert.expect(flow[16]!).toEqual(3_000_000n); // index 16 = inventory
             Assert.expect(await wusdc.balanceOf(depositoryAddress)).toEqual(3_000_000n);
 
-            // Drain 1_000_000 back out — requires the bridge paused.
+            // Drain 1_000_000 back out — requires the bridge paused. PVE005-2:
+            // the destination is the pinned treasury (not a caller-chosen
+            // recipient), so wire a treasury first.
+            await depository.setTreasury(deployer);
             await depository.setPaused(true);
-            await depository.drainInventoryOpNet(flowId, wusdcAddress, 1_000_000n, deployer);
+            await depository.drainInventoryOpNet(flowId, wusdcAddress, 1_000_000n);
             flow = await depository.getFlow(flowId);
             Assert.expect(flow[16]!).toEqual(2_000_000n);
             Assert.expect(await wusdc.balanceOf(depositoryAddress)).toEqual(2_000_000n);
@@ -562,10 +565,11 @@ await opnet('BridgeDepository — #44 — provision / drain inventory (mode 3 PO
             await wusdc.mintTo(deployer, 5_000_000n);
             await wusdc.increaseAllowance(deployer, depositoryAddress, 5_000_000n);
             setSender(deployer);
+            await depository.setTreasury(deployer); // PVE005-2 — drain targets the pinned treasury
             await depository.provisionInventoryOpNet(flowId, wusdcAddress, 1_000_000n);
             await depository.setPaused(true);
             await Assert.expect(async () => {
-                await depository.drainInventoryOpNet(flowId, wusdcAddress, 2_000_000n, deployer);
+                await depository.drainInventoryOpNet(flowId, wusdcAddress, 2_000_000n);
             }).toThrow();
         });
 
@@ -632,16 +636,17 @@ await opnet('BridgeDepository — #44 — lockForBridge → claimReleaseWithVouc
             await wusdc.increaseAllowance(alice, depositoryAddress, 4_000_000n);
 
             // lockForBridge — the SOLE mode-1 inventory producer. evmRecipient
-            // is a left-padded EVM address (upper 12 bytes zero). Default
-            // feeBps for registerFlow is 50 (0.5%), so 3_000_000 lock accrues
-            // a 15_000 fee and credits 2_985_000 NET to inventory (HIGH-002).
+            // is a left-padded EVM address (upper 12 bytes zero). Default feeBps
+            // is 50 (0.5%); PVE001 — the fee is DEFERRED (not accrued at lock)
+            // and the GROSS 3_000_000 is credited to inventory (a later
+            // settleLock would move the 15_000 fee out; this test never settles).
             const evmRecipient = new Uint8Array(32);
             for (let i = 12; i < 32; i++) evmRecipient[i] = 0xab;
             setSender(alice);
             await depository.lockForBridge(flowId, wusdcAddress, 3_000_000n, evmRecipient, 1);
 
             let flow = await depository.getFlow(flowId);
-            Assert.expect(flow[16]!).toEqual(2_985_000n); // inventory == net (received - fee)
+            Assert.expect(flow[16]!).toEqual(3_000_000n); // PVE001 — inventory == GROSS
 
             // claimReleaseWithVoucher draws the ledger down by grossAmount.
             const buildRelease = (salt: bigint, gross: bigint, fee: bigint, net: bigint) =>
@@ -663,14 +668,13 @@ await opnet('BridgeDepository — #44 — lockForBridge → claimReleaseWithVouc
             const r1 = buildRelease(0x7001n, 1_000_000n, 5_000n, 995_000n);
             await depository.claimReleaseWithVoucher(r1.preimage, signVoucher(signerWallet, r1.hash));
             flow = await depository.getFlow(flowId);
-            // 2_985_000 (post-HIGH-002 net credit) − 1_000_000 release = 1_985_000.
-            Assert.expect(flow[16]!).toEqual(1_985_000n);
+            // PVE001 — 3_000_000 (gross credit) − 1_000_000 release = 2_000_000.
+            Assert.expect(flow[16]!).toEqual(2_000_000n);
 
-            // Over-release — grossAmount 2_000_000 > remaining inventory 1_985_000.
-            // (Pre-fix used 2_500_000 against a 2_000_000 floor; the net credit
-            //  lowers the floor by exactly the fee, so the over-release boundary
-            //  shifts too.)
-            const r2 = buildRelease(0x7002n, 2_000_000n, 10_000n, 1_990_000n);
+            // Over-release — grossAmount 2_500_000 > remaining inventory 2_000_000.
+            // PVE001 credits the gross at lock (no fee carve), so the remaining
+            // inventory floor is the full 2_000_000.
+            const r2 = buildRelease(0x7002n, 2_500_000n, 12_500n, 2_487_500n);
             await Assert.expect(async () => {
                 await depository.claimReleaseWithVoucher(
                     r2.preimage, signVoucher(signerWallet, r2.hash),

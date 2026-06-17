@@ -173,7 +173,7 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
 
     vm.afterEach(() => disposeSetup(setup));
 
-    await vm.it('mode-1 lock accrues exact bps fee; inventory == received - fee (HIGH-002)', async () => {
+    await vm.it('PVE001 — mode-1: fee deferred at lock (inventory=gross), promoted on settleLock', async () => {
         const { depository, wusdcAddress } = setup;
         const flowId = await registerFlow(setup, { mode: 1n, feeBps: 50n });
 
@@ -181,13 +181,18 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
         setSender(alice);
         await depository.lockForBridge(flowId, wusdcAddress, 2_000_000n, evmRecipient(), 1);
 
-        // fee = 2_000_000 * 50 / 10_000 = 10_000
+        // PVE001 — the fee is DEFERRED: nothing accrues at lock, and mode-1
+        // inventory holds the GROSS received (it transiently backs the fee).
+        Assert.expect(await depository.accruedFees(flowId)).toEqual(0n);
+        let flow = await depository.getFlow(flowId);
+        Assert.expect(flow[16]!).toEqual(2_000_000n);
+
+        // After the settlement window, settleLock promotes the fee:
+        // inventory -= fee → net, accruedFees += fee. fee = 2_000_000*50/10_000.
+        Blockchain.blockNumber += 2_016n;
+        await depository.settleLock(1n);
         Assert.expect(await depository.accruedFees(flowId)).toEqual(10_000n);
-        // HIGH-002 (audit 2026-05-25): inventory is credited with NET
-        // (received - fee), NOT gross. Pre-fix this asserted == received and
-        // every governor fee sweep widened the ledger-vs-balance gap by the
-        // swept amount.
-        const flow = await depository.getFlow(flowId);
+        flow = await depository.getFlow(flowId);
         Assert.expect(flow[16]!).toEqual(1_990_000n);
     });
 
@@ -204,17 +209,25 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
         setSender(alice);
         await depository.lockForBridge(flowId, wusdcAddress, 2_000_000n, evmRecipient(), 1);
 
-        // Bridge balance after lock = received (gross) = 2_000_000.
+        // PVE001 — fee deferred: after lock, accrued == 0 and mode-1 inventory
+        // holds the gross, so inventory + accrued == balance still holds.
         const balAfterLock = await wusdc.balanceOf(depositoryAddress);
         const flowAfterLock = await depository.getFlow(flowId);
         const accruedAfterLock = await depository.accruedFees(flowId);
+        Assert.expect(accruedAfterLock).toEqual(0n);
         Assert.expect(flowAfterLock[16]! + accruedAfterLock).toEqual(balAfterLock);
+
+        // Settle promotes the fee (inventory -= fee, accrued += fee); only then
+        // is it sweepable. settle moves no tokens, so the invariant still holds.
+        Blockchain.blockNumber += 2_016n;
+        await depository.settleLock(1n);
+        const accruedAfterSettle = await depository.accruedFees(flowId);
 
         // Governor (deployer) sweeps the full accrued fee to the configured
         // treasury (deployer here, for the balance arithmetic below).
         setSender(deployer);
         await depository.setTreasury(deployer);
-        await depository.withdrawFees(flowId, wusdcAddress, accruedAfterLock);
+        await depository.withdrawFees(flowId, wusdcAddress, accruedAfterSettle);
 
         // Post-sweep: balance dropped by fee; inventory unchanged; accrued = 0.
         // Pre-fix: balance == 1_990_000, inventory == 2_000_000 → invariant
@@ -234,6 +247,9 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
         await fundAndApprove(setup, 1_000_000n);
         setSender(alice);
         await depository.lockForBridge(flowId, wusdcAddress, 1_000_000n, evmRecipient(), 1);
+        // PVE001 — promote the deferred fee before asserting.
+        Blockchain.blockNumber += 2_016n;
+        await depository.settleLock(1n);
         Assert.expect(await depository.accruedFees(flowId)).toEqual(7_500n);
     });
 
@@ -255,7 +271,10 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
         setSender(alice);
         await depository.lockForBridge(flowId, wusdcAddress, 2_000_000n, evmRecipient(), 1);
         await depository.lockForBridge(flowId, wusdcAddress, 4_000_000n, evmRecipient(), 1);
-        // 10_000 + 20_000 = 30_000
+        // PVE001 — settle both deferred fees. 10_000 + 20_000 = 30_000.
+        Blockchain.blockNumber += 2_016n;
+        await depository.settleLock(1n);
+        await depository.settleLock(2n);
         Assert.expect(await depository.accruedFees(flowId)).toEqual(30_000n);
     });
 
@@ -268,6 +287,9 @@ await opnet('BridgeDepository — #62 — fee accrual on lockForBridge', async (
         await fundAndApprove(setup, 2_000_000n);
         setSender(alice);
         await depository.lockForBridge(flowId, wusdcAddress, 2_000_000n, evmRecipient(), 1);
+        // PVE001 — mode-3 fee is also deferred; promote it via settleLock.
+        Blockchain.blockNumber += 2_016n;
+        await depository.settleLock(1n);
         Assert.expect(await depository.accruedFees(flowId)).toEqual(10_000n);
     });
 
@@ -302,6 +324,10 @@ await opnet('BridgeDepository — #62 — withdrawFees', async (vm: OPNetUnit) =
         await fundAndApprove(setup, 2_000_000n);
         setSender(alice);
         await depository.lockForBridge(flowId, wusdcAddress, 2_000_000n, evmRecipient(), 1);
+        // PVE001 — fee is deferred at lock; promote it via settleLock (after the
+        // settlement window) so withdrawFees has accrued revenue to sweep.
+        Blockchain.blockNumber += 2_016n;
+        await depository.settleLock(1n);
         return flowId;
     }
 
