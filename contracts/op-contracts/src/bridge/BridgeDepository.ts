@@ -47,6 +47,7 @@ import {
     FeesWithdrawn,
     LockMarkedRefundable,
     LockRefunded,
+    LockSettled,
     BurnRefunded,
 } from './events';
 
@@ -209,6 +210,13 @@ const LOCK_STATUS_NONE: u32 = 0;
 const LOCK_STATUS_LOCKED: u32 = 1;
 const LOCK_STATUS_REFUNDABLE: u32 = 2;
 const LOCK_STATUS_REFUNDED: u32 = 3;
+const LOCK_STATUS_SETTLED: u32 = 4; // PVE001 — fee promoted, lock final (terminal; mutually exclusive with refund)
+
+// PVE001 — block-based settlement window before a lock's deferred fee may be
+// promoted to withdrawable revenue via `settleLock`. ~14 days at the mainnet
+// ~10 min/block cadence (matches the EVM 14-day SETTLEMENT_WINDOW). OPNet has
+// no wall clock, so the gate is measured against the lock's `_lockBlock`.
+const SETTLEMENT_WINDOW_BLOCKS: u64 = 2016;
 
 /**
  * Trustless BURN-side recovery (re-mint) — closes the recovery gap for
@@ -514,16 +522,15 @@ export class BridgeDepository extends ReentrancyGuard {
     //   _lockFlowId      → the flow the lock named (for inventory reversal).
     //   _lockAmount      → the GROSS `received` (balance-delta) at lock time.
     //                      This is what the user gets back in full on refund.
-    //   _lockFee         → the fee portion `lockForBridge` accrued into
-    //                      `_flowAccruedFees` for this lock. Reversed on
-    //                      refund so the fee is NOT promoted (mirrors EVM
-    //                      "fee is NOT promoted on refund"). The mode-1
-    //                      inventory credit was `received - lockFee` (net),
-    //                      so the refund reverses BOTH: -net from inventory
-    //                      (mode 1 only) AND -fee from accruedFees (all
-    //                      lockable modes), leaving the
-    //                      `inventory + accruedFees == balance` invariant
-    //                      intact after the full gross leaves to the user.
+    //   _lockFee         → the fee portion computed at lock but NOT accrued
+    //                      (PVE001 — deferred). `settleLock` promotes it into
+    //                      `_flowAccruedFees` after SETTLEMENT_WINDOW_BLOCKS; a
+    //                      refund (reachable only while LOCKED→REFUNDABLE, i.e.
+    //                      pre-settlement) never promoted it, so the full gross
+    //                      is returned and there is nothing to un-accrue. mode 1
+    //                      credits the GROSS to `_flowInventory` at lock, and
+    //                      settle moves the fee inventory→accruedFees — so the
+    //                      `inventory + accruedFees == balance` invariant holds.
     //   _lockMode        → the flow mode at lock time (1/3/4). Pinned per
     //                      lock so the refund decrements inventory only for
     //                      mode 1 (the sole mode lockForBridge credited).
@@ -1653,27 +1660,21 @@ export class BridgeDepository extends ReentrancyGuard {
         const received: u256 = SafeMath.sub(balAfter, balBefore);
         if (received.isZero()) throw new Revert('BridgeDepository: nothing received');
 
-        // ─── #62 — per-flow OPNet-source fee accrual ──────────────────
-        // Mirror of EVM `BridgeEscrow._bumpLockInventory`. lockForBridge is
-        // the OPNet→EVM (source) leg: the user locks `received` (gross),
-        // only the net crosses to the EVM counterpart, and the fee portion
-        // stays in this depository's custody. Record that exact fee in
-        // `_flowAccruedFees[flowId]` so the governor can sweep it via the
-        // non-emergency `withdrawFees` path.
+        // ─── #62 / PVE001 — per-flow OPNet-source lock fee (DEFERRED) ──
+        // Mirror of EVM `BridgeEscrow._bumpLockInventory` + `settleLockedDeposit`.
+        // lockForBridge is the OPNet→EVM (source) leg: the user locks `received`
+        // (gross), only the net crosses to the EVM counterpart, and the fee
+        // portion stays in this depository's custody. Compute that exact fee and
+        // record it on the lock record below; it is PROMOTED into
+        // `_flowAccruedFees[flowId]` (sweepable via `withdrawFees`) only later by
+        // `settleLock`, after the settlement window with no refund (PVE001).
         //
-        // SAME formula the server uses and the EVM side accrues:
-        //   fee = max(minFee, received * feeBps / 10_000), clamped to received.
+        // SAME formula the server uses and the EVM side computes:
+        //   fee = max(minFee, received * feeBps / 10_000), rejected if >= received.
         // Computed on the realized balance-delta `received`, consistent with
         // the inventory bump below. Every mode lockForBridge admits (1/3/4)
         // is a fee-bearing source side, so no extra mode dispatch is needed.
-        // A flow with feeBps == 0 AND minFee == 0 accrues nothing.
-        //
-        // NOTE: this accumulator names the sweepable fee portion of the
-        // bridge's standing balance. Inventory credit below (mode 1) is the
-        // NET portion (received - lockFee) — together they sum to the
-        // physical balance per flow at all times. The lock continues to
-        // sign/emit the full `received` gross to the EVM side (the fee
-        // carve happens server-side at sign time).
+        // A flow with feeBps == 0 AND minFee == 0 carries a zero fee.
         let lockFee: u256 = SafeMath.div(
             SafeMath.mul(received, this._flowFeeBps.get(flowId)),
             u256.fromU32(10000),
@@ -1690,29 +1691,28 @@ export class BridgeDepository extends ReentrancyGuard {
         if (u256.ge(lockFee, received)) {
             throw new Revert('BridgeDepository: fee exceeds amount');
         }
-        if (!lockFee.isZero()) {
-            const accruedBefore: u256 = this._flowAccruedFees.get(flowId);
-            this._flowAccruedFees.set(flowId, SafeMath.add(accruedBefore, lockFee));
-        }
+        // PVE001 — DEFER the lock fee. It is NO LONGER accrued into
+        // `_flowAccruedFees` here; it stays inside `_flowInventory` (mode 1) or
+        // the custodied balance (modes 3/4) as un-promoted backing until
+        // `settleLock` promotes it after SETTLEMENT_WINDOW_BLOCKS with no
+        // refund. `lockFee` is still computed (fail-closed all-fee check above)
+        // and recorded on the lock record below; it is just not yet revenue.
+        // Closes the "withdraw-then-refund over-collects" gap — mirrors EVM,
+        // where the fee sits in inventory until `settleLockedDeposit`.
 
         // #44 — mode-1 (INVERSE_WRAPPED) inventory production. The canonical
-        // OP20 just entered the bridge; the NET portion backs the EVM-side
-        // wrapped mint and must be releasable back via claimReleaseWithVoucher.
-        // Credit `received - lockFee` (NOT gross) so a later `withdrawFees`
-        // sweep that subtracts only from `_flowAccruedFees` doesn't leave
-        // `_flowInventory` overstating the principal available for releases.
-        // This is the SOLE mode-1 inventory producer (confirmBurn no longer
-        // increments). Mode-3 (POOLED) locks are source-side only — the
-        // release pool lives on the EVM counterpart — so they do NOT credit
-        // OPNet inventory (provisioned via provisionInventoryOpNet).
-        //
-        // HIGH-002 (audit 2026-05-25): pre-fix this credited `received`
-        // (gross), and every governor fee sweep widened the gap between
-        // physical balance and inventory ledger by exactly the swept amount.
+        // OP20 just entered the bridge and backs the EVM-side wrapped mint.
+        // PVE001 — credit the GROSS `received` (incl. the un-promoted fee), NOT
+        // net. The HIGH-002 sweep-desync that motivated the old net-credit no
+        // longer applies: `withdrawFees` is bounded by `_flowAccruedFees`,
+        // which excludes the fee until `settleLock` moves it inventory→accrued,
+        // so the fee can never be swept while it still backs inventory. This is
+        // the SOLE mode-1 inventory producer (confirmBurn no longer increments).
+        // Modes 3/4 are source-side only (release pool lives on the EVM
+        // counterpart) — they do NOT credit OPNet inventory here.
         if (isInverse) {
-            const netReceived: u256 = SafeMath.sub(received, lockFee);
             const invBefore: u256 = this._flowInventory.get(flowId);
-            const invAfter: u256 = SafeMath.add(invBefore, netReceived);
+            const invAfter: u256 = SafeMath.add(invBefore, received);
             if (u256.gt(invAfter, this._flowCap.get(flowId))) {
                 throw new Revert('BridgeDepository: flow cap exceeded');
             }
@@ -1726,9 +1726,10 @@ export class BridgeDepository extends ReentrancyGuard {
         // Record exactly enough to reverse this lock if its EVM far-leg is
         // cancelled / never claimed. Keyed by the just-minted lockNonce.
         // `_lockAmount` is the GROSS `received` (full refund to user);
-        // `_lockFee` is the fee portion accrued above (reversed on refund so
-        // it is NOT promoted); `_lockMode` pins the mode so the refund
-        // decrements inventory only for the mode that credited it (mode 1).
+        // `_lockFee` is the fee portion computed above but NOT yet promoted
+        // (PVE001 — `settleLock` promotes it post-window; a refund never does);
+        // `_lockMode` pins the mode so the refund decrements inventory only for
+        // the mode that credited it (mode 1).
         // Lock nonces are monotonic and unique, so no slot is ever
         // overwritten — the status starts at LOCKED.
         this._lockStatus.set(nextNonce, u256.fromU32(LOCK_STATUS_LOCKED));
@@ -2147,9 +2148,10 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     /**
-     * Drain `amount` of a flow's canonical OP20 inventory back to a
-     * recipient. Governor-only, requires the bridge to be paused (matches
-     * EVM emergencyWithdraw semantics). Used for orderly wind-down.
+     * Drain `amount` of a flow's canonical OP20 inventory back to the pinned
+     * `_treasury` (PVE005-2 — was a caller-chosen recipient; pinned to match
+     * the EVM `BridgeEscrow.drainInventory`). Governor-only, requires the
+     * bridge to be paused. Used for orderly wind-down.
      *
      * #44 — flow-scoped + atomic. The `_flowInventory` ledger is debited
      * BEFORE the external transfer (verify → effect → interaction), and a
@@ -2159,7 +2161,6 @@ export class BridgeDepository extends ReentrancyGuard {
         { name: 'flowId', type: ABIDataTypes.UINT256 },
         { name: 'token', type: ABIDataTypes.ADDRESS },
         { name: 'amount', type: ABIDataTypes.UINT256 },
-        { name: 'recipient', type: ABIDataTypes.ADDRESS },
     )
     @emit('InventoryDrainedOpNet')
     @nonReentrant
@@ -2171,8 +2172,12 @@ export class BridgeDepository extends ReentrancyGuard {
         const flowId: u256 = calldata.readU256();
         const token: Address = calldata.readAddress();
         const amount: u256 = calldata.readU256();
-        const recipient: Address = calldata.readAddress();
-        if (token.isZero() || recipient.isZero()) throw new Revert('BridgeDepository: zero addr');
+        // PVE005-2 — destination pinned to `_treasury` (no caller-chosen
+        // recipient), so a compromised governor key cannot redirect a drain.
+        // Matches EVM `BridgeEscrow.drainInventory`; fail-closed if treasury unset.
+        const recipient: Address = this._treasury.value;
+        if (token.isZero()) throw new Revert('BridgeDepository: zero addr');
+        if (recipient.isZero()) throw new Revert('BridgeDepository: treasury not set');
         if (amount.isZero()) throw new Revert('BridgeDepository: zero amount');
         if (this._flowExists.get(flowId).isZero()) {
             throw new Revert('BridgeDepository: flow not found');
@@ -2473,12 +2478,13 @@ export class BridgeDepository extends ReentrancyGuard {
      *
      * CEI + @nonReentrant + status-flag double-refund guard. Reverses the
      * EXACT ledger effects `lockForBridge` applied:
-     *   - mode 1: `_flowInventory[flowId] -= (received - lockFee)` (the net it
-     *     credited). Modes 3/4 credited NO OPNet inventory at lock time, so
-     *     nothing to reverse there.
-     *   - all lockable modes: `_flowAccruedFees[flowId] -= lockFee` (the fee
-     *     is NOT promoted — the whole gross leaves to the user, so the carved
-     *     fee must be un-accrued to keep `inventory + accruedFees == balance`).
+     *   - mode 1: `_flowInventory[flowId] -= gross` — PVE001 credits the full
+     *     gross to inventory at lock and defers the fee, so the whole gross is
+     *     reversed here. Modes 3/4 credited NO OPNet inventory, nothing to do.
+     *   - NO `_flowAccruedFees` reversal: the fee is promoted only by
+     *     `settleLock` (post-window), and a refund is reachable only from
+     *     REFUNDABLE — which `markLockRefundable` sets only while LOCKED — so a
+     *     refunded lock's fee was never accrued.
      */
     @method({ name: 'lockNonce', type: ABIDataTypes.UINT256 })
     @emit('LockRefunded')
@@ -2499,7 +2505,6 @@ export class BridgeDepository extends ReentrancyGuard {
 
         const flowId: u256 = this._lockFlowId.get(lockNonce);
         const gross: u256 = this._lockAmount.get(lockNonce);
-        const lockFee: u256 = this._lockFee.get(lockNonce);
         const mode: u32 = this._lockMode.get(lockNonce).toU32();
         const userU256: u256 = this._lockUser.get(lockNonce);
         const tokenU256: u256 = this._lockToken.get(lockNonce);
@@ -2514,32 +2519,27 @@ export class BridgeDepository extends ReentrancyGuard {
         // re-entrant token (or repeated call) cannot double-spend.
         this._lockStatus.set(lockNonce, u256.fromU32(LOCK_STATUS_REFUNDED));
 
-        // Reverse the mode-1 inventory credit (net = gross - fee). Modes 3/4
-        // never credited OPNet inventory in lockForBridge, so skip them.
+        // PVE001 — mode-1 lock credited the GROSS `received` to inventory and
+        // the fee is NOT accrued until `settleLock`. A refund is only reachable
+        // from REFUNDABLE, which `markLockRefundable` sets only while LOCKED
+        // (pre-settlement), so the fee here is always still un-promoted. Reverse
+        // the FULL gross from inventory (mode 1); modes 3/4 credited none.
         if (mode == 1) {
-            const net: u256 = SafeMath.sub(gross, lockFee);
             const invBefore: u256 = this._flowInventory.get(flowId);
-            if (u256.lt(invBefore, net)) {
+            if (u256.lt(invBefore, gross)) {
                 // Inventory can only fall short if governance manually drained
                 // it (drainInventoryOpNet) below this lock's backing while it
-                // sat refundable. Mirror EVM's defensive clamp to zero rather
-                // than bricking the user's refund. (EVM clamps identically.)
+                // sat refundable. Clamp to zero rather than brick the user's
+                // refund (mirrors EVM).
                 this._flowInventory.set(flowId, u256.Zero);
             } else {
-                this._flowInventory.set(flowId, SafeMath.sub(invBefore, net));
+                this._flowInventory.set(flowId, SafeMath.sub(invBefore, gross));
             }
         }
 
-        // Reverse the carved fee from accrued fees (fee NOT promoted). Clamp
-        // defensively if a prior withdrawFees already swept past it.
-        if (!lockFee.isZero()) {
-            const accruedBefore: u256 = this._flowAccruedFees.get(flowId);
-            if (u256.lt(accruedBefore, lockFee)) {
-                this._flowAccruedFees.set(flowId, u256.Zero);
-            } else {
-                this._flowAccruedFees.set(flowId, SafeMath.sub(accruedBefore, lockFee));
-            }
-        }
+        // No `_flowAccruedFees` reversal: PVE001 defers fee promotion to
+        // `settleLock`, so a still-unsettled (LOCKED→REFUNDABLE) lock never had
+        // its fee accrued — there is nothing to un-accrue.
 
         // ── INTERACTION — return the FULL gross principal to the recorded
         // locker. Reconstruct the Address objects from their stored u256
@@ -2555,6 +2555,72 @@ export class BridgeDepository extends ReentrancyGuard {
         Blockchain.call(token, w);
 
         this.emitEvent(new LockRefunded(lockNonce, user, token, gross));
+        return new BytesWriter(0);
+    }
+
+    /**
+     * PVE001 — Promote a LOCKED lock's deferred fee into `_flowAccruedFees`
+     * after the settlement window elapses, making it withdrawable via
+     * `withdrawFees`. Permissionless; NO tokens move (a relabel). Mirrors the
+     * EVM `BridgeEscrow.settleLockedDeposit`.
+     *
+     * Mutually exclusive with the refund path: `markLockRefundable` accepts a
+     * lock only while LOCKED, so once SETTLED a lock can never be refunded, and
+     * a lock already marked REFUNDABLE can never be settled. The M-of-N is
+     * expected to markLockRefundable well before the window for any lock whose
+     * EVM far-leg needs cancelling.
+     *
+     * Effect by mode (mirrors the `lockForBridge` credit):
+     *   - mode 1: the fee was credited into `_flowInventory` as part of the
+     *     gross at lock time -> move it inventory->accruedFees.
+     *   - modes 3/4: no inventory was credited -> just accrue the fee (it sat
+     *     in the custodied balance until now).
+     */
+    @method({ name: 'lockNonce', type: ABIDataTypes.UINT256 })
+    @emit('LockSettled')
+    @nonReentrant
+    public settleLock(calldata: Calldata): BytesWriter {
+        const lockNonce: u256 = calldata.readU256();
+
+        const status: u32 = this._lockStatus.get(lockNonce).toU32();
+        if (status == LOCK_STATUS_NONE) {
+            throw new Revert('BridgeDepository: lock not found');
+        }
+        if (status != LOCK_STATUS_LOCKED) {
+            // REFUNDABLE / REFUNDED / SETTLED are all non-settleable.
+            throw new Revert('BridgeDepository: lock not settleable');
+        }
+
+        // Window guard — block-based (OPNet has no wall clock). Promotion is
+        // allowed only once SETTLEMENT_WINDOW_BLOCKS have elapsed since the lock.
+        const lockBlock: u256 = this._lockBlock.get(lockNonce);
+        const readyAt: u256 = SafeMath.add(lockBlock, u256.fromU64(SETTLEMENT_WINDOW_BLOCKS));
+        if (u256.lt(Blockchain.block.numberU256, readyAt)) {
+            throw new Revert('BridgeDepository: settlement window not met');
+        }
+
+        const flowId: u256 = this._lockFlowId.get(lockNonce);
+        const lockFee: u256 = this._lockFee.get(lockNonce);
+        const mode: u32 = this._lockMode.get(lockNonce).toU32();
+
+        // Effects only — no external calls.
+        this._lockStatus.set(lockNonce, u256.fromU32(LOCK_STATUS_SETTLED));
+
+        if (!lockFee.isZero()) {
+            // mode 1 credited GROSS to inventory at lock; move the fee out as it
+            // becomes revenue. SafeMath.sub reverts if inventory was drained
+            // below the fee (mirrors EVM's checked sub) — settlement stays
+            // callable once governance re-provisions. Modes 3/4 never credited
+            // inventory, so only accrue.
+            if (mode == 1) {
+                const invBefore: u256 = this._flowInventory.get(flowId);
+                this._flowInventory.set(flowId, SafeMath.sub(invBefore, lockFee));
+            }
+            const accruedBefore: u256 = this._flowAccruedFees.get(flowId);
+            this._flowAccruedFees.set(flowId, SafeMath.add(accruedBefore, lockFee));
+        }
+
+        this.emitEvent(new LockSettled(lockNonce, flowId, lockFee));
         return new BytesWriter(0);
     }
 

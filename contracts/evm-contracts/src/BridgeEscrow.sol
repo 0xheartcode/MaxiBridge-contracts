@@ -626,6 +626,7 @@ contract BridgeEscrow is
     error NotASigner();
     error AlreadyASigner();
     error InvalidThreshold();
+    error SignerEpochExhausted();       // PVE005 — u32 signer-epoch overflow (fail-closed, parity with OPNet)
     error FeeBpsTooHigh();
     error TipCapTooHigh();
     error WrongMode();
@@ -1447,6 +1448,10 @@ contract BridgeEscrow is
         isSigner[oldSigner] = false;
 
         uint32 oldEpoch = currentEpoch;
+        // PVE005 — fail-closed at u32 epoch exhaustion (parity with OPNet
+        // `removeSignerFromSet`). Unreachable in practice (2^32 rotations) but
+        // the silent wrap on overflow would reuse an old epoch.
+        if (oldEpoch == type(uint32).max) revert SignerEpochExhausted();
         uint32 newEpoch;
         unchecked {
             newEpoch = oldEpoch + 1;
@@ -1462,6 +1467,7 @@ contract BridgeEscrow is
         signerThreshold = newThreshold;
 
         uint32 oldEpoch = currentEpoch;
+        if (oldEpoch == type(uint32).max) revert SignerEpochExhausted(); // PVE005
         uint32 newEpoch;
         unchecked {
             newEpoch = oldEpoch + 1;
@@ -1503,6 +1509,7 @@ contract BridgeEscrow is
         signerThreshold = newThreshold;
 
         uint32 oldEpoch = currentEpoch;
+        if (oldEpoch == type(uint32).max) revert SignerEpochExhausted(); // PVE005
         uint32 newEpoch;
         unchecked {
             newEpoch = oldEpoch + 1;

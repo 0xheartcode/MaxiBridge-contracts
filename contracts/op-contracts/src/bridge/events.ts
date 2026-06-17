@@ -420,6 +420,23 @@ export class LockRefunded extends NetEvent {
     }
 }
 
+/**
+ * PVE001 — emitted when a LOCKED lock's deferred fee is promoted into
+ * `_flowAccruedFees` after the settlement window (`settleLock`). Mirrors the
+ * EVM `BridgeEscrow.DepositSettled`. No tokens move — it is a relabel of the
+ * fee from inventory-backing into withdrawable revenue. `fee` is the promoted
+ * lock-leg fee for the flow.
+ */
+export class LockSettled extends NetEvent {
+    constructor(lockNonce: u256, flowId: u256, fee: u256) {
+        const data = new BytesWriter(32 + 32 + 32);
+        data.writeU256(lockNonce);
+        data.writeU256(flowId);
+        data.writeU256(fee);
+        super('LockSettled', data);
+    }
+}
+
 // ─── #55 — Trustless burn-side recovery (attested re-mint) ───────────────
 
 /**
