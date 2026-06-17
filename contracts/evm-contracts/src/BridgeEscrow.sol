@@ -167,9 +167,9 @@ contract BridgeEscrow is
         POOLED_LOCK_VEST
     }
 
-    /// @notice Hard cap on `unwrapFeeBps`. 1000 = 10%. A hostile or
-    ///         compromised governor cannot set the bridge fee higher than
-    ///         this — protects users from being effectively trapped.
+    /// @notice Hard cap on per-flow `feeBps`. 1000 = 10%. A hostile or
+    ///         compromised governor cannot set a flow's bridge fee higher
+    ///         than this — protects users from being effectively trapped.
     uint256 public constant MAX_FEE_BPS = 1000;
 
     /// @notice Hard cap on per-flow `tipCapBps`. 200 = 2%. Bounds the
@@ -242,9 +242,9 @@ contract BridgeEscrow is
         bytes32 opnetBridge;      // 32-byte canonical OPNet address
         bytes32 opnetToken;
         // Mutable via timelocked governance:
-        uint16  feeBps;           // 0..MAX_FEE_BPS
-        uint128 minFee;           // dst-side base units
-        uint128 minAmount;        // EVM-source base units
+        uint16  feeBps;           // lock-leg fee bps, 0..MAX_FEE_BPS (N1)
+        uint128 minFee;           // lock-leg min fee — EVM-side base units (N1: was mislabeled "dst-side"; consumed only in _bumpLockInventory vs the EVM-side received amount)
+        uint128 minAmount;        // EVM-source (lock) base units
         uint128 cap;              // total inventory ceiling (mode 0/3/4) or mint ceiling (mode 2)
         uint128 dailyLimit;       // per-flow rolling window
         // Hot fields written by claim/release in PR γ:
@@ -329,24 +329,12 @@ contract BridgeEscrow is
     ///         3-day staging window for today's mainnet topology.
     address public treasury;
 
-    /// @notice Unwrap fee, bps (1 bp = 0.01%). Charged on the OPNet→EVM
-    ///         release leg ("unwrapping" wrapped tokens back to the
-    ///         canonical asset). Default 0 — set by the governor via
-    ///         `setUnwrapFeeBps`. Hard-capped at `MAX_FEE_BPS = 1000` (10%)
-    ///         so a hostile or compromised governor cannot make the
-    ///         bridge effectively un-redeemable.
-    ///
-    ///         The actual fee math runs server-side at sign time
-    ///         (`computeFee(gross, bps, minFee)`) and is recorded as
-    ///         `feeAmount` / `netAmount` in the EIP-712 release intent;
-    ///         the contract is the source of truth for the bps value
-    ///         and the server reads it before signing.
-    uint256 public unwrapFeeBps;
-
-    /// @notice Per-token minimum unwrap fee (token base units, 6 dec for
-    ///         USDC/USDT). Whichever is higher between bps-derived and
-    ///         minFee is taken. Default 0.
-    mapping(address => uint256) public unwrapMinFee;
+    // N2 (PeckShield) — `unwrapFeeBps` + `unwrapMinFee` removed: dead state.
+    // Per-flow `feeBps`/`minFee` (FlowRecord) are the live fee parameters and
+    // the actual fee math runs server-side at sign time, so the global
+    // unwrap-fee slots were never read. Removal shifts every storage slot past
+    // `treasury` up by 2 (the `__gap` grows 40→42 below) — a layout change
+    // that mandates a FRESH deploy, NOT an in-place upgrade.
 
     // ─── Flow Registry storage (PR α — additive) ───────────────────────
 
@@ -456,14 +444,17 @@ contract BridgeEscrow is
 
     /// @dev Reserved for future appends. New slots go BEFORE the gap and the
     ///      gap shrinks by the same count to preserve layout.
-    ///      Slots past treasury: unwrapFeeBps + unwrapMinFee + flows +
-    ///      allFlowIds + flowsByEvmToken + flowsByMode + flowsByEvmChain +
-    ///      lockedDeposits + pauser + refundedBurns = 10. (Legacy tokenMode +
-    ///      opnetCounterpartOf + _tokenModeFinalized were removed pre-mainnet;
-    ///      flow registry is the source of truth for mode + OPNet counterpart
-    ///      binding.)
-    ///      50 - 10 = 40.
-    uint256[40] private _gap;
+    ///      Slots past treasury: flows + allFlowIds + flowsByEvmToken +
+    ///      flowsByMode + flowsByEvmChain + lockedDeposits + pauser +
+    ///      refundedBurns = 8. (Legacy tokenMode + opnetCounterpartOf +
+    ///      _tokenModeFinalized were removed pre-mainnet; unwrapFeeBps +
+    ///      unwrapMinFee removed per PeckShield N2 — flow registry is the
+    ///      source of truth for mode + OPNet counterpart binding, and per-flow
+    ///      feeBps/minFee replaced the global unwrap-fee slots. The gap grew
+    ///      40→42 to absorb the 2 freed slots so the total reservation stays
+    ///      50; absolute slots past treasury shifted up by 2 → FRESH deploy.)
+    ///      50 - 8 = 42.
+    uint256[42] private _gap;
 
     // ---------------------------------------------------------------------
     // Events
@@ -601,8 +592,6 @@ contract BridgeEscrow is
         uint256 newCount,
         uint256 newThreshold
     );
-    event UnwrapFeeBpsSet(uint256 indexed oldBps, uint256 indexed newBps);
-    event UnwrapMinFeeSet(address indexed token, uint256 indexed amount);
     event WrappedMintedFromVoucher(
         address indexed wrappedToken,
         address indexed to,
@@ -1092,7 +1081,8 @@ contract BridgeEscrow is
         //    no new deposits; DISABLED = non-existent.
         if (flow.status != FLOW_STATUS_ACTIVE) revert FlowNotActive();
 
-        // 2. minAmount — by spec always source-side base units.
+        // 2. minAmount — by spec always source-side (= EVM-side, lock leg)
+        //    base units (N1-2).
         if (amount < uint256(flow.minAmount)) revert AmountBelowFlowMin();
 
         // 3. dailyLimit (rolling 24h window). Mirrors the claim path.
@@ -1243,9 +1233,16 @@ contract BridgeEscrow is
         // Cap is NOT enforced here: EVM `claim` is a release path (modes
         // 0 / 3) — inventory only decreases, never grows past `cap`.
 
-        // 1. status: claim allowed only on active or draining flows.
-        //    PAUSED is a guardian quarantine; DISABLED means non-existent.
-        if (flow.status != FLOW_STATUS_ACTIVE && flow.status != FLOW_STATUS_DRAINING) {
+        // 1. status (PVE005-3 — mode-aware, mirrors OPNet claimWithVoucher):
+        //    MINT modes (INVERSE_WRAPPED / NATIVE_BURN_MINT) create NEW
+        //    destination supply and require ACTIVE — DRAINING deliberately
+        //    blocks new supply. RELEASE modes (WRAPPED / POOLED_LOCK_RELEASE /
+        //    POOLED_LOCK_VEST) accept ACTIVE or DRAINING so in-flight exit
+        //    vouchers can still settle while a route winds down. PAUSED is a
+        //    guardian quarantine; DISABLED means non-existent.
+        if (isMintMode) {
+            if (flow.status != FLOW_STATUS_ACTIVE) revert FlowNotActive();
+        } else if (flow.status != FLOW_STATUS_ACTIVE && flow.status != FLOW_STATUS_DRAINING) {
             revert FlowNotActive();
         }
 
@@ -1294,6 +1291,26 @@ contract BridgeEscrow is
             if (feePortion > 0) {
                 flow.accruedFees = _addFees(flow.accruedFees, feePortion);
             }
+        } else if (flow.mode == uint8(TokenMode.NATIVE_BURN_MINT)) {
+            // PVE003-2 — mode 2 (NATIVE_BURN_MINT) has no custodied EVM
+            // balance, but every EVM mint adds to the flow's outstanding
+            // *synthetic supply*. Track it in `flow.inventory` and bound it by
+            // `flow.cap` (the mode-2 mint ceiling — see the FlowRecord field
+            // doc) so a compromised signer cannot mint past the governance-set
+            // blast-radius limit. The minted total is `intent.amount` (the
+            // recipient mint plus any relayer-tip mint, both carved from it),
+            // NOT `grossDst` — the fee portion is collected on the OPNet source
+            // leg and never minted here.
+            //
+            // NOTE (open question — see PVE003 answer): there is no EVM-side
+            // decrement on burn, so `flow.inventory` accumulates as a CUMULATIVE
+            // lifetime-mint figure and `cap` behaves as a lifetime mint ceiling.
+            // Mode 1 (INVERSE_WRAPPED) is intentionally left untracked here.
+            uint256 newSynthetic = uint256(flow.inventory) + intent.amount;
+            if (newSynthetic > uint256(flow.cap)) revert FlowCapExceeded();
+            // newSynthetic <= cap <= uint128.max ⇒ cast is safe.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            flow.inventory = uint128(newSynthetic);
         }
 
         // 5. tip cap + carve.
@@ -1611,26 +1628,8 @@ contract BridgeEscrow is
         emit GuardianSet(old, newGuardian);
     }
 
-    /// @notice Update the unwrap fee bps. Capped at `MAX_FEE_BPS = 1000`
-    ///         (10%) so a compromised governor cannot trap user funds
-    ///         via fee inflation.
-    /// @param bps Fee in basis points (1 bp = 0.01%). Pass 0 to disable.
-    function setUnwrapFeeBps(uint256 bps) external onlyOwner {
-        if (bps > MAX_FEE_BPS) revert FeeBpsTooHigh();
-        uint256 old = unwrapFeeBps;
-        unwrapFeeBps = bps;
-        emit UnwrapFeeBpsSet(old, bps);
-    }
-
-    /// @notice Set the per-token minimum unwrap fee. Whichever is higher
-    ///         between bps-derived and minFee is the actual fee charged.
-    ///         No cap on minFee — keep it well below typical user amounts.
-    function setUnwrapMinFee(address token, uint256 amount) external onlyOwner {
-        if (token == address(0)) revert ZeroAddress();
-        unwrapMinFee[token] = amount;
-        emit UnwrapMinFeeSet(token, amount);
-    }
-
+    // N2 (PeckShield) — `setUnwrapFeeBps` / `setUnwrapMinFee` removed along
+    // with the dead `unwrapFeeBps` / `unwrapMinFee` state they wrote.
 
     /// @notice #55 — trustless burn-side recovery (MINT-AUTHORITY PRIMITIVE).
     ///         Symmetric EVM counterpart to OPNet `BridgeDepository.refundBurn`.
@@ -1719,6 +1718,20 @@ contract BridgeEscrow is
         // contract). `whenNotPaused` is a global freeze, not a rolling bound.
         _consumeMintFlowLimits(flow, intent.amount);
 
+        // PVE003-3 — mode 2 (NATIVE_BURN_MINT) mint ceiling. `refundBurn` is a
+        // mint primitive; like the `claim` mint path (PVE003-2) a re-mint must
+        // not push the flow past its synthetic-supply `cap`. Pure guard — it
+        // does NOT increment `flow.inventory`: a `refundBurn` restores supply
+        // that was previously burned rather than creating net-new supply, and
+        // the EVM side has no burn-side decrement to offset an increment
+        // against (the increment-vs-guard asymmetry is called out in the
+        // PVE003 answer). Mode 1 (INVERSE_WRAPPED) is not bound here.
+        if (flow.mode == uint8(TokenMode.NATIVE_BURN_MINT)) {
+            if (uint256(flow.inventory) + intent.amount > uint256(flow.cap)) {
+                revert FlowCapExceeded();
+            }
+        }
+
         // Effects BEFORE interaction (CEI): set the replay flag, then mint.
         refundedBurns[burnId] = true;
 
@@ -1750,6 +1763,15 @@ contract BridgeEscrow is
     function provisionInventory(bytes32 flowId, uint256 amount) external onlyOwner nonReentrant {
         if (amount == 0) revert AmountZero();
         FlowRecord storage flow = _requireFlow(flowId);
+        // PVE004 — only provision into a live flow. Provisioning a PAUSED
+        // (guardian quarantine), RETIRED, or DISABLED flow would sit fresh
+        // inventory on a route nothing can claim against. Restrict to ACTIVE
+        // or DRAINING (a DRAINING route may still need a top-up so in-flight
+        // exit claims can settle). Symmetric with the OPNet
+        // provisionInventoryOpNet guard and the lock/claim status gates.
+        if (flow.status != FLOW_STATUS_ACTIVE && flow.status != FLOW_STATUS_DRAINING) {
+            revert FlowNotActive();
+        }
         if (
             flow.mode != uint8(TokenMode.WRAPPED)
             && flow.mode != uint8(TokenMode.POOLED_LOCK_RELEASE)

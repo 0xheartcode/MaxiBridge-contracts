@@ -357,22 +357,12 @@ export class BridgeDepository extends ReentrancyGuard {
     private _authorityAddress: StoredAddress = new StoredAddress(Blockchain.nextPointer);
 
     // ─── Modular wrap fee (governor-settable, capped at 10%) ──────────
-    // Wrap fee, bps (1 bp = 0.01%). Charged on the EVM→OPNet wrap path
-    // ("wrapping" canonical USDC/USDT into wUSDC/wUSDT). Default 0.
-    // Hard-capped at MAX_WRAP_FEE_BPS = 1000 (10%) so a hostile or
-    // compromised governor cannot trap user funds via fee inflation.
-    //
-    // The actual fee math runs server-side at sign time
-    // (computeFee(gross, bps, minFee)) and is recorded as feeAmount /
-    // netAmount in the 540-byte voucher preimage; the contract is the
-    // source of truth for the bps value and the server reads it before
-    // signing.
-    private _wrapFeeBps: StoredU256 = new StoredU256(Blockchain.nextPointer, EMPTY_POINTER);
-    // Per-wrapped-token minimum wrap fee. Keyed by sha256(wrappedToken
-    // address) → u256 (token base units, 6 dec for wUSDC/wUSDT).
-    // Whichever is higher between bps-derived and minFee is taken.
-    // Default 0.
-    private _wrapMinFee: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+    // N2 (PeckShield) — `_wrapFeeBps` + `_wrapMinFee` removed: dead state.
+    // Per-flow feeBps/minFee (the Flow Registry) are the live fee parameters
+    // and the fee math runs server-side at sign time, so these global wrap-fee
+    // slots were never read. Removing 2 `Blockchain.nextPointer` allocations
+    // shifts every later storage pointer down by 2 — safe ONLY for the fresh
+    // v1 deploy this audit targets, NOT an in-place upgrade.
 
     // ─── Mode-2/4 lock state (canonical OP20 escrow on OPNet) ──────────
     // Monotonic lock nonce — gives each lockForBridge a unique id.
@@ -896,8 +886,19 @@ export class BridgeDepository extends ReentrancyGuard {
         this._bridgeSignerHashes.set(epoch, signerHash);
 
         // v2 — seed the M-of-N set so claim() finds the signer.
-        this._signerKeyHashSet.set(signerHash, u256.One);
-        this._signerCount.value = SafeMath.add(this._signerCount.value, u256.One);
+        // PVE002 — only count a genuinely NEW signer hash. setInitialSigner is
+        // guarded to run once per epoch (the "signer already set" check above),
+        // but the seeded `signerHash` may already be a member of the global
+        // `_signerKeyHashSet` (e.g. re-seeding the same key a prior epoch used).
+        // Re-setting the membership flag is idempotent, but an unconditional
+        // `_signerCount += 1` would over-count distinct signers and corrupt the
+        // M-of-N threshold / removal-violates-threshold accounting. Guard the
+        // increment behind the membership check (matches addSigner /
+        // removeSignerFromSet semantics).
+        if (this._signerKeyHashSet.get(signerHash).isZero()) {
+            this._signerKeyHashSet.set(signerHash, u256.One);
+            this._signerCount.value = SafeMath.add(this._signerCount.value, u256.One);
+        }
         if (this._requiredSignatures.value.isZero()) {
             this._requiredSignatures.value = u256.One;
         }
@@ -1056,62 +1057,10 @@ export class BridgeDepository extends ReentrancyGuard {
         return r;
     }
 
-    /**
-     * Modular wrap fee — governor-settable, capped at MAX_WRAP_FEE_BPS
-     * (1000 bps = 10%). Default 0. The contract stores the bps; the
-     * server reads it before signing each voucher and reflects the
-     * resulting feeAmount in the 540-byte preimage.
-     */
-    @method({ name: 'bps', type: ABIDataTypes.UINT256 })
-    public setWrapFeeBps(calldata: Calldata): BytesWriter {
-        this.onlyGovernor();
-        const bps: u256 = calldata.readU256();
-        if (u256.gt(bps, u256.fromU32(MAX_WRAP_FEE_BPS))) {
-            throw new Revert('BridgeDepository: wrap fee bps too high');
-        }
-        this._wrapFeeBps.value = bps;
-        return new BytesWriter(0);
-    }
-
-    /**
-     * Per-wrapped-token minimum wrap fee. Whichever is higher between
-     * bps-derived and minFee is the actual fee taken. No cap on minFee
-     * (governor's responsibility to keep it well below typical user
-     * amounts). Default 0.
-     */
-    @method(
-        { name: 'wrappedToken', type: ABIDataTypes.ADDRESS },
-        { name: 'amount', type: ABIDataTypes.UINT256 },
-    )
-    public setWrapMinFee(calldata: Calldata): BytesWriter {
-        this.onlyGovernor();
-        const wrappedToken: Address = calldata.readAddress();
-        if (wrappedToken.isZero()) {
-            throw new Revert('BridgeDepository: zero wrappedToken');
-        }
-        const amount: u256 = calldata.readU256();
-        const key: u256 = _wrapMinFeeKey(wrappedToken);
-        this._wrapMinFee.set(key, amount);
-        return new BytesWriter(0);
-    }
-
-    @view
-    @returns({ name: 'bps', type: ABIDataTypes.UINT256 })
-    public wrapFeeBps(_calldata: Calldata): BytesWriter {
-        const r = new BytesWriter(32);
-        r.writeU256(this._wrapFeeBps.value);
-        return r;
-    }
-
-    @view
-    @returns({ name: 'amount', type: ABIDataTypes.UINT256 })
-    public wrapMinFee(calldata: Calldata): BytesWriter {
-        const wrappedToken: Address = calldata.readAddress();
-        const key: u256 = _wrapMinFeeKey(wrappedToken);
-        const r = new BytesWriter(32);
-        r.writeU256(this._wrapMinFee.get(key));
-        return r;
-    }
+    // N2 (PeckShield) — `setWrapFeeBps` / `setWrapMinFee` / `wrapFeeBps` /
+    // `wrapMinFee` removed along with the dead `_wrapFeeBps` / `_wrapMinFee`
+    // state. `MAX_WRAP_FEE_BPS` is retained — it still caps per-flow `feeBps`
+    // in `addFlow` / `setFlowFee`.
 
     // ═══════════════════════════════════════════════════════════════════════
     //  Phase 1.5 — token mode dispatch (4 modes)
@@ -1583,14 +1532,18 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    //  Phase 1.5 — modes 2 + 4: lock canonical OP20 → bridge to EVM
+    //  Phase 1.5 — modes 1/3/4: lock canonical OP20 → bridge to EVM
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
      * Lock canonical OP20 in the bridge's escrow so the user can claim
-     * the EVM-side counterpart (mint WrappedERC20 in mode 2, release
-     * pre-funded inventory in mode 4). Caller must have approved the
-     * BridgeDepository for at least `amount` on the canonical token.
+     * the EVM-side counterpart. Lockable modes are 1/3/4 (N1-3): mint
+     * WrappedERC20 in mode 1 (INVERSE_WRAPPED), or release pre-funded
+     * inventory in modes 3/4 (POOLED_LOCK_RELEASE / POOLED_LOCK_VEST — the
+     * latter dripping through a VestingVault on the EVM side). Mode 2
+     * (NATIVE_BURN_MINT) bridges OPNet→EVM by BURN, not lock, and is
+     * rejected here. Caller must have approved the BridgeDepository for at
+     * least `amount` on the canonical token.
      *
      * `evmRecipient` is 32 bytes — for EVM destinations, left-pad the
      * 20-byte recipient address to 32 bytes (low 20 bytes = address).
@@ -2093,14 +2046,15 @@ export class BridgeDepository extends ReentrancyGuard {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    //  Phase 1.5 — mode-4 inventory provisioning (POOLED_LOCK_RELEASE)
+    //  Phase 1.5 — modes 1/3/4 inventory provisioning (INVERSE_WRAPPED / POOLED_LOCK_RELEASE / POOLED_LOCK_VEST)
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
      * Add `amount` of a flow's canonical OPNet token to that flow's
-     * inventory pool. Used for INVERSE_WRAPPED / POOLED_LOCK_RELEASE flows
-     * where the project pre-funds the OPNet-side release pool. Caller
-     * (governor) must have approved the BridgeDepository for ≥ `amount`.
+     * inventory pool. Used for modes 1/3/4 (INVERSE_WRAPPED /
+     * POOLED_LOCK_RELEASE / POOLED_LOCK_VEST) (N1-4) where the project
+     * pre-funds the OPNet-side release pool. Caller (governor) must have
+     * approved the BridgeDepository for ≥ `amount`.
      *
      * #44 — flow-scoped + atomic. The `_flowInventory` ledger moves in the
      * SAME call as the token transfer (verify → effect → interaction), so
@@ -2124,6 +2078,15 @@ export class BridgeDepository extends ReentrancyGuard {
         if (amount.isZero()) throw new Revert('BridgeDepository: zero amount');
         if (this._flowExists.get(flowId).isZero()) {
             throw new Revert('BridgeDepository: flow not found');
+        }
+        // PVE004 — only provision into a live flow (ACTIVE or DRAINING).
+        // Symmetric with the EVM `provisionInventory` guard: provisioning a
+        // PAUSED (guardian quarantine) / RETIRED / DISABLED flow would strand
+        // fresh inventory on a route nothing can claim against. A DRAINING
+        // route may still need a top-up so in-flight exit claims can settle.
+        const provisionStatus: u32 = this._flowStatus.get(flowId).toU32();
+        if (provisionStatus != FLOW_STATUS_ACTIVE && provisionStatus != FLOW_STATUS_DRAINING) {
+            throw new Revert('BridgeDepository: flow not active');
         }
         // Only INVERSE_WRAPPED (1) / POOLED_LOCK_RELEASE (3) /
         // POOLED_LOCK_VEST (4) hold an OPNet-side canonical pool that can be
@@ -3323,6 +3286,14 @@ export class BridgeDepository extends ReentrancyGuard {
 
     // ═══════════════════════════════════════════════════════════════════════
     //  Governor: transfer
+    //
+    //  N2-3 (PeckShield) DISPUTED — NOT redundant. `setGovernor` and
+    //  `transferGovernor` share an identical BODY but differ in ACCESS GATE,
+    //  which is the whole point: `setGovernor` is `onlyGovernorOrAuthority`
+    //  (the BridgeAuthority `pushGovernor` cascade depends on it — #16b),
+    //  while `transferGovernor` is `onlyGovernor` + `@nonReentrant` (a strict
+    //  current-governor-only handoff, used by `transfer-governor-opnet.ts`).
+    //  Removing either drops a distinct capability — both are retained.
     // ═══════════════════════════════════════════════════════════════════════
 
     @method({ name: 'newGovernor', type: ABIDataTypes.ADDRESS })
@@ -3776,20 +3747,8 @@ function _burnRefundId(
     return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
 }
 
-/**
- * sha256 hash of a 32-byte address — used as the StoredMapU256 key for
- * `_wrapMinFee[wrappedToken]`.
- */
-function _wrapMinFeeKey(wrappedToken: Address): u256 {
-    return _addrKey(wrappedToken);
-}
-
-/** Generic sha256 of a 32-byte address — used as a StoredMapU256 key by `_wrapMinFee`. */
-function _addrKey(addr: Address): u256 {
-    const buf = new BytesWriter(32);
-    buf.writeAddress(addr);
-    return u256.fromUint8ArrayBE(sha256(buf.getBuffer()));
-}
+// N2 (PeckShield) — `_wrapMinFeeKey` + its `_addrKey` helper removed (dead
+// after `_wrapMinFee` removal; `_addrKey` had no other caller).
 
 /**
  * PR α — canonical flowId derivation. Mirrors EVM

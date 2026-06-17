@@ -1306,76 +1306,8 @@ contract BridgeEscrowTest is Test {
         escrow.lock(token, amount, keccak256("seed"), fId);
     }
 
-    // =====================================================================
-    // Modular unwrap fees (governor-settable, capped, default 0)
-    // =====================================================================
-
-    function test_UnwrapFee_DefaultsToZero() public view {
-        assertEq(escrow.unwrapFeeBps(), 0);
-        assertEq(escrow.unwrapMinFee(address(usdc)), 0);
-        assertEq(escrow.unwrapMinFee(address(usdt)), 0);
-    }
-
-    function test_UnwrapFee_MaxFeeBpsConstant() public view {
-        // 1000 bps = 10% — hard cap on what the governor can set.
-        assertEq(escrow.MAX_FEE_BPS(), 1000);
-    }
-
-    function test_SetUnwrapFeeBps_Succeeds() public {
-        vm.prank(owner);
-        vm.expectEmit(true, true, false, false);
-        emit BridgeEscrow.UnwrapFeeBpsSet(0, 50);
-        escrow.setUnwrapFeeBps(50);
-        assertEq(escrow.unwrapFeeBps(), 50);
-    }
-
-    function test_SetUnwrapFeeBps_AtMax() public {
-        vm.prank(owner);
-        escrow.setUnwrapFeeBps(1000);
-        assertEq(escrow.unwrapFeeBps(), 1000);
-    }
-
-    function test_SetUnwrapFeeBps_AboveMaxReverts() public {
-        vm.prank(owner);
-        vm.expectRevert(BridgeEscrow.FeeBpsTooHigh.selector);
-        escrow.setUnwrapFeeBps(1001);
-    }
-
-    function test_SetUnwrapFeeBps_OnlyOwnerReverts() public {
-        vm.prank(alice);
-        vm.expectRevert();
-        escrow.setUnwrapFeeBps(50);
-    }
-
-    function test_SetUnwrapFeeBps_ZeroResetsFee() public {
-        vm.startPrank(owner);
-        escrow.setUnwrapFeeBps(50);
-        escrow.setUnwrapFeeBps(0);
-        vm.stopPrank();
-        assertEq(escrow.unwrapFeeBps(), 0);
-    }
-
-    function test_SetUnwrapMinFee_Succeeds() public {
-        vm.prank(owner);
-        vm.expectEmit(true, true, false, false);
-        emit BridgeEscrow.UnwrapMinFeeSet(address(usdc), 1_000_000);
-        escrow.setUnwrapMinFee(address(usdc), 1_000_000); // $1.00 in 6 dec
-        assertEq(escrow.unwrapMinFee(address(usdc)), 1_000_000);
-        // USDT min stays at 0 — independent per-token slots.
-        assertEq(escrow.unwrapMinFee(address(usdt)), 0);
-    }
-
-    function test_SetUnwrapMinFee_ZeroTokenReverts() public {
-        vm.prank(owner);
-        vm.expectRevert(BridgeEscrow.ZeroAddress.selector);
-        escrow.setUnwrapMinFee(address(0), 100);
-    }
-
-    function test_SetUnwrapMinFee_OnlyOwnerReverts() public {
-        vm.prank(alice);
-        vm.expectRevert();
-        escrow.setUnwrapMinFee(address(usdc), 100);
-    }
+    // N2 (PeckShield) — the "Modular unwrap fees" test block was removed
+    // along with the dead `unwrapFeeBps` / `unwrapMinFee` state + setters.
 
     // =====================================================================
     // Token modes — INVERSE_WRAPPED + NATIVE_BURN_MINT + POOLED_LOCK_RELEASE
