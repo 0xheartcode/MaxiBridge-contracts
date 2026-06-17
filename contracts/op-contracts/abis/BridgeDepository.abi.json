@@ -160,62 +160,6 @@
             ]
         },
         {
-            "name": "setWrapFeeBps",
-            "type": "Function",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [
-                {
-                    "name": "bps",
-                    "type": "UINT256"
-                }
-            ],
-            "outputs": []
-        },
-        {
-            "name": "setWrapMinFee",
-            "type": "Function",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [
-                {
-                    "name": "wrappedToken",
-                    "type": "ADDRESS"
-                },
-                {
-                    "name": "amount",
-                    "type": "UINT256"
-                }
-            ],
-            "outputs": []
-        },
-        {
-            "name": "wrapFeeBps",
-            "type": "View",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [],
-            "outputs": [
-                {
-                    "name": "bps",
-                    "type": "UINT256"
-                }
-            ]
-        },
-        {
-            "name": "wrapMinFee",
-            "type": "View",
-            "payable": false,
-            "onlyOwner": false,
-            "inputs": [],
-            "outputs": [
-                {
-                    "name": "amount",
-                    "type": "UINT256"
-                }
-            ]
-        },
-        {
             "name": "computeFlowId",
             "type": "Function",
             "payable": false,
@@ -587,10 +531,6 @@
                 {
                     "name": "amount",
                     "type": "UINT256"
-                },
-                {
-                    "name": "recipient",
-                    "type": "ADDRESS"
                 }
             ],
             "outputs": []
@@ -670,6 +610,19 @@
         },
         {
             "name": "refundLock",
+            "type": "Function",
+            "payable": false,
+            "onlyOwner": false,
+            "inputs": [
+                {
+                    "name": "lockNonce",
+                    "type": "UINT256"
+                }
+            ],
+            "outputs": []
+        },
+        {
+            "name": "settleLock",
             "type": "Function",
             "payable": false,
             "onlyOwner": false,
@@ -1556,6 +1509,24 @@
                 },
                 {
                     "name": "amount",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "LockSettled",
+            "values": [
+                {
+                    "name": "lockNonce",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "flowId",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "fee",
                     "type": "UINT256"
                 }
             ],

@@ -202,6 +202,15 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'LockSettled',
+        values: [
+            { name: 'lockNonce', type: ABIDataTypes.UINT256 },
+            { name: 'flowId', type: ABIDataTypes.UINT256 },
+            { name: 'fee', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'BurnRefunded',
         values: [
             { name: 'burnId', type: ABIDataTypes.UINT256 },
@@ -346,35 +355,6 @@ export const BridgeDepositoryAbi = [
         constant: true,
         inputs: [],
         outputs: [{ name: 'pendingUpgradeAuthorized', type: ABIDataTypes.BOOL }],
-        type: BitcoinAbiTypes.Function,
-    },
-    {
-        name: 'setWrapFeeBps',
-        inputs: [{ name: 'bps', type: ABIDataTypes.UINT256 }],
-        outputs: [],
-        type: BitcoinAbiTypes.Function,
-    },
-    {
-        name: 'setWrapMinFee',
-        inputs: [
-            { name: 'wrappedToken', type: ABIDataTypes.ADDRESS },
-            { name: 'amount', type: ABIDataTypes.UINT256 },
-        ],
-        outputs: [],
-        type: BitcoinAbiTypes.Function,
-    },
-    {
-        name: 'wrapFeeBps',
-        constant: true,
-        inputs: [],
-        outputs: [{ name: 'bps', type: ABIDataTypes.UINT256 }],
-        type: BitcoinAbiTypes.Function,
-    },
-    {
-        name: 'wrapMinFee',
-        constant: true,
-        inputs: [],
-        outputs: [{ name: 'amount', type: ABIDataTypes.UINT256 }],
         type: BitcoinAbiTypes.Function,
     },
     {
@@ -539,7 +519,6 @@ export const BridgeDepositoryAbi = [
             { name: 'flowId', type: ABIDataTypes.UINT256 },
             { name: 'token', type: ABIDataTypes.ADDRESS },
             { name: 'amount', type: ABIDataTypes.UINT256 },
-            { name: 'recipient', type: ABIDataTypes.ADDRESS },
         ],
         outputs: [],
         type: BitcoinAbiTypes.Function,
@@ -580,6 +559,12 @@ export const BridgeDepositoryAbi = [
     },
     {
         name: 'refundLock',
+        inputs: [{ name: 'lockNonce', type: ABIDataTypes.UINT256 }],
+        outputs: [],
+        type: BitcoinAbiTypes.Function,
+    },
+    {
+        name: 'settleLock',
         inputs: [{ name: 'lockNonce', type: ABIDataTypes.UINT256 }],
         outputs: [],
         type: BitcoinAbiTypes.Function,

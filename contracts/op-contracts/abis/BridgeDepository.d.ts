@@ -128,6 +128,11 @@ export type LockRefundedEvent = {
     readonly token: Address;
     readonly amount: bigint;
 };
+export type LockSettledEvent = {
+    readonly lockNonce: bigint;
+    readonly flowId: bigint;
+    readonly fee: bigint;
+};
 export type BurnRefundedEvent = {
     readonly burnId: bigint;
     readonly burner: Address;
@@ -244,36 +249,6 @@ export type UpgradeAuthority = CallResult<
 export type PendingUpgradeAuthorized = CallResult<
     {
         pendingUpgradeAuthorized: boolean;
-    },
-    OPNetEvent<never>[]
->;
-
-/**
- * @description Represents the result of the setWrapFeeBps function call.
- */
-export type SetWrapFeeBps = CallResult<{}, OPNetEvent<never>[]>;
-
-/**
- * @description Represents the result of the setWrapMinFee function call.
- */
-export type SetWrapMinFee = CallResult<{}, OPNetEvent<never>[]>;
-
-/**
- * @description Represents the result of the wrapFeeBps function call.
- */
-export type WrapFeeBps = CallResult<
-    {
-        bps: bigint;
-    },
-    OPNetEvent<never>[]
->;
-
-/**
- * @description Represents the result of the wrapMinFee function call.
- */
-export type WrapMinFee = CallResult<
-    {
-        amount: bigint;
     },
     OPNetEvent<never>[]
 >;
@@ -425,6 +400,11 @@ export type MarkLockRefundable = CallResult<{}, OPNetEvent<LockMarkedRefundableE
  * @description Represents the result of the refundLock function call.
  */
 export type RefundLock = CallResult<{}, OPNetEvent<LockRefundedEvent>[]>;
+
+/**
+ * @description Represents the result of the settleLock function call.
+ */
+export type SettleLock = CallResult<{}, OPNetEvent<LockSettledEvent>[]>;
 
 /**
  * @description Represents the result of the lockRecord function call.
@@ -693,10 +673,6 @@ export interface IBridgeDepository extends IOP_NETContract {
     cancelProposedUpgrade(): Promise<CancelProposedUpgrade>;
     upgradeAuthority(): Promise<UpgradeAuthority>;
     pendingUpgradeAuthorized(): Promise<PendingUpgradeAuthorized>;
-    setWrapFeeBps(bps: bigint): Promise<SetWrapFeeBps>;
-    setWrapMinFee(wrappedToken: Address, amount: bigint): Promise<SetWrapMinFee>;
-    wrapFeeBps(): Promise<WrapFeeBps>;
-    wrapMinFee(): Promise<WrapMinFee>;
     computeFlowId(
         mode: bigint,
         evmChainId: bigint,
@@ -742,17 +718,13 @@ export interface IBridgeDepository extends IOP_NETContract {
     ): Promise<LockForBridge>;
     claimWithVoucher(voucher: Uint8Array, mldsaSig: Uint8Array): Promise<ClaimWithVoucher>;
     provisionInventoryOpNet(flowId: bigint, token: Address, amount: bigint): Promise<ProvisionInventoryOpNet>;
-    drainInventoryOpNet(
-        flowId: bigint,
-        token: Address,
-        amount: bigint,
-        recipient: Address,
-    ): Promise<DrainInventoryOpNet>;
+    drainInventoryOpNet(flowId: bigint, token: Address, amount: bigint): Promise<DrainInventoryOpNet>;
     emergencyWithdraw(token: Address, amount: bigint): Promise<EmergencyWithdraw>;
     withdrawFees(flowId: bigint, token: Address, amount: bigint): Promise<WithdrawFees>;
     accruedFees(flowId: bigint): Promise<AccruedFees>;
     markLockRefundable(lockNonce: bigint, sig: Uint8Array): Promise<MarkLockRefundable>;
     refundLock(lockNonce: bigint): Promise<RefundLock>;
+    settleLock(lockNonce: bigint): Promise<SettleLock>;
     lockRecord(lockNonce: bigint): Promise<LockRecord>;
     isLockRefundable(): Promise<IsLockRefundable>;
     refundBurn(attestation: Uint8Array, mldsaSig: Uint8Array): Promise<RefundBurn>;
