@@ -1241,6 +1241,25 @@ export class BridgeDepository extends ReentrancyGuard {
             if (!tokenMarker.isZero()) {
                 throw new Revert('BridgeDepository: native flow token not exclusive');
             }
+            // PVE003 hardening — a NATIVE_BURN_MINT token is bridge-issued with
+            // NO external backing, so its only outstanding-supply ceiling is the
+            // wrapped token's immutable maxSupply (OP20._mint enforces it on
+            // every mint path). WrappedOP20 defaults maxSupply to u256.Max
+            // ("uncapped"), so a mode-2 flow over an uncapped token has NO bound
+            // and PVE003 is silently void on OPNet (the EVM side forces a finite
+            // cap via `require(maxSupply_ > 0)` in WrappedERC20's ctor). Read the
+            // token's cap once here — governor-only, once per flow, so no
+            // per-mint gas/EIP-170 cost — and fail closed unless it is
+            // finite AND non-zero.
+            const capW = new BytesWriter(4);
+            capW.writeSelector(encodeSelector('maximumSupply()'));
+            const tokenMaxSupply: u256 = Blockchain.call(
+                _u256ToOpnetAddr(opnetToken),
+                capW,
+            ).data.readU256();
+            if (tokenMaxSupply.isZero() || u256.eq(tokenMaxSupply, u256.Max)) {
+                throw new Revert('BridgeDepository: native flow token uncapped');
+            }
         } else {
             if (u256.eq(tokenMarker, u256.fromU32(2))) {
                 throw new Revert('BridgeDepository: token reserved by native flow');
@@ -2622,6 +2641,14 @@ export class BridgeDepository extends ReentrancyGuard {
     @emit('LockSettled')
     @nonReentrant
     public settleLock(calldata: Calldata): BytesWriter {
+        // Hardening — settleLock is intentionally permissionless (anyone may
+        // promote a still-LOCKED record to revenue after the window), but a
+        // SETTLED record can never move to REFUNDABLE. If an incident is in
+        // flight (far-leg failed, signer outage, dispute) a freeze MUST be able
+        // to halt finalization so guardians can still mark the lock refundable.
+        // Mirrors EVM `BridgeEscrow.settleLockedDeposit` (whenNotPaused).
+        this.requireNotPaused();
+
         const lockNonce: u256 = calldata.readU256();
 
         const status: u32 = this._lockStatus.get(lockNonce).toU32();

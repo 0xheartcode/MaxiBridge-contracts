@@ -1005,7 +1005,13 @@ contract BridgeEscrow is
     ///
     ///         CEI: status read → status write → inventory/fee mutation.
     ///         No external calls; no reentrancy guard needed.
-    function settleLockedDeposit(uint256 depositNonce_) external {
+    function settleLockedDeposit(uint256 depositNonce_) external whenNotPaused {
+        // Hardening — settlement is intentionally permissionless (anyone may
+        // promote a still-Locked deposit to revenue after the window), but a
+        // Settled record can never move to Refundable. A freeze MUST be able to
+        // halt finalization so the guardian can still mark a stranded lock
+        // refundable when the far leg failed. Symmetric with OPNet
+        // `BridgeDepository.settleLock` (requireNotPaused).
         LockRecord storage rec = lockedDeposits[depositNonce_];
         if (rec.status != DepositStatus.Locked) revert LockNotSettleable();
         // Window guard. `lockedAt` is uint64; addition with a `days` constant
