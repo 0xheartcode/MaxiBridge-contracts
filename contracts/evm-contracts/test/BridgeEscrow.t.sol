@@ -1604,4 +1604,56 @@ contract BridgeEscrowTest is Test {
     }
 
     // =====================================================================
+    // c8d9d8f — permissionless settlement must be freezable, while the
+    // refund path stays open during a freeze (a Settled lock can never
+    // become Refundable, so a guardian freeze must be able to halt
+    // finalization without foreclosing recovery).
+    // =====================================================================
+
+    function test_SettleLockedDeposit_RevertsWhenPausedThenSucceedsAfterUnpause() public {
+        vm.prank(alice);
+        (uint256 nonce_,) = escrow.lock(address(usdc), 100e6, keccak256("settle-pause"), usdcFlowId);
+
+        // Age past the settlement window so the pause gate is the ONLY
+        // remaining blocker — isolates the c8d9d8f `whenNotPaused` behavior.
+        vm.warp(block.timestamp + escrow.SETTLEMENT_WINDOW() + 1);
+
+        vm.prank(owner);
+        escrow.pause();
+
+        // Frozen → settlement halts.
+        vm.expectRevert(); // Pausable: EnforcedPause
+        escrow.settleLockedDeposit(nonce_);
+
+        // Unfreeze → settlement proceeds, proving the revert was the pause
+        // gate and not the window or any other precondition.
+        vm.prank(owner);
+        escrow.unpause();
+        escrow.settleLockedDeposit(nonce_);
+
+        (, , BridgeEscrow.DepositStatus status, , , ,) = escrow.lockedDeposits(nonce_);
+        assertEq(uint8(status), uint8(BridgeEscrow.DepositStatus.Settled));
+    }
+
+    function test_MarkDepositRefundable_AndRefund_WorkWhilePaused() public {
+        vm.prank(alice);
+        (uint256 nonce_,) = escrow.lock(address(usdc), 100e6, keccak256("refund-pause"), usdcFlowId);
+        uint256 aliceAfterLock = usdc.balanceOf(alice);
+
+        vm.prank(owner);
+        escrow.pause();
+
+        // The refund path is intentionally NOT pause-gated: a guardian freeze
+        // halts settlement but a stranded lock must still be recoverable.
+        // Sign a RefundAuthorization with the registered signer.
+        bytes32 digest = escrow.hashRefundAuthorization(nonce_, usdcFlowId, escrow.currentEpoch());
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, digest);
+        bytes memory sig = abi.encodePacked(uint8(1), r, s, v);
+
+        escrow.markDepositRefundable(nonce_, sig); // succeeds while paused
+        escrow.refundLockedDeposit(nonce_);        // succeeds while paused
+
+        // Funds returned to the locker despite the freeze.
+        assertEq(usdc.balanceOf(alice), aliceAfterLock + 100e6);
+    }
 }
