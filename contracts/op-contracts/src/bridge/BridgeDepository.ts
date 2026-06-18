@@ -1246,11 +1246,15 @@ export class BridgeDepository extends ReentrancyGuard {
             // wrapped token's immutable maxSupply (OP20._mint enforces it on
             // every mint path). WrappedOP20 defaults maxSupply to u256.Max
             // ("uncapped"), so a mode-2 flow over an uncapped token has NO bound
-            // and PVE003 is silently void on OPNet (the EVM side forces a finite
-            // cap via `require(maxSupply_ > 0)` in WrappedERC20's ctor). Read the
-            // token's cap once here — governor-only, once per flow, so no
-            // per-mint gas/EIP-170 cost — and fail closed unless it is
-            // finite AND non-zero.
+            // and PVE003 is silently void on OPNet. (EVM differs: WrappedERC20's
+            // ctor rejects only a ZERO cap via `require(maxSupply_ > 0)`; an
+            // explicit `type(uint256).max` is still accepted there as an
+            // uncapped wrapper — owner-trusted config, not a default. OPNet's
+            // WrappedOP20 defaults to u256.Max, so the default itself is
+            // uncapped, which is why this registration-time guard is needed
+            // here.) Read the token's cap once here — governor-only, once per
+            // flow, so no per-mint gas/EIP-170 cost — and fail closed unless it
+            // is finite AND non-zero.
             const capW = new BytesWriter(4);
             capW.writeSelector(encodeSelector('maximumSupply()'));
             const tokenMaxSupply: u256 = Blockchain.call(
