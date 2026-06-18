@@ -1549,6 +1549,9 @@ contract BridgeEscrowTest is Test {
         bytes32 opnetRcp = bytes32(uint256(0xBEEF));
         // #68 Tier C — burnForRelease now takes a flowId (first arg). Assert it
         // is carried in the BurnedForRelease event (appended last field).
+        // PVE003: burnForRelease makes no bridge callback (the mode-2 cap is
+        // enforced against totalSupply at mint time), so the token's burn is
+        // self-contained and an arbitrary flowId is fine for this unit test.
         bytes32 flowId = bytes32(uint256(0xF10D));
         vm.expectEmit(true, false, true, true, address(wmoto));
         emit WrappedERC20.BurnedForRelease(alice, 250e6, opnetRcp, 1, flowId);

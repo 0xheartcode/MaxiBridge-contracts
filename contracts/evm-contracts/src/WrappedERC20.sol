@@ -144,6 +144,10 @@ contract WrappedERC20 is ERC20, Ownable, Pausable {
         unchecked {
             ++burnNonce;
         }
+        // Outstanding-supply accounting needs no callback: the bridge enforces
+        // the per-flow mode-2 `cap` against THIS token's `totalSupply()`, which
+        // this `_burn` has already reduced — so the burn frees cap headroom
+        // automatically (see BridgeEscrow.claim / refundBurn, PVE003).
         emit BurnedForRelease(msg.sender, amount, opnetRecipient, burnNonce, flowId);
     }
 

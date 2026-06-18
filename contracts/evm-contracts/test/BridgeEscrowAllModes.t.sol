@@ -266,8 +266,150 @@ contract BridgeEscrowAllModesTest is Test {
     }
 
     // =====================================================================
+    // PVE003 (mode-2 launch) — outstanding-supply accounting
+    // =====================================================================
+
+    /// @notice claim → burn → claim: the mode-2 cap tracks the token's
+    ///         OUTSTANDING totalSupply at every step. Burns reduce totalSupply
+    ///         directly (no bridge callback); the next mint reads it.
+    function test_nativeBurnMint_outstandingSupply_roundTrip() public {
+        _claimNbm(bob, 100e6, "rt-1");
+        assertEq(wmoto.totalSupply(), 100e6, "supply after claim");
+
+        // Bob burns 40e6 → outstanding supply drops, freeing cap headroom.
+        vm.prank(bob);
+        wmoto.burnForRelease(wmotoFlowId, bytes32(uint256(0xBEEF)), 40e6);
+        assertEq(wmoto.totalSupply(), 60e6, "supply after burn");
+
+        // A fresh claim re-grows outstanding supply.
+        _claimNbm(bob, 100e6, "rt-2");
+        assertEq(wmoto.totalSupply(), 160e6, "supply after 2nd claim");
+    }
+
+    /// @notice `cap` is a true OUTSTANDING-supply ceiling (enforced vs
+    ///         totalSupply): it binds on the mint path, a burn frees headroom,
+    ///         and the freed headroom is re-usable. (refundBurn cap binding
+    ///         lives in the burn-refund suite.)
+    function test_nativeBurnMint_cap_bindsAndBurnFreesHeadroom() public {
+        (WrappedERC20 capped, bytes32 capFlow) = _deployCappedNbm(100e6);
+
+        // Mint to the cap — OK.
+        _claimNbmFor(capped, capFlow, bob, 100e6, "cap-1");
+        assertEq(capped.totalSupply(), 100e6, "at cap");
+
+        // One unit over the cap — reverts FlowCapExceeded, no mint.
+        BridgeEscrow.ReleaseIntent memory over = _nbmIntent(capped, capFlow, bob, 1, "cap-over");
+        bytes memory overSig = _signIntent(signerPk, over);
+        vm.expectRevert(WrappedERC20.MaxSupplyExceeded.selector);
+        escrow.claim(over, overSig);
+
+        // Burn 30e6 → frees 30e6 of headroom (totalSupply drops).
+        vm.prank(bob);
+        capped.burnForRelease(capFlow, bytes32(uint256(0xBEEF)), 30e6);
+        assertEq(capped.totalSupply(), 70e6, "headroom freed");
+
+        // Now exactly 30e6 fits again; 31e6 does not.
+        _claimNbmFor(capped, capFlow, bob, 30e6, "cap-2");
+        assertEq(capped.totalSupply(), 100e6, "back at cap");
+        BridgeEscrow.ReleaseIntent memory over2 = _nbmIntent(capped, capFlow, bob, 1, "cap-over2");
+        bytes memory over2Sig = _signIntent(signerPk, over2);
+        vm.expectRevert(WrappedERC20.MaxSupplyExceeded.selector);
+        escrow.claim(over2, over2Sig);
+    }
+
+    /// @notice A NATIVE_BURN_MINT token must back EXACTLY ONE flow; every
+    ///         other sharing combination reverts FlowTokenNotExclusive.
+    function test_addFlow_nativeToken_exclusivity() public {
+        vm.startPrank(owner);
+
+        // (a) second NATIVE_BURN_MINT flow on the same token → reject.
+        vm.expectRevert(BridgeEscrow.FlowTokenNotExclusive.selector);
+        escrow.addFlow(_flowParams(BridgeEscrow.TokenMode.NATIVE_BURN_MINT, address(wmoto), bytes32(uint256(0xAA))));
+
+        // (b) a NON-native flow on a mode-2 token → reject.
+        vm.expectRevert(BridgeEscrow.FlowTokenNotExclusive.selector);
+        escrow.addFlow(_flowParams(BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE, address(wmoto), bytes32(uint256(0xBB))));
+
+        // (c) a NATIVE_BURN_MINT flow on a token already used by a non-native
+        //     flow (moto is mode-3) → reject.
+        vm.expectRevert(BridgeEscrow.FlowTokenNotExclusive.selector);
+        escrow.addFlow(_flowParams(BridgeEscrow.TokenMode.NATIVE_BURN_MINT, address(moto), bytes32(uint256(0xCC))));
+
+        vm.stopPrank();
+    }
+
+    // =====================================================================
     // Helpers — EIP-712 sigs
     // =====================================================================
+
+    function _flowParams(BridgeEscrow.TokenMode mode, address evmToken, bytes32 opnetToken)
+        internal
+        view
+        returns (BridgeEscrow.FlowAddParams memory)
+    {
+        return BridgeEscrow.FlowAddParams({
+            mode: uint8(mode),
+            evmChainId: TEST_EVM_CHAIN_ID,
+            evmBridge: TEST_EVM_BRIDGE,
+            evmToken: evmToken,
+            evmDecimals: 6,
+            opnetBridge: TEST_OPNET_BRIDGE,
+            opnetToken: opnetToken,
+            opnetDecimals: 6,
+            feeBps: 0,
+            minFee: 0,
+            minAmount: 0,
+            cap: type(uint128).max,
+            dailyLimit: type(uint128).max,
+            tipCapBps: 0
+        });
+    }
+
+    function _deployCappedNbm(uint128 cap_) internal returns (WrappedERC20 tok, bytes32 flowId) {
+        // PVE003 (design C) — the mode-2 supply ceiling is the wrapped token's
+        // immutable MAX_SUPPLY, so the cap is set at TOKEN deploy. flow.cap is
+        // unused for mode 2 (left at uint128.max by _flowParams).
+        tok = new WrappedERC20(
+            "Capped wMOTO", "cwMOTO", 18, owner, address(escrow),
+            EXPECTED_OPNET_CHAIN_ID, bytes32(uint256(0xCA9)), uint256(cap_)
+        );
+        BridgeEscrow.FlowAddParams memory p =
+            _flowParams(BridgeEscrow.TokenMode.NATIVE_BURN_MINT, address(tok), bytes32(uint256(0xCA9)));
+        vm.prank(owner);
+        flowId = escrow.addFlow(p);
+    }
+
+    function _nbmIntent(WrappedERC20 tok, bytes32 flowId, address to, uint256 amount, string memory salt)
+        internal
+        view
+        returns (BridgeEscrow.ReleaseIntent memory)
+    {
+        return BridgeEscrow.ReleaseIntent({
+            token: address(tok),
+            to: to,
+            amount: amount,
+            srcChainId: EXPECTED_OPNET_CHAIN_ID,
+            opnetTxHash: keccak256(abi.encodePacked("nbm-tx-", salt)),
+            opnetEventIndex: 0,
+            burnNonce: 1,
+            signerEpoch: escrow.currentEpoch(),
+            opnetNonce: keccak256(abi.encodePacked("nbm-nonce-", salt)),
+            grossSrcAmount: amount,
+            relayerTip: 0,
+            flowId: flowId
+        });
+    }
+
+    function _claimNbmFor(WrappedERC20 tok, bytes32 flowId, address to, uint256 amount, string memory salt)
+        internal
+    {
+        BridgeEscrow.ReleaseIntent memory ri = _nbmIntent(tok, flowId, to, amount, salt);
+        escrow.claim(ri, _signIntent(signerPk, ri));
+    }
+
+    function _claimNbm(address to, uint256 amount, string memory salt) internal {
+        _claimNbmFor(wmoto, wmotoFlowId, to, amount, salt);
+    }
 
     function _signIntent(uint256 pk, BridgeEscrow.ReleaseIntent memory intent)
         internal

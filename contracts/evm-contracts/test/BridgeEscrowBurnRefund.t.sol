@@ -386,6 +386,32 @@ contract BridgeEscrowBurnRefundTest is Test {
     }
 
     // =====================================================================
+    // PVE003 — refundBurn respects the OUTSTANDING-supply cap
+    // =====================================================================
+
+    /// @notice refundBurn is bounded by the wrapped token's immutable
+    ///         MAX_SUPPLY (PVE003 — design C), so two DISTINCT burnIds cannot
+    ///         both re-mint up to the full ceiling. Pre-fix, the guard-without-
+    ///         increment let each distinct refund mint up to the full cap
+    ///         independently (cap=100 → 200 minted); now the second mint trips
+    ///         the token supply ceiling.
+    function test_refundBurn_capBinds_acrossDistinctBurns() public {
+        (WrappedERC20 tok, bytes32 flowId) = _deployCappedNbm(100e6);
+
+        BridgeEscrow.BurnRefundAuthorization memory a1 = _authFor(tok, flowId, 100e6, 1);
+        escrow.refundBurn(a1, _signAuth(signerPk, a1));
+        assertEq(tok.balanceOf(burner), 100e6, "first refund minted to cap");
+        assertEq(tok.totalSupply(), 100e6, "outstanding supply at cap");
+
+        // Distinct burn (different nonce) → cumulative 200 > MAX_SUPPLY 100 → revert.
+        BridgeEscrow.BurnRefundAuthorization memory a2 = _authFor(tok, flowId, 100e6, 2);
+        bytes memory s2 = _signAuth(signerPk, a2);
+        vm.expectRevert(WrappedERC20.MaxSupplyExceeded.selector);
+        escrow.refundBurn(a2, s2);
+        assertEq(tok.balanceOf(burner), 100e6, "second refund did NOT mint");
+    }
+
+    // =====================================================================
     // Helpers
     // =====================================================================
 
@@ -404,6 +430,51 @@ contract BridgeEscrowBurnRefundTest is Test {
             flowId: wmotoFlowId,
             signerEpoch: escrow.currentEpoch()
         });
+    }
+
+    function _authFor(WrappedERC20 tok, bytes32 flowId, uint256 amount, uint256 nonce)
+        internal
+        view
+        returns (BridgeEscrow.BurnRefundAuthorization memory)
+    {
+        return BridgeEscrow.BurnRefundAuthorization({
+            burner: burner,
+            wrappedToken: address(tok),
+            amount: amount,
+            burnNonce: nonce,
+            burnTxHash: keccak256(abi.encodePacked("evm-burn-tx-", nonce)),
+            burnBlockHash: keccak256("evm-burn-block"),
+            flowId: flowId,
+            signerEpoch: escrow.currentEpoch()
+        });
+    }
+
+    function _deployCappedNbm(uint128 cap_) internal returns (WrappedERC20 tok, bytes32 flowId) {
+        // PVE003 (design C) — the mode-2 ceiling is the wrapped token's
+        // immutable MAX_SUPPLY, set at TOKEN deploy. flow.cap is unused for mode 2.
+        tok = new WrappedERC20(
+            "Capped wMOTO", "cwMOTO", 18, owner, address(escrow),
+            EXPECTED_OPNET_CHAIN_ID, bytes32(uint256(0xCA9)), uint256(cap_)
+        );
+        vm.prank(owner);
+        flowId = escrow.addFlow(
+            BridgeEscrow.FlowAddParams({
+                mode: uint8(BridgeEscrow.TokenMode.NATIVE_BURN_MINT),
+                evmChainId: TEST_EVM_CHAIN_ID,
+                evmBridge: TEST_EVM_BRIDGE,
+                evmToken: address(tok),
+                evmDecimals: 6,
+                opnetBridge: TEST_OPNET_BRIDGE,
+                opnetToken: bytes32(uint256(0xCA9)),
+                opnetDecimals: 6,
+                feeBps: 0,
+                minFee: 0,
+                minAmount: 0,
+                cap: type(uint128).max,
+                dailyLimit: type(uint128).max,
+                tipCapBps: 0
+            })
+        );
     }
 
     function _signAuth(uint256 pk, BridgeEscrow.BurnRefundAuthorization memory a)

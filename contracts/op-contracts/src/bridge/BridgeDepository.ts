@@ -573,6 +573,21 @@ export class BridgeDepository extends ReentrancyGuard {
     // considered and rejected: the map defaults safely).
     private _refundedBurns: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
 
+    // ─── PVE003 (mode-2 launch) — per-OPNet-token flow-exclusivity marker ──
+    // Mirror of EVM `BridgeEscrow.flowTokenMarker`. Keyed by the OPNet wrapped
+    // token identity (u256):
+    //   0 = token unused by any flow;
+    //   1 = token used by one-or-more NON-exclusive flows (modes 0/1/3/4 — N:M);
+    //   2 = token RESERVED by a single NATIVE_BURN_MINT flow.
+    // Mode 2 is bridge-issued with no external backing; its supply ceiling is
+    // the wrapped token's `maxSupply` (OP20._mint enforces it on EVERY mint —
+    // claim AND refundBurn — and burns reduce totalSupply, so it is a true
+    // OUTSTANDING-supply ceiling). That ceiling is only this flow's bound if the
+    // token is not shared, so a mode-2 token must back EXACTLY ONE flow.
+    // Append-only: NEW pointer appended AFTER `_refundedBurns`; unwritten slot
+    // reads zero (correct "unused" base), so no version bump / onUpdate seeding.
+    private _flowTokenMarker: StoredMapU256 = new StoredMapU256(Blockchain.nextPointer);
+
     public constructor() {
         super();
         // AddressMemoryMap MUST be initialized in the constructor body.
@@ -1214,6 +1229,24 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: minAmount <= minFee');
         }
 
+        // PVE003 (mode-2 launch) — NATIVE_BURN_MINT outstanding-supply bound
+        // (the wrapped token's maxSupply) is only an unambiguous PER-FLOW bound
+        // if the token backs exactly one flow. A mode-2 flow demands a token
+        // brand-new to the registry (marker 0); any other mode refuses a token
+        // already reserved by a mode-2 flow (marker 2). Symmetric with EVM
+        // `BridgeEscrow.addFlow`. Keyed by the OPNet wrapped token.
+        const isNativeFlow: bool = mode == 2;
+        const tokenMarker: u256 = this._flowTokenMarker.get(opnetToken);
+        if (isNativeFlow) {
+            if (!tokenMarker.isZero()) {
+                throw new Revert('BridgeDepository: native flow token not exclusive');
+            }
+        } else {
+            if (u256.eq(tokenMarker, u256.fromU32(2))) {
+                throw new Revert('BridgeDepository: token reserved by native flow');
+            }
+        }
+
         const flowId: u256 = _computeFlowId(
             mode,
             chainId,
@@ -1245,6 +1278,15 @@ export class BridgeDepository extends ReentrancyGuard {
         // mintedToday, lastWindowStart, inventory remain 0.
 
         this._flowTotalCount.value = SafeMath.add(this._flowTotalCount.value, u256.One);
+
+        // PVE003 — record the OPNet token's exclusivity class (see
+        // `_flowTokenMarker`). Mode 2 reserves the token (2); any other mode
+        // marks it shared (1) unless a prior flow already did.
+        if (isNativeFlow) {
+            this._flowTokenMarker.set(opnetToken, u256.fromU32(2));
+        } else if (tokenMarker.isZero()) {
+            this._flowTokenMarker.set(opnetToken, u256.One);
+        }
 
         this.emitEvent(new FlowAdded(flowId, mode, chainId, evmToken, opnetToken));
 

@@ -156,9 +156,11 @@ export class MintedFromVoucher extends NetEvent {
 // ─── Mode-2/4 lock + release ─────────────────────────────────────────
 
 /**
- * Emitted on lockForBridge — user locks canonical OP20 (modes 2/4) on
- * OPNet to bridge to EVM. Indexer picks this up and signs an EIP-712
- * MintIntent (mode 2) or ReleaseIntent (mode 4) for the EVM side.
+ * Emitted on lockForBridge — user locks canonical OP20 (modes 1/3/4:
+ * INVERSE_WRAPPED / POOLED_LOCK_RELEASE / POOLED_LOCK_VEST) on OPNet to
+ * bridge to EVM. Indexer picks this up and signs an EIP-712 ReleaseIntent
+ * for the EVM side — the EVM claim mints wrapped (mode 1) or releases from
+ * the pre-funded pool (modes 3/4).
  */
 // FINDING-002 (audit 2026-05-26): `flowId` appended LAST so off-chain
 // indexers can persist the canonical route identity without re-deriving
@@ -191,9 +193,10 @@ export class LockedForBridge extends NetEvent {
 }
 
 /**
- * Emitted on claimReleaseWithVoucher — bridge releases canonical OP20
- * (modes 2/4) to user against an ML-DSA voucher signed by the M-of-N
- * signer set, in response to an EVM-side burn.
+ * Emitted on claimWithVoucher (release path) — bridge releases canonical
+ * OP20 (modes 1/3/4: INVERSE_WRAPPED / POOLED_LOCK_RELEASE / POOLED_LOCK_VEST)
+ * to the user against an ML-DSA voucher signed by the M-of-N signer set, in
+ * response to an EVM-side burn/lock.
  */
 export class ReleasedFromVoucher extends NetEvent {
     constructor(

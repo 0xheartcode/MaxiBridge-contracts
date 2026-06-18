@@ -245,12 +245,12 @@ contract BridgeEscrow is
         uint16  feeBps;           // lock-leg fee bps, 0..MAX_FEE_BPS (N1)
         uint128 minFee;           // lock-leg min fee — EVM-side base units (N1: was mislabeled "dst-side"; consumed only in _bumpLockInventory vs the EVM-side received amount)
         uint128 minAmount;        // EVM-source (lock) base units
-        uint128 cap;              // total inventory ceiling (mode 0/3/4) or mint ceiling (mode 2)
+        uint128 cap;              // inventory ceiling (mode 0/3/4). Mode 2 ignores this — its supply ceiling is the wrapped token's immutable MAX_SUPPLY (enforced in mintFromBridge on every mint)
         uint128 dailyLimit;       // per-flow rolling window
         // Hot fields written by claim/release in PR γ:
         uint128 mintedToday;
         uint64  lastWindowStart;
-        uint128 inventory;        // mode 0/3/4: locked tokens; mode 2: synthetic supply
+        uint128 inventory;        // mode 0/3/4: locked tokens; mode 2: UNUSED (supply is bounded by the wrapped token's immutable MAX_SUPPLY, not a bridge-side counter)
         // PR β.2 — per-flow permissionless relayer tip cap.
         // 0 = tipping disabled (default); cap is per-flow,
         // ≤ MAX_TIP_BPS = 200 (2%); governor-set.
@@ -442,19 +442,39 @@ contract BridgeEscrow is
     ///         unchanged.
     mapping(bytes32 => bool) public refundedBurns;
 
+    /// @notice PVE003 (mode-2 launch) — per-EVM-token flow-exclusivity marker,
+    ///         read by `addFlow`.
+    ///           0 = token unused by any flow;
+    ///           1 = token used by one-or-more NON-exclusive flows
+    ///               (modes 0/1/3/4 — full N:M is preserved);
+    ///           2 = token RESERVED by a single NATIVE_BURN_MINT flow.
+    ///         Mode 2 is bridge-issued with no external backing; its supply
+    ///         ceiling is the wrapped token's immutable MAX_SUPPLY (enforced in
+    ///         `mintFromBridge` on every mint, claim AND refundBurn). MAX_SUPPLY
+    ///         is only this flow's bound if the token is not shared
+    ///         across flows — so a mode-2 token must back EXACTLY ONE flow;
+    ///         modes 0/1/3/4 keep full N:M.
+    /// @dev    Appended after `refundedBurns` (append-only); `__gap` shrinks
+    ///         42 → 41 so the layout past this slot is unchanged. `internal`
+    ///         (no auto getter) to stay under the EIP-170 runtime-size limit —
+    ///         consumed only by `addFlow`; off-chain tooling derives a token's
+    ///         flows from `flowsByEvmToken`.
+    mapping(address => uint8) internal flowTokenMarker;
+
     /// @dev Reserved for future appends. New slots go BEFORE the gap and the
     ///      gap shrinks by the same count to preserve layout.
     ///      Slots past treasury: flows + allFlowIds + flowsByEvmToken +
     ///      flowsByMode + flowsByEvmChain + lockedDeposits + pauser +
-    ///      refundedBurns = 8. (Legacy tokenMode + opnetCounterpartOf +
-    ///      _tokenModeFinalized were removed pre-mainnet; unwrapFeeBps +
-    ///      unwrapMinFee removed per PeckShield N2 — flow registry is the
-    ///      source of truth for mode + OPNet counterpart binding, and per-flow
-    ///      feeBps/minFee replaced the global unwrap-fee slots. The gap grew
-    ///      40→42 to absorb the 2 freed slots so the total reservation stays
-    ///      50; absolute slots past treasury shifted up by 2 → FRESH deploy.)
-    ///      50 - 8 = 42.
-    uint256[42] private _gap;
+    ///      refundedBurns + flowTokenMarker = 9. (Legacy tokenMode +
+    ///      opnetCounterpartOf + _tokenModeFinalized were removed pre-mainnet;
+    ///      unwrapFeeBps + unwrapMinFee removed per PeckShield N2 — flow
+    ///      registry is the source of truth for mode + OPNet counterpart
+    ///      binding, and per-flow feeBps/minFee replaced the global unwrap-fee
+    ///      slots. The gap grew 40→42 to absorb the 2 freed slots, then shrank
+    ///      42→41 for `flowTokenMarker`, so the total reservation stays 50;
+    ///      absolute slots past treasury shifted → FRESH deploy.)
+    ///      50 - 9 = 41.
+    uint256[41] private _gap;
 
     // ---------------------------------------------------------------------
     // Events
@@ -665,6 +685,7 @@ contract BridgeEscrow is
     error FlowCapExceeded();
     error DailyLimitExceeded();
     error InsufficientFlowInventory();
+    error FlowTokenNotExclusive();      // PVE003 — NATIVE_BURN_MINT token must back exactly one flow
     error AmountExceedsGross();         // MED-001 — claim() intent.amount > grossSrcAmount
     error AccruedFeesOverflow();        // #114 — cumulative accruedFees would exceed uint128
     error PermitFailed();               // lockWithPermit — permit reverted and allowance still short
@@ -1292,27 +1313,20 @@ contract BridgeEscrow is
             if (feePortion > 0) {
                 flow.accruedFees = _addFees(flow.accruedFees, feePortion);
             }
-        } else if (flow.mode == uint8(TokenMode.NATIVE_BURN_MINT)) {
-            // PVE003-2 — mode 2 (NATIVE_BURN_MINT) has no custodied EVM
-            // balance, but every EVM mint adds to the flow's outstanding
-            // *synthetic supply*. Track it in `flow.inventory` and bound it by
-            // `flow.cap` (the mode-2 mint ceiling — see the FlowRecord field
-            // doc) so a compromised signer cannot mint past the governance-set
-            // blast-radius limit. The minted total is `intent.amount` (the
-            // recipient mint plus any relayer-tip mint, both carved from it),
-            // NOT `grossDst` — the fee portion is collected on the OPNet source
-            // leg and never minted here.
-            //
-            // NOTE (open question — see PVE003 answer): there is no EVM-side
-            // decrement on burn, so `flow.inventory` accumulates as a CUMULATIVE
-            // lifetime-mint figure and `cap` behaves as a lifetime mint ceiling.
-            // Mode 1 (INVERSE_WRAPPED) is intentionally left untracked here.
-            uint256 newSynthetic = uint256(flow.inventory) + intent.amount;
-            if (newSynthetic > uint256(flow.cap)) revert FlowCapExceeded();
-            // newSynthetic <= cap <= uint128.max ⇒ cast is safe.
-            // forge-lint: disable-next-line(unsafe-typecast)
-            flow.inventory = uint128(newSynthetic);
         }
+        // PVE003 (resolved — outstanding-supply via token MAX_SUPPLY). Mode 2
+        // (NATIVE_BURN_MINT) is bridge-issued with no external backing, so its
+        // synthetic supply needs a hard ceiling — and one already exists: the
+        // wrapped token's IMMUTABLE `MAX_SUPPLY`, which `mintFromBridge` enforces
+        // on EVERY mint path (this claim AND `refundBurn`). Burns reduce
+        // `totalSupply`, so it is a true OUTSTANDING-supply ceiling that frees
+        // headroom automatically — no bridge-side counter, no callback, no drift.
+        // The 1:1 token↔flow exclusivity guard (`flowTokenMarker`) makes that
+        // ceiling an unambiguous per-flow bound. Deploy ceremony MUST set a
+        // mode-2 token's `MAX_SUPPLY` to the intended cap (an uncapped token =
+        // no bound). Symmetric with OPNet, where `OP20._mint` enforces
+        // `maxSupply` identically. Mode 1 (INVERSE_WRAPPED) is 1:1 OPNet-backed
+        // and likewise needs no EVM-side ceiling.
 
         // 5. tip cap + carve.
         //
@@ -1725,19 +1739,15 @@ contract BridgeEscrow is
         // contract). `whenNotPaused` is a global freeze, not a rolling bound.
         _consumeMintFlowLimits(flow, intent.amount);
 
-        // PVE003-3 — mode 2 (NATIVE_BURN_MINT) mint ceiling. `refundBurn` is a
-        // mint primitive; like the `claim` mint path (PVE003-2) a re-mint must
-        // not push the flow past its synthetic-supply `cap`. Pure guard — it
-        // does NOT increment `flow.inventory`: a `refundBurn` restores supply
-        // that was previously burned rather than creating net-new supply, and
-        // the EVM side has no burn-side decrement to offset an increment
-        // against (the increment-vs-guard asymmetry is called out in the
-        // PVE003 answer). Mode 1 (INVERSE_WRAPPED) is not bound here.
-        if (flow.mode == uint8(TokenMode.NATIVE_BURN_MINT)) {
-            if (uint256(flow.inventory) + intent.amount > uint256(flow.cap)) {
-                revert FlowCapExceeded();
-            }
-        }
+        // PVE003 (resolved — outstanding-supply via token MAX_SUPPLY). This is
+        // the OTHER mode-2 mint primitive, and it is bounded identically to
+        // `claim`: the re-mint funnels through `mintFromBridge`, whose IMMUTABLE
+        // `MAX_SUPPLY` ceiling bounds `refundBurn` exactly as it bounds `claim`.
+        // THIS is what closes the finding — a compromised signer cannot mint
+        // past the token ceiling via repeated distinct burn-refunds, because
+        // every mint re-checks `totalSupply() + amount <= MAX_SUPPLY`. No
+        // bridge-side cap counter is needed (and a `flow.cap` STATICCALL here
+        // would also push the contract past the EIP-170 size limit).
 
         // Effects BEFORE interaction (CEI): set the replay flag, then mint.
         refundedBurns[burnId] = true;
@@ -1975,6 +1985,18 @@ contract BridgeEscrow is
         // defensively check `vestingVault != 0` for mode 4, so a half-set-up
         // flow rejects locks/claims rather than silently stranding tokens.
 
+        // PVE003 (mode-2 launch) — NATIVE_BURN_MINT outstanding-supply
+        // accounting needs a mode-2 token exclusive to ONE flow (see
+        // `flowTokenMarker`). A mode-2 flow demands a brand-new token
+        // (marker 0); any other mode refuses a token already reserved by a
+        // mode-2 flow (marker 2). All other sharing stays legal (full N:M).
+        bool isNativeFlow = p.mode == uint8(TokenMode.NATIVE_BURN_MINT);
+        if (isNativeFlow) {
+            if (flowTokenMarker[p.evmToken] != 0) revert FlowTokenNotExclusive();
+        } else {
+            if (flowTokenMarker[p.evmToken] == 2) revert FlowTokenNotExclusive();
+        }
+
         flowId = computeFlowId(
             p.mode, p.evmChainId, p.evmBridge, p.evmToken, p.opnetBridge, p.opnetToken
         );
@@ -2008,6 +2030,15 @@ contract BridgeEscrow is
         flowsByEvmToken[p.evmToken].push(flowId);
         flowsByMode[p.mode].push(flowId);
         flowsByEvmChain[p.evmChainId].push(flowId);
+
+        // PVE003 — record the token's exclusivity class (see `flowTokenMarker`).
+        // Mode 2 reserves the token (2); any other mode marks it shared (1)
+        // unless a prior flow already did.
+        if (isNativeFlow) {
+            flowTokenMarker[p.evmToken] = 2;
+        } else if (flowTokenMarker[p.evmToken] == 0) {
+            flowTokenMarker[p.evmToken] = 1;
+        }
 
         // Auto-whitelist the EVM token. Pre-storage-cleanup this was
         // `setTokenMode`'s job; with flow registry as source of truth,
