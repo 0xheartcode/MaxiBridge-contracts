@@ -25,7 +25,7 @@ were already addressed in PR #1.
 | PVE007-2 | EVM `drainInventory` mode gate | **Fixed** — mode ∈ {0,3,4} |
 | PVE008 | VestingVault duration overflow | **Fixed** — `vestingBlocks_ < 2^63` |
 | PVE008-2 | EVM `provisionInventory` sum bound | **Fixed (defensive)** — already safe; see note |
-| PVE009 | WrappedOP20 `mintTo` | **Declined** — pause guard unnecessary (mintTo is onlyMinter → depository pause already governs it); zero-checks retained |
+| PVE009 | WrappedOP20 `mintTo` | **Fixed** — token-level pause guard added to `mintTo` (mirrors `burnForRelease` + EVM `mintFromBridge`); zero-checks retained |
 | PVE010 | Trust on admin keys (EOA) | **Answered (no code)** — owner = Timelock/Safe on mainnet |
 | N1-5 | Stale `claimMintWrapped` NatSpec | **Fixed** — references corrected to `claim` |
 | N3 | WrappedOP20 ↔ flowId association | **Declined** — full association impossible; `flowId != 0` also rejected (0 is a valid "unbound" sentinel) |
@@ -67,17 +67,23 @@ being a `uint128`, already guarantees `newInventory ≤ cap ≤ uint128.max`, so
 (no longer depends on reasoning about `cap`'s storage type). No behavioural
 change for any reachable state.
 
-### PVE009 — both halves declined (with rationale)
-- **Pause guard — declined.** Adding `if (this._paused.value) revert` to
-  `mintTo` is unnecessary and would break a deliberate, documented design. The
-  burn/mint pause asymmetry is intentional: `burnForRelease` is callable
-  **directly by users**, so the token must hold its own freeze; `mintTo` is
-  `onlyMinter` (only `BridgeDepository`), and the depository's claim path already
-  gates on `requireNotPaused`. So the **only** mint path is already freezable —
-  by pausing the depository. A token-level mint freeze is redundant with that and
-  contradicts the documented "pause = burn-only; pause the depository to freeze
-  mints" model (codified in a dedicated `wrapped.ts` test). `WrappedOP20` is
-  non-upgradeable, so we do not flip documented behaviour for a redundant guard.
+### PVE009 — pause guard FIXED (revised from an earlier decline)
+- **Pause guard — fixed.** `mintTo` now reverts when `_paused` is set, mirroring
+  `burnForRelease` on the same contract and the EVM sibling
+  `WrappedERC20.mintFromBridge` (which already carries `whenNotPaused`). `_paused`
+  is therefore a full freeze: mint **and** burn.
+- **Why the earlier decline was wrong.** The decline rested on "`mintTo` is
+  `onlyMinter` (only `BridgeDepository`), whose claim path already gates on
+  `requireNotPaused`, so the only mint path is already freezable by pausing the
+  depository." But `onlyMinter` also admits **any address granted via
+  `grantMinter`** (governor *or* BridgeAuthority), and the contract explicitly
+  anticipates "any future depository the BridgeAuthority hands a minter role to."
+  A granted minter that is not the (paused) depository — or that does not itself
+  check the depository pause — could mint with **no circuit breaker**, and
+  `WrappedOP20` is non-upgradeable, so the gap would be permanent. The token-level
+  guard is the defense-in-depth PVE009 asked for, and it brings OPNet into parity
+  with the EVM mint path rather than diverging from it. The `wrapped.ts` test that
+  asserted "mintTo still works while paused" was flipped to assert it reverts.
 - **"Redundant" zero-checks — declined (kept).** The `to.isZero()` /
   `amount.isZero()` checks give precise boundary errors and do not rely on
   `_mint`'s internal behaviour; removing them is a gas micro-opt with a
