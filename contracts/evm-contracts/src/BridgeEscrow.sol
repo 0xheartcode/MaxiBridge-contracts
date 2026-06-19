@@ -675,6 +675,11 @@ contract BridgeEscrow is
     error FlowInvalidStatusTransition();
     error FlowCapBelowInventory();
     error FlowZeroChainId();
+    // PVE006 (PeckShield) — addFlow must bind to THIS chain + THIS bridge so a
+    // governance typo can't register a flow whose flowId diverges from the
+    // OPNet side (which would strand any deposit locked against it).
+    error FlowWrongChainId();
+    error FlowWrongBridge();
 
     // ─── Relayer-tip payout errors (PR β.2.payout-evm) ─────────────────
     error TipExceedsFlowCap();
@@ -890,7 +895,11 @@ contract BridgeEscrow is
                 revert PermitFailed();
             }
         }
-        return lock(token, amount, opnetRecipient, flowId);
+        // N4 (PeckShield) — call `lockFor` directly with `msg.sender` as the
+        // refund destination rather than hopping through `lock` (which is
+        // itself just `lockFor(..., msg.sender)`). Identical semantics, one
+        // fewer internal frame.
+        return lockFor(token, amount, opnetRecipient, flowId, msg.sender);
     }
 
     // ---------------------------------------------------------------------
@@ -1349,12 +1358,18 @@ contract BridgeEscrow is
         uint256 recipientAmount = intent.amount;
         uint128 tip = intent.relayerTip;
         if (tip > 0) {
-            if (uint256(tip) > intent.amount) revert TipExceedsFlowCap();
+            // N3-3 (PeckShield) — `>=` not `>`: a tip equal to the whole net
+            // leaves the named recipient with zero, which is never a valid
+            // tipped voucher. Behaviour-neutral for any real config (tipCapBps
+            // <= MAX_TIP_BPS = 200 already rejects tip >= net in the
+            // cross-multiply below), but the direct bound now matches intent
+            // and the OPNet `claimWithVoucher` tip-carve.
+            if (uint256(tip) >= intent.amount) revert TipExceedsFlowCap();
             if (uint256(tip) * 10_000 > intent.amount * uint256(flow.tipCapBps)) {
                 revert TipExceedsFlowCap();
             }
             unchecked {
-                // Safe: tip <= amount asserted directly above.
+                // Safe: tip < amount asserted directly above.
                 recipientAmount = intent.amount - tip;
             }
         }
@@ -1504,6 +1519,11 @@ contract BridgeEscrow is
         address[] calldata removeList,
         uint256 newThreshold
     ) external onlyOwnerOrGuardian {
+        // N5 (PeckShield) — emit per-item SignerRemoved/SignerAdded and a
+        // ThresholdSet alongside the aggregate SignerSetMigrated, so off-chain
+        // monitoring can track the (security-critical) signer set from a single
+        // event vocabulary instead of being blind to the migrate path.
+        uint256 oldThreshold = signerThreshold;
         uint256 rLen = removeList.length;
         for (uint256 i = 0; i < rLen; ) {
             address s = removeList[i];
@@ -1513,6 +1533,7 @@ contract BridgeEscrow is
                 --signerCount;
                 ++i;
             }
+            emit SignerRemoved(s, signerCount);
         }
         uint256 aLen = addList.length;
         for (uint256 i = 0; i < aLen; ) {
@@ -1524,9 +1545,11 @@ contract BridgeEscrow is
                 ++signerCount;
                 ++i;
             }
+            emit SignerAdded(s, signerCount);
         }
         if (newThreshold == 0 || newThreshold > signerCount) revert InvalidThreshold();
         signerThreshold = newThreshold;
+        emit ThresholdSet(oldThreshold, newThreshold);
 
         uint32 oldEpoch = currentEpoch;
         if (oldEpoch == type(uint32).max) revert SignerEpochExhausted(); // PVE005
@@ -1683,9 +1706,9 @@ contract BridgeEscrow is
     ///         the external `mintFromBridge` call.
     ///
     ///         `sig` is the same `[uint8 numSigs][sig(65)]…` M-of-N blob that
-    ///         `claim`/`claimMintWrapped` consume, verified over the EIP-712
+    ///         `claim` consumes, verified over the EIP-712
     ///         digest of the BurnRefundAuthorization. Binding mirrors the
-    ///         claimMintWrapped flow checks: wrappedToken allowlisted +
+    ///         mint-on-EVM `claim` flow checks: wrappedToken allowlisted +
     ///         bridge-mintable; flow exists + ACTIVE only (M-3 — DRAINING
     ///         rejected) + its evmToken binds the wrapped (so a sig for one
     ///         wrapped can't be replayed against another).
@@ -1716,7 +1739,7 @@ contract BridgeEscrow is
         bytes32 digest = _hashTypedDataV4(_hashBurnRefundAuth(intent));
         _verifySignatures(digest, sig);
 
-        // Flow binding — mirrors claimMintWrapped. The attestation commits to
+        // Flow binding — mirrors the mint-on-EVM `claim` path. The attestation commits to
         // a flowId; assert (1) it exists, (2) it is a mint-on-EVM mode (the
         // bridge can only re-mint where it is the minter), (3) the wrapped in
         // the attestation matches the flow's evmToken, (4) the flow is live.
@@ -1736,7 +1759,7 @@ contract BridgeEscrow is
             revert FlowNotActive();
         }
 
-        // H-1 — the mint-on-EVM `claimMintWrapped` path enforces minAmount +
+        // H-1 — the mint-on-EVM `claim` path enforces minAmount +
         // rolling-window dailyLimit via `_consumeMintFlowLimits` (MED-001)
         // precisely to bound how much a compromised signer can mint per 24h.
         // `refundBurn` is the OTHER signer-attested mint primitive on this
@@ -1823,8 +1846,14 @@ contract BridgeEscrow is
 
         // Atomic: tokens in AND accounting up, in the same call.
         uint256 newInventory = uint256(flow.inventory) + received;
+        // PVE008-2 (PeckShield) — bound the SUM, not just `received`. The
+        // `newInventory > cap` check already implies `newInventory <=
+        // uint128.max` because `cap` is a uint128, so the cast below is
+        // provably safe; this explicit guard localizes that safety so it no
+        // longer depends on reasoning about `cap`'s storage type. Defensive
+        // (current code was already safe) — see the PVE-0619 response note.
+        if (newInventory > type(uint128).max) revert FlowCapExceeded();
         if (newInventory > uint256(flow.cap)) revert FlowCapExceeded();
-        // cap is uint128 ⇒ newInventory ≤ cap ≤ uint128.max
         // forge-lint: disable-next-line(unsafe-typecast)
         flow.inventory = uint128(newInventory);
 
@@ -1847,6 +1876,18 @@ contract BridgeEscrow is
         if (treasury == address(0)) revert TreasuryNotSet();
         if (amount == 0) revert AmountZero();
         FlowRecord storage flow = _requireFlow(flowId);
+        // PVE007-2 (PeckShield) — only custody-on-EVM modes (0/3/4) hold a
+        // drainable EVM inventory ledger; mint-on-EVM modes (1/2) never credit
+        // `flow.inventory` so a drain would already revert below with
+        // InsufficientFlowInventory. Gate explicitly to mirror
+        // `provisionInventory` and surface a precise error instead.
+        if (
+            flow.mode != uint8(TokenMode.WRAPPED)
+            && flow.mode != uint8(TokenMode.POOLED_LOCK_RELEASE)
+            && flow.mode != uint8(TokenMode.POOLED_LOCK_VEST)
+        ) {
+            revert WrongMode();
+        }
         if (uint256(flow.inventory) < amount) revert InsufficientFlowInventory();
 
         address token = flow.evmToken;
@@ -1971,8 +2012,18 @@ contract BridgeEscrow is
         if (p.evmChainId == 0) revert FlowZeroChainId();
         if (p.evmBridge == address(0) || p.evmToken == address(0)) revert ZeroAddress();
         if (p.opnetBridge == bytes32(0) || p.opnetToken == bytes32(0)) revert ZeroAddress();
+        // PVE006 (PeckShield) — this contract IS the EVM-source bridge, so the
+        // flow's `evmChainId` / `evmBridge` are always this chain and this
+        // address. flowId is hashed from both, and the OPNet depository must
+        // derive the identical flowId; a mismatched value here yields a flow
+        // whose locks can never be claimed cross-chain. Bind them to self.
+        // (Holds under multi-chain #33: each EVM chain runs its own escrow and
+        // binds its own self/chainid; only the FOREIGN opnetBridge stays a
+        // param — see the symmetric BridgeDepository guard for opnetBridge.)
+        if (p.evmChainId != block.chainid) revert FlowWrongChainId();
+        if (p.evmBridge != address(this)) revert FlowWrongBridge();
         // E-3 — per-leg decimals are independent (any pair is allowed). The
-        // claim legs (`claim` modes 0/3/4, `claimMintWrapped` modes 1/2) scale
+        // claim legs (`claim` modes 0/3/4, mint-on-EVM modes 1/2) scale
         // the signed source amount to EVM-destination units via
         // AmountPolicy.scale before any accounting (see _grossDst). Bounds
         // only: 1..MAX_DECIMALS so `10**delta` stays inside uint256.

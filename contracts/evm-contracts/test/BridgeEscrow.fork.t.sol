@@ -117,8 +117,10 @@ contract BridgeEscrowForkTest is Test {
         vm.prank(owner);
         return escrow.addFlow(BridgeEscrow.FlowAddParams({
             mode: 0,
+            // PVE006 — Sepolia fork: block.chainid is already 11155111; the
+            // flow's evmBridge must be the escrow itself (self-bind).
             evmChainId: 11155111,
-            evmBridge: address(0xE5C0),
+            evmBridge: address(escrow),
             evmToken: token,
             evmDecimals: 6,
             opnetBridge: bytes32(uint256(0xDEAD)),

@@ -51,6 +51,7 @@ contract FeeAccountingTest is Test {
     );
 
     function setUp() public {
+        vm.chainId(1);
         signerAddr = vm.addr(signerPk);
         usdc = new MockERC20("USD Coin", "USDC", 6);
 
@@ -73,7 +74,7 @@ contract FeeAccountingTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: 0,
                 evmChainId: ETH_CHAIN_ID,
-                evmBridge: address(0xE5C0),
+                evmBridge: address(escrow),
                 evmToken: address(usdc),
                 evmDecimals: 6,
                 opnetBridge: OPNET_BRIDGE,
@@ -167,7 +168,7 @@ contract FeeAccountingTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: 0,
                 evmChainId: ETH_CHAIN_ID,
-                evmBridge: address(0xE5C0),
+                evmBridge: address(escrow),
                 evmToken: address(dai),
                 evmDecimals: 18,
                 opnetBridge: OPNET_BRIDGE,
@@ -199,7 +200,7 @@ contract FeeAccountingTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: 0,
                 evmChainId: ETH_CHAIN_ID,
-                evmBridge: address(0xE5C0),
+                evmBridge: address(escrow),
                 evmToken: address(tok),
                 evmDecimals: 6,
                 opnetBridge: OPNET_BRIDGE,
@@ -334,7 +335,7 @@ contract FeeAccountingTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: 0,
                 evmChainId: ETH_CHAIN_ID,
-                evmBridge: address(0xE5C0),
+                evmBridge: address(esc2),
                 evmToken: address(usdc),
                 evmDecimals: 6,
                 opnetBridge: OPNET_BRIDGE,

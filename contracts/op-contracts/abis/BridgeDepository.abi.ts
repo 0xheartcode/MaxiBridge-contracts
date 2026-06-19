@@ -221,6 +221,22 @@ export const BridgeDepositoryEvents = [
         type: BitcoinAbiTypes.Event,
     },
     {
+        name: 'SignerAdded',
+        values: [
+            { name: 'signerHash', type: ABIDataTypes.UINT256 },
+            { name: 'newCount', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
+        name: 'SignerRemoved',
+        values: [
+            { name: 'signerHash', type: ABIDataTypes.UINT256 },
+            { name: 'newCount', type: ABIDataTypes.UINT256 },
+        ],
+        type: BitcoinAbiTypes.Event,
+    },
+    {
         name: 'BurnConfirmed',
         values: [
             { name: 'flowId', type: ABIDataTypes.UINT256 },

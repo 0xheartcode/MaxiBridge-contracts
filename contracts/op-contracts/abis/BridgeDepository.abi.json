@@ -1555,6 +1555,34 @@
             "type": "Event"
         },
         {
+            "name": "SignerAdded",
+            "values": [
+                {
+                    "name": "signerHash",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "newCount",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
+            "name": "SignerRemoved",
+            "values": [
+                {
+                    "name": "signerHash",
+                    "type": "UINT256"
+                },
+                {
+                    "name": "newCount",
+                    "type": "UINT256"
+                }
+            ],
+            "type": "Event"
+        },
+        {
             "name": "BurnConfirmed",
             "values": [
                 {

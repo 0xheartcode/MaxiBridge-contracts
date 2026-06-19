@@ -415,6 +415,19 @@ export class WrappedOP20 extends OP20S {
     @emit('Minted')
     public mintTo(calldata: Calldata): BytesWriter {
         this.onlyMinter();
+        // PVE009 (PeckShield) — FIXED: honour the token-level pause switch on
+        // the mint path too, mirroring `burnForRelease` above and the EVM
+        // sibling `WrappedERC20.mintFromBridge` (`whenNotPaused`). The original
+        // decline assumed `onlyMinter` admitted only the BridgeDepository (whose
+        // claim path already gates on `requireNotPaused`), but `grantMinter`
+        // lets governance/authority add further minters, and this token is
+        // NON-UPGRADEABLE — so without a token-level guard a granted minter
+        // could mint with no circuit breaker once the depository is paused.
+        // `_paused` is now a full freeze (mint + burn). The explicit `to`/
+        // `amount` zero-checks below are retained (clear boundary errors).
+        if (this._paused.value) {
+            throw new Revert('WrappedOP20: paused');
+        }
         const to: Address = calldata.readAddress();
         const amount: u256 = calldata.readU256();
         if (to.isZero()) {
@@ -486,6 +499,15 @@ export class WrappedOP20 extends OP20S {
         if (ethRecipient.length != 32) {
             throw new Revert('WrappedOP20: ethRecipient must be 32 bytes');
         }
+        // N3 (PeckShield) — DECLINED, no validation added here. Validating the
+        // full token↔flowId association is architecturally impossible (this
+        // token is non-upgradeable and holds no flow registry; the binding is
+        // enforced at claim time on the depository — the auditor concurs
+        // "seems impossible"). A `flowId != 0` check is ALSO rejected: zero is
+        // a SUPPORTED sentinel for an unbound/legacy burn whose
+        // `BurnedForRelease` carries flowId 0, where the off-chain signer falls
+        // back to the (evmToken, opnetToken) pair resolver. flowId stays
+        // recorded-not-validated by design. See docs/PVE-0619-RESPONSE.md.
         if (amount.isZero()) {
             throw new Revert('WrappedOP20: zero amount');
         }

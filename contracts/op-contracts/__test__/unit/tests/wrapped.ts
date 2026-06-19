@@ -352,12 +352,21 @@ await opnet('WrappedOP20 — Fix #6: burnForRelease pause gate', async (vm: OPNe
         Assert.expect(await token.balanceOf(alice)).toEqual(900n);
     });
 
-    await vm.it('mintTo still works while paused (bridge-side mints are not frozen here)', async () => {
-        // Mint gating is independent of the burn pause flag — only the EVM
-        // release liability side is frozen, not the inbound mint path. If
-        // ops needs to freeze mints too, they pause BridgeDepository.
+    await vm.it('paused contract blocks mintTo; unpause restores it (PVE009)', async () => {
+        // PVE009 — `_paused` is a full freeze: mint AND burn. `onlyMinter`
+        // admits granted minters beyond the depository (grantMinter) and this
+        // token is non-upgradeable, so the mint path needs its own circuit
+        // breaker rather than relying on the depository pause.
         setSender(deployer);
         await token.setPaused(true);
+
+        setSender(bridgeAddr);
+        await Assert.expect(async () => {
+            await token.mintTo(alice, 100n);
+        }).toThrow();
+
+        setSender(deployer);
+        await token.setPaused(false);
 
         setSender(bridgeAddr);
         await token.mintTo(alice, 100n);

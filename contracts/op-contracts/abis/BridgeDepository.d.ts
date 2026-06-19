@@ -139,6 +139,14 @@ export type BurnRefundedEvent = {
     readonly wrappedToken: Address;
     readonly amount: bigint;
 };
+export type SignerAddedEvent = {
+    readonly signerHash: bigint;
+    readonly newCount: bigint;
+};
+export type SignerRemovedEvent = {
+    readonly signerHash: bigint;
+    readonly newCount: bigint;
+};
 export type BurnConfirmedEvent = {
     readonly flowId: bigint;
     readonly depositId: bigint;
@@ -444,12 +452,12 @@ export type IsBurnRefunded = CallResult<
 /**
  * @description Represents the result of the addSignerToSet function call.
  */
-export type AddSignerToSet = CallResult<{}, OPNetEvent<never>[]>;
+export type AddSignerToSet = CallResult<{}, OPNetEvent<SignerAddedEvent>[]>;
 
 /**
  * @description Represents the result of the removeSignerFromSet function call.
  */
-export type RemoveSignerFromSet = CallResult<{}, OPNetEvent<SignerRotatedEvent>[]>;
+export type RemoveSignerFromSet = CallResult<{}, OPNetEvent<SignerRemovedEvent | SignerRotatedEvent>[]>;
 
 /**
  * @description Represents the result of the setRequiredSignatures function call.

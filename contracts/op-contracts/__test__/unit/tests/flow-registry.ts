@@ -44,7 +44,22 @@ const STATUS_PAUSED = 2n;
 const STATUS_DRAINING = 3n;
 const STATUS_RETIRED = 4n;
 
-async function setupDepository(): Promise<BridgeDepository> {
+/** Convert a 32-byte OPNet Address into its u256 BE bigint. */
+function opnetAddrToBigInt(addr: Address): bigint {
+    const bytes = addr as unknown as Uint8Array;
+    let v = 0n;
+    for (let i = 0; i < 32; i++) {
+        v = (v << 8n) | BigInt(bytes[i]!);
+    }
+    return v;
+}
+
+interface DepositorySetup {
+    depository: BridgeDepository;
+    depositoryAddress: Address;
+}
+
+async function setupDepository(): Promise<DepositorySetup> {
     const depositoryAddress = Blockchain.generateRandomAddress();
     const depository = new BridgeDepository({
         file: './build/BridgeDepository.wasm',
@@ -54,17 +69,23 @@ async function setupDepository(): Promise<BridgeDepository> {
     Blockchain.register(depository);
     await depository.init();
     setSender(deployer);
-    return depository;
+    return { depository, depositoryAddress };
 }
 
-function defaultParams(evmToken: bigint, opnetToken: bigint, mode: bigint = 0n, chainId: bigint = ETH_CHAIN_ID) {
+function defaultParams(
+    depositoryAddress: Address,
+    evmToken: bigint,
+    opnetToken: bigint,
+    mode: bigint = 0n,
+    chainId: bigint = ETH_CHAIN_ID,
+) {
     return {
         mode,
         chainId,
         evmBridge: EVM_BRIDGE,
         evmToken,
         evmDecimals: 6n,
-        opnetBridge: OPNET_BRIDGE,
+        opnetBridge: opnetAddrToBigInt(depositoryAddress),
         opnetToken,
         opnetDecimals: 6n,
         feeBps: 50n,
@@ -92,7 +113,7 @@ await opnet('BridgeDepository — PR α — computeFlowId', async (vm: OPNetUnit
     let depository: BridgeDepository;
 
     vm.beforeEach(async () => {
-        depository = await setupDepository();
+        ({ depository } = await setupDepository());
     });
 
     vm.afterAll(async () => {
@@ -124,9 +145,10 @@ await opnet('BridgeDepository — PR α — computeFlowId', async (vm: OPNetUnit
 
 await opnet('BridgeDepository — PR α — addFlow', async (vm: OPNetUnit) => {
     let depository: BridgeDepository;
+    let depositoryAddress: Address;
 
     vm.beforeEach(async () => {
-        depository = await setupDepository();
+        ({ depository, depositoryAddress } = await setupDepository());
     });
 
     vm.afterAll(async () => {
@@ -134,7 +156,7 @@ await opnet('BridgeDepository — PR α — addFlow', async (vm: OPNetUnit) => {
     });
 
     await vm.it('happy path — record populated, count incremented, exists=true', async () => {
-        const flowId = await depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC));
+        const flowId = await depository.addFlow(defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC));
         Assert.expect(flowId !== 0n).toEqual(true);
         Assert.expect(await depository.flowExists(flowId)).toEqual(true);
         Assert.expect(await depository.flowCount()).toEqual(1n);
@@ -154,17 +176,17 @@ await opnet('BridgeDepository — PR α — addFlow', async (vm: OPNetUnit) => {
     });
 
     await vm.it('rejects duplicate', async () => {
-        await depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC));
-        await expectRevert(() => depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC)), 'duplicate');
+        await depository.addFlow(defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC));
+        await expectRevert(() => depository.addFlow(defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC)), 'duplicate');
     });
 
     await vm.it('rejects non-governor', async () => {
         setSender(stranger);
-        await expectRevert(() => depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC)), 'non-gov');
+        await expectRevert(() => depository.addFlow(defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC)), 'non-gov');
     });
 
     await vm.it('accepts mode 4 (POOLED_LOCK_VEST)', async () => {
-        const p = defaultParams(EVM_USDC, OPNET_WUSDC);
+        const p = defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC);
         p.mode = 4n;
         const flowId = await depository.addFlow(p);
         Assert.expect(flowId !== 0n).toEqual(true);
@@ -173,67 +195,67 @@ await opnet('BridgeDepository — PR α — addFlow', async (vm: OPNetUnit) => {
     });
 
     await vm.it('rejects invalid mode', async () => {
-        const p = defaultParams(EVM_USDC, OPNET_WUSDC);
+        const p = defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC);
         p.mode = 5n;
         await expectRevert(() => depository.addFlow(p), 'mode>4');
     });
 
     await vm.it('rejects zero chainId', async () => {
-        const p = defaultParams(EVM_USDC, OPNET_WUSDC);
+        const p = defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC);
         p.chainId = 0n;
         await expectRevert(() => depository.addFlow(p), 'chainId=0');
     });
 
     await vm.it('rejects zero EVM addrs', async () => {
-        let p = defaultParams(EVM_USDC, OPNET_WUSDC);
+        let p = defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC);
         p.evmBridge = 0n;
         await expectRevert(() => depository.addFlow(p), 'evmBridge=0');
 
-        p = defaultParams(EVM_USDC, OPNET_WUSDC);
+        p = defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC);
         p.evmToken = 0n;
         await expectRevert(() => depository.addFlow(p), 'evmToken=0');
     });
 
     await vm.it('rejects zero OPNet addrs', async () => {
-        let p = defaultParams(EVM_USDC, OPNET_WUSDC);
+        let p = defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC);
         p.opnetBridge = 0n;
         await expectRevert(() => depository.addFlow(p), 'opnetBridge=0');
 
-        p = defaultParams(EVM_USDC, OPNET_WUSDC);
+        p = defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC);
         p.opnetToken = 0n;
         await expectRevert(() => depository.addFlow(p), 'opnetToken=0');
     });
 
     await vm.it('rejects bad decimals', async () => {
-        let p = defaultParams(EVM_USDC, OPNET_WUSDC);
+        let p = defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC);
         p.evmDecimals = 0n;
         await expectRevert(() => depository.addFlow(p), 'evmDecimals=0');
 
-        p = defaultParams(EVM_USDC, OPNET_WUSDC);
+        p = defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC);
         p.evmDecimals = 31n;
         await expectRevert(() => depository.addFlow(p), 'evmDecimals=31');
 
-        p = defaultParams(EVM_USDC, OPNET_WUSDC);
+        p = defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC);
         p.opnetDecimals = 0n;
         await expectRevert(() => depository.addFlow(p), 'opnetDecimals=0');
     });
 
     await vm.it('rejects bps too high', async () => {
-        const p = defaultParams(EVM_USDC, OPNET_WUSDC);
+        const p = defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC);
         p.feeBps = 1001n;
         await expectRevert(() => depository.addFlow(p), 'bps>1000');
     });
 
     await vm.it('allows multi-chain same OPNet token', async () => {
-        const a = await depository.addFlow(defaultParams(EVM_USDT, OPNET_WUSDT));
-        const b = await depository.addFlow(defaultParams(EVM_USDT, OPNET_WUSDT, 0n, ARB_CHAIN_ID));
+        const a = await depository.addFlow(defaultParams(depositoryAddress, EVM_USDT, OPNET_WUSDT));
+        const b = await depository.addFlow(defaultParams(depositoryAddress, EVM_USDT, OPNET_WUSDT, 0n, ARB_CHAIN_ID));
         Assert.expect(a !== b).toEqual(true);
         Assert.expect(await depository.flowCount()).toEqual(2n);
     });
 
     await vm.it('allows multi-mode same (chain, token)', async () => {
-        const a = await depository.addFlow(defaultParams(EVM_USDT, OPNET_WUSDT));
-        const b = await depository.addFlow(defaultParams(EVM_USDT, OPNET_WUSDT, 3n));
+        const a = await depository.addFlow(defaultParams(depositoryAddress, EVM_USDT, OPNET_WUSDT));
+        const b = await depository.addFlow(defaultParams(depositoryAddress, EVM_USDT, OPNET_WUSDT, 3n));
         Assert.expect(a !== b).toEqual(true);
         Assert.expect(await depository.flowCount()).toEqual(2n);
     });
@@ -245,11 +267,12 @@ await opnet('BridgeDepository — PR α — addFlow', async (vm: OPNetUnit) => {
 
 await opnet('BridgeDepository — PR α — status transitions', async (vm: OPNetUnit) => {
     let depository: BridgeDepository;
+    let depositoryAddress: Address;
     let flowId: bigint;
 
     vm.beforeEach(async () => {
-        depository = await setupDepository();
-        flowId = await depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC));
+        ({ depository, depositoryAddress } = await setupDepository());
+        flowId = await depository.addFlow(defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC));
     });
 
     vm.afterAll(async () => {
@@ -370,11 +393,12 @@ await opnet('BridgeDepository — PR α — status transitions', async (vm: OPNe
 
 await opnet('BridgeDepository — PR α — flow setters', async (vm: OPNetUnit) => {
     let depository: BridgeDepository;
+    let depositoryAddress: Address;
     let flowId: bigint;
 
     vm.beforeEach(async () => {
-        depository = await setupDepository();
-        flowId = await depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC));
+        ({ depository, depositoryAddress } = await setupDepository());
+        flowId = await depository.addFlow(defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC));
     });
 
     vm.afterAll(async () => {
@@ -427,7 +451,7 @@ await opnet('BridgeDepository — PR α — read views', async (vm: OPNetUnit) =
     let depository: BridgeDepository;
 
     vm.beforeEach(async () => {
-        depository = await setupDepository();
+        ({ depository } = await setupDepository());
     });
 
     vm.afterAll(async () => {
@@ -450,10 +474,11 @@ await opnet('BridgeDepository — PR α — read views', async (vm: OPNetUnit) =
 
 await opnet('BridgeDepository — PR β.2.scaffold — tipCapBps', async (vm: OPNetUnit) => {
     let depository: BridgeDepository;
+    let depositoryAddress: Address;
     let flowId: bigint;
 
     vm.beforeEach(async () => {
-        depository = await setupDepository();
+        ({ depository, depositoryAddress } = await setupDepository());
     });
 
     vm.afterAll(async () => {
@@ -461,38 +486,38 @@ await opnet('BridgeDepository — PR β.2.scaffold — tipCapBps', async (vm: OP
     });
 
     await vm.it('addFlow — default tipCapBps is zero', async () => {
-        flowId = await depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC));
+        flowId = await depository.addFlow(defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC));
         const f = await depository.getFlow(flowId);
         Assert.expect(f[17]).toEqual(0n); // tipCapBps appended at index 17
     });
 
     await vm.it('addFlow — tipCapBps above 200 reverts', async () => {
-        const p = { ...defaultParams(EVM_USDC, OPNET_WUSDC), tipCapBps: 201n };
+        const p = { ...defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC), tipCapBps: 201n };
         await expectRevert(() => depository.addFlow(p), 'tipCapBps>200');
     });
 
     await vm.it('addFlow — tipCapBps at MAX_TIP_BPS (200) succeeds', async () => {
-        const p = { ...defaultParams(EVM_USDC, OPNET_WUSDC), tipCapBps: 200n };
+        const p = { ...defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC), tipCapBps: 200n };
         flowId = await depository.addFlow(p);
         const f = await depository.getFlow(flowId);
         Assert.expect(f[17]).toEqual(200n);
     });
 
     await vm.it('setFlowTipCap — governor only', async () => {
-        flowId = await depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC));
+        flowId = await depository.addFlow(defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC));
         setSender(stranger);
         await expectRevert(() => depository.setFlowTipCap(flowId, 100n), 'non-gov');
     });
 
     await vm.it('setFlowTipCap — happy path updates value', async () => {
-        flowId = await depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC));
+        flowId = await depository.addFlow(defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC));
         await depository.setFlowTipCap(flowId, 100n);
         const f = await depository.getFlow(flowId);
         Assert.expect(f[17]).toEqual(100n);
     });
 
     await vm.it('setFlowTipCap — above MAX_TIP_BPS reverts', async () => {
-        flowId = await depository.addFlow(defaultParams(EVM_USDC, OPNET_WUSDC));
+        flowId = await depository.addFlow(defaultParams(depositoryAddress, EVM_USDC, OPNET_WUSDC));
         await expectRevert(() => depository.setFlowTipCap(flowId, 201n), 'tipCapBps>200');
     });
 

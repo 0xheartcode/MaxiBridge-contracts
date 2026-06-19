@@ -30,6 +30,7 @@ contract LockWithPermitTest is Test {
         );
 
     function setUp() public {
+        vm.chainId(1);
         user = vm.addr(userPk);
         usdc = new MockERC20Permit("USD Coin", "USDC", 6);
 
@@ -47,7 +48,7 @@ contract LockWithPermitTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: 0,
                 evmChainId: 1,
-                evmBridge: address(0xE5C0),
+                evmBridge: address(escrow),
                 evmToken: address(usdc),
                 evmDecimals: 6,
                 opnetBridge: bytes32(uint256(0xDEAD)),

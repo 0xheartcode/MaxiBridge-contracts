@@ -42,12 +42,23 @@ function _buildPow10(): u256[] {
 export function scale(amountSrc: u256, srcDec: u32, dstDec: u32): u256 {
     if (srcDec == dstDec) return amountSrc;
 
+    // N3-2 (PeckShield) — `scale` is exported, so it must self-protect its
+    // POW10 lookup rather than trust the caller's decimal bounds. The decimal
+    // delta must not exceed MAX_DECIMALS (POW10 holds 10^0..10^MAX_DECIMALS),
+    // else the index is out of range. Guarded here so the array access is
+    // provably in-bounds regardless of caller.
     if (dstDec > srcDec) {
+        if (dstDec - srcDec > MAX_DECIMALS) {
+            throw new Revert('AmountPolicy: scale overflow');
+        }
         const mult: u256 = POW10[<i32>(dstDec - srcDec)];
         return SafeMath.mul(amountSrc, mult);
     }
 
     // srcDec > dstDec — strict floor with dust rejection.
+    if (srcDec - dstDec > MAX_DECIMALS) {
+        throw new Revert('AmountPolicy: scale overflow');
+    }
     const div: u256 = POW10[<i32>(srcDec - dstDec)];
     const rem: u256 = _mod(amountSrc, div);
     if (!rem.isZero()) {

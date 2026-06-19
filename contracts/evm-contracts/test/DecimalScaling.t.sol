@@ -38,6 +38,7 @@ contract DecimalScalingTest is Test {
     bytes32 internal growFlow;   // opnet 6  → evm 18
 
     function setUp() public {
+        vm.chainId(1);
         signerAddr = vm.addr(signerPk);
         tok6 = new MockERC20("Six", "SIX", 6);
         tok18 = new MockERC20("Eighteen", "EIG", 18);
@@ -58,7 +59,7 @@ contract DecimalScalingTest is Test {
         shrinkFlow = escrow.addFlow(BridgeEscrow.FlowAddParams({
             mode: 0,
             evmChainId: ETH_CHAIN_ID,
-            evmBridge: address(0xE5C0),
+            evmBridge: address(escrow),
             evmToken: address(tok6),
             evmDecimals: 6,
             opnetBridge: OPNET_BRIDGE,
@@ -75,7 +76,7 @@ contract DecimalScalingTest is Test {
         growFlow = escrow.addFlow(BridgeEscrow.FlowAddParams({
             mode: 0,
             evmChainId: ETH_CHAIN_ID,
-            evmBridge: address(0xE5C0),
+            evmBridge: address(escrow),
             evmToken: address(tok18),
             evmDecimals: 18,
             opnetBridge: OPNET_BRIDGE,
@@ -190,7 +191,7 @@ contract DecimalScalingTest is Test {
         bytes32 feeFlow = escrow.addFlow(BridgeEscrow.FlowAddParams({
             mode: 0,
             evmChainId: ETH_CHAIN_ID,
-            evmBridge: address(0xE5C0),
+            evmBridge: address(escrow),
             evmToken: address(tok6b),
             evmDecimals: 6,
             opnetBridge: OPNET_BRIDGE,

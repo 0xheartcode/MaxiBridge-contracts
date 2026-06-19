@@ -76,7 +76,10 @@ export type SetBridgeThreshold = CallResult<{}, OPNetEvent<AuthorityThresholdSet
 /**
  * @description Represents the result of the migrateBridgeSignerSet function call.
  */
-export type MigrateBridgeSignerSet = CallResult<{}, OPNetEvent<never>[]>;
+export type MigrateBridgeSignerSet = CallResult<
+    {},
+    OPNetEvent<AuthoritySignerAddedEvent | AuthorityThresholdSetEvent>[]
+>;
 
 /**
  * @description Represents the result of the setUpgradeAuthority function call.

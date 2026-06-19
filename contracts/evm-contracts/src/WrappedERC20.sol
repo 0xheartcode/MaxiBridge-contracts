@@ -43,7 +43,7 @@ contract WrappedERC20 is ERC20, Ownable, Pausable {
     uint8 private immutable _decimals;
 
     /// @notice E-1 — hard supply ceiling enforced on EVERY mint path
-    ///         (`mintFromBridge`, reached by `BridgeEscrow.claimMintWrapped`
+    ///         (`mintFromBridge`, reached by `BridgeEscrow.claim`
     ///         AND `refundBurn`). Mirrors the OPNet `WrappedOP20`'s
     ///         OP20-mandated `maxSupply` so a compromised signer set cannot
     ///         mint without bound across successive windows. Set once at
@@ -116,7 +116,7 @@ contract WrappedERC20 is ERC20, Ownable, Pausable {
         if (amount == 0) revert AmountZero();
         // E-1 — hard supply ceiling. `MAX_SUPPLY >= totalSupply()` is an
         // invariant (we never mint past it), so the subtraction is safe and
-        // the check is overflow-free. Caps BOTH claimMintWrapped and
+        // the check is overflow-free. Caps BOTH the mint-on-EVM `claim` and
         // refundBurn (both funnel through here).
         if (amount > MAX_SUPPLY - totalSupply()) revert MaxSupplyExceeded();
         _mint(to, amount);
