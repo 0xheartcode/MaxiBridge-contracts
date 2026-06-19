@@ -415,6 +415,16 @@ export class WrappedOP20 extends OP20S {
     @emit('Minted')
     public mintTo(calldata: Calldata): BytesWriter {
         this.onlyMinter();
+        // PVE009 (PeckShield) — DECLINED: NO pause guard here, by design. The
+        // burn/mint pause asymmetry is intentional, not an oversight.
+        // `burnForRelease` is called DIRECTLY by users so the token needs its
+        // own freeze; `mintTo` is `onlyMinter` (only BridgeDepository), and the
+        // depository's claim path already gates on `requireNotPaused`, so the
+        // ONLY mint path is already freezable by pausing the depository. Adding
+        // a token-level mint freeze would be redundant and break the documented
+        // "pause = burn-only" model (see the dedicated wrapped.ts test + the
+        // PVE-0619 response note). The explicit `to`/`amount` zero-checks below
+        // are also intentionally retained (clear boundary errors).
         const to: Address = calldata.readAddress();
         const amount: u256 = calldata.readU256();
         if (to.isZero()) {
@@ -486,6 +496,15 @@ export class WrappedOP20 extends OP20S {
         if (ethRecipient.length != 32) {
             throw new Revert('WrappedOP20: ethRecipient must be 32 bytes');
         }
+        // N3 (PeckShield) — DECLINED, no validation added here. Validating the
+        // full token↔flowId association is architecturally impossible (this
+        // token is non-upgradeable and holds no flow registry; the binding is
+        // enforced at claim time on the depository — the auditor concurs
+        // "seems impossible"). A `flowId != 0` check is ALSO rejected: zero is
+        // a SUPPORTED sentinel for an unbound/legacy burn whose
+        // `BurnedForRelease` carries flowId 0, where the off-chain signer falls
+        // back to the (evmToken, opnetToken) pair resolver. flowId stays
+        // recorded-not-validated by design. See docs/PVE-0619-RESPONSE.md.
         if (amount.isZero()) {
             throw new Revert('WrappedOP20: zero amount');
         }

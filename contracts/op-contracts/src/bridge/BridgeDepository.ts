@@ -28,6 +28,8 @@ import {
     EmergencyWithdrawal,
     WrappedTokenSet,
     SignerRotated,
+    SignerAdded,
+    SignerRemoved,
     Paused,
     Unpaused,
     MintedFromVoucher,
@@ -1208,6 +1210,16 @@ export class BridgeDepository extends ReentrancyGuard {
         if (opnetBridge.isZero() || opnetToken.isZero()) {
             throw new Revert('BridgeDepository: zero OPNet addr');
         }
+        // PVE006-2 (PeckShield) — this contract IS the OPNet bridge, so the
+        // flow's `opnetBridge` is always this contract's own identity (the
+        // same `contractSelf` every voucher binds to). flowId is hashed from
+        // it and the EVM escrow must derive the identical flowId; a mismatched
+        // value yields a flow whose burns can never be released cross-chain.
+        // Bind to self. Symmetric with the EVM `addFlow` evmBridge guard; the
+        // FOREIGN evmBridge / evmChainId stay params.
+        if (!u256.eq(opnetBridge, _opnetAddrToU256(this.address))) {
+            throw new Revert('BridgeDepository: opnetBridge not self');
+        }
         if (evmDecimals == 0 || evmDecimals > 30) {
             throw new Revert('BridgeDepository: bad evmDecimals');
         }
@@ -2033,7 +2045,13 @@ export class BridgeDepository extends ReentrancyGuard {
         // Tip carve — FINDING-006: cross-multiply to avoid floored-ratio bypass
         let recipientNetAmount: u256 = parsed.netAmount;
         if (!parsed.relayerTip.isZero()) {
-            if (u256.gt(parsed.relayerTip, parsed.netAmount)) {
+            // N3-3 (PeckShield) — `ge` not `gt`: a tip equal to the whole net
+            // leaves the named recipient with zero, never a valid tipped
+            // voucher. Behaviour-neutral for any real config (tipCapBps <=
+            // MAX_TIP_BPS already rejects tip >= net in the cross-multiply
+            // below), but the direct bound now matches intent and the EVM
+            // `claim` tip-carve.
+            if (u256.ge(parsed.relayerTip, parsed.netAmount)) {
                 throw new Revert('BridgeDepository: tip exceeds flow cap');
             }
             const tipCapBps: u32 = this._flowTipCapBps.get(flowId).toU32();
@@ -2249,6 +2267,16 @@ export class BridgeDepository extends ReentrancyGuard {
         }
         if (!u256.eq(this._flowOpnetToken.get(flowId), _opnetAddrToU256(token))) {
             throw new Revert('BridgeDepository: token not flow canonical');
+        }
+        // PVE007 (PeckShield) — only INVERSE_WRAPPED (1) / POOLED_LOCK_RELEASE
+        // (3) / POOLED_LOCK_VEST (4) hold a drainable OPNet-side canonical
+        // pool; mint-on-OPNet modes (0/2) never credit `_flowInventory` so a
+        // drain would already revert below with "insufficient flow inventory".
+        // Gate explicitly to mirror `provisionInventoryOpNet` and surface a
+        // precise error instead.
+        const mode: u32 = this._flowMode.get(flowId).toU32();
+        if (mode != 1 && mode != 3 && mode != 4) {
+            throw new Revert('BridgeDepository: flow mode not drainable');
         }
 
         // Verify → effect → interaction (CEI). Ledger debit precedes the
@@ -2967,6 +2995,7 @@ export class BridgeDepository extends ReentrancyGuard {
      * the prior set is still in the new superset). Liveness-friendly.
      */
     @method({ name: 'pubKeyHash', type: ABIDataTypes.UINT256 })
+    @emit('SignerAdded')
     public addSignerToSet(calldata: Calldata): BytesWriter {
         this.onlyGovernorOrAuthority();
         const hash: u256 = calldata.readU256();
@@ -2975,7 +3004,10 @@ export class BridgeDepository extends ReentrancyGuard {
             throw new Revert('BridgeDepository: signer already in set');
         }
         this._signerKeyHashSet.set(hash, u256.One);
-        this._signerCount.value = SafeMath.add(this._signerCount.value, u256.One);
+        const newCount: u256 = SafeMath.add(this._signerCount.value, u256.One);
+        this._signerCount.value = newCount;
+        // N5-2 (PeckShield) — emit so monitoring can track the signer set.
+        this.emitEvent(new SignerAdded(hash, newCount));
         return new BytesWriter(0);
     }
 
@@ -2986,7 +3018,7 @@ export class BridgeDepository extends ReentrancyGuard {
      * the removal would push count below threshold.
      */
     @method({ name: 'pubKeyHash', type: ABIDataTypes.UINT256 })
-    @emit('SignerRotated')
+    @emit('SignerRemoved', 'SignerRotated')
     public removeSignerFromSet(calldata: Calldata): BytesWriter {
         this.onlyGovernorOrAuthority();
         const hash: u256 = calldata.readU256();
@@ -2999,6 +3031,8 @@ export class BridgeDepository extends ReentrancyGuard {
         }
         this._signerKeyHashSet.set(hash, u256.Zero);
         this._signerCount.value = newCount;
+        // N5-2 (PeckShield) — emit alongside the epoch-bump SignerRotated.
+        this.emitEvent(new SignerRemoved(hash, newCount));
 
         const oldEpoch: u256 = this._signerEpoch.value;
         const u32Max: u256 = u256.fromU64(<u64>u32.MAX_VALUE);

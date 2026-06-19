@@ -337,6 +337,9 @@ export class BridgeAuthority extends ReentrancyGuard {
         { name: 'addHash', type: ABIDataTypes.UINT256 },
         { name: 'newThreshold', type: ABIDataTypes.UINT256 },
     )
+    // N5-3 (PeckShield) — the body emits both events; declare them so the ABI
+    // metadata matches (was missing the @emit annotation).
+    @emit('AuthoritySignerAdded', 'AuthorityThresholdSet')
     @nonReentrant
     public migrateBridgeSignerSet(calldata: Calldata): BytesWriter {
         this.onlyGovernor();

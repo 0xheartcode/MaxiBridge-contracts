@@ -98,6 +98,28 @@ export class SignerRotated extends NetEvent {
     }
 }
 
+// N5-2 (PeckShield) — per-item signer-set observability. `addSignerToSet`
+// previously emitted nothing, leaving off-chain monitoring blind to a
+// security-critical state change; `removeSignerFromSet` keeps its epoch-bump
+// `SignerRotated` and now also emits `SignerRemoved` for a uniform vocabulary.
+export class SignerAdded extends NetEvent {
+    constructor(signerHash: u256, newCount: u256) {
+        const data = new BytesWriter(32 + 32);
+        data.writeU256(signerHash);
+        data.writeU256(newCount);
+        super('SignerAdded', data);
+    }
+}
+
+export class SignerRemoved extends NetEvent {
+    constructor(signerHash: u256, newCount: u256) {
+        const data = new BytesWriter(32 + 32);
+        data.writeU256(signerHash);
+        data.writeU256(newCount);
+        super('SignerRemoved', data);
+    }
+}
+
 // ─── Pause ─────────────────────────────────────────────────────────────
 
 export class Paused extends NetEvent {
