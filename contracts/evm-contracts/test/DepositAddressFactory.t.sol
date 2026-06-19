@@ -25,6 +25,7 @@ contract DepositAddressFactoryTest is Test {
     address internal refundUser = address(0x5EFD);
 
     function setUp() public {
+        vm.chainId(1);
         usdc = new MockERC20("USD Coin", "USDC", 6);
 
         TestableBridgeEscrow impl = new TestableBridgeEscrow();
@@ -40,7 +41,7 @@ contract DepositAddressFactoryTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: 0,
                 evmChainId: 1,
-                evmBridge: address(0xE5C0),
+                evmBridge: address(escrow),
                 evmToken: address(usdc),
                 evmDecimals: 6,
                 opnetBridge: bytes32(uint256(0xDEAD)),

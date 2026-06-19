@@ -49,6 +49,7 @@ contract BridgeEscrowTest is Test {
     uint256 internal constant EXPECTED_OPNET_CHAIN_ID = 2;
 
     function setUp() public virtual {
+        vm.chainId(1);
         signerAddr = vm.addr(signerPk);
 
         usdc = new MockERC20("USD Coin", "USDC", 6);
@@ -83,7 +84,7 @@ contract BridgeEscrowTest is Test {
         usdcFlowId = escrow.addFlow(BridgeEscrow.FlowAddParams({
             mode: 0,
             evmChainId: TEST_EVM_CHAIN_ID,
-            evmBridge: TEST_EVM_BRIDGE,
+            evmBridge: address(escrow),
             evmToken: address(usdc),
             evmDecimals: 6,
             opnetBridge: TEST_OPNET_BRIDGE,
@@ -99,7 +100,7 @@ contract BridgeEscrowTest is Test {
         usdtFlowId = escrow.addFlow(BridgeEscrow.FlowAddParams({
             mode: 0,
             evmChainId: TEST_EVM_CHAIN_ID,
-            evmBridge: TEST_EVM_BRIDGE,
+            evmBridge: address(escrow),
             evmToken: address(usdt),
             evmDecimals: 6,
             opnetBridge: TEST_OPNET_BRIDGE,
@@ -342,7 +343,7 @@ contract BridgeEscrowTest is Test {
         bytes32 feeFlowId = escrow.addFlow(BridgeEscrow.FlowAddParams({
             mode: 0,
             evmChainId: TEST_EVM_CHAIN_ID,
-            evmBridge: TEST_EVM_BRIDGE,
+            evmBridge: address(escrow),
             evmToken: address(fee),
             evmDecimals: 18,
             opnetBridge: TEST_OPNET_BRIDGE,
@@ -1326,7 +1327,7 @@ contract BridgeEscrowTest is Test {
         flowId = escrow.addFlow(BridgeEscrow.FlowAddParams({
             mode: uint8(mode),
             evmChainId: TEST_EVM_CHAIN_ID,
-            evmBridge: TEST_EVM_BRIDGE,
+            evmBridge: address(escrow),
             evmToken: evmToken,
             evmDecimals: 6,
             opnetBridge: TEST_OPNET_BRIDGE,
@@ -1466,7 +1467,7 @@ contract BridgeEscrowTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: uint8(BridgeEscrow.TokenMode.INVERSE_WRAPPED),
                 evmChainId: TEST_EVM_CHAIN_ID,
-                evmBridge: TEST_EVM_BRIDGE,
+                evmBridge: address(escrow),
                 evmToken: address(wmoto),
                 evmDecimals: 6,
                 opnetBridge: TEST_OPNET_BRIDGE,

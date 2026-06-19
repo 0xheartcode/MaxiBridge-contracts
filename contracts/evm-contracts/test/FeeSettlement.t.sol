@@ -58,6 +58,7 @@ contract FeeSettlementTest is Test {
     );
 
     function setUp() public {
+        vm.chainId(1);
         signerAddr = vm.addr(signerPk);
         usdc = new MockERC20("USD Coin", "USDC", 6);
         usdt = new MockERC20("Tether",   "USDT", 6);
@@ -93,7 +94,7 @@ contract FeeSettlementTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: 0,
                 evmChainId: ETH_CHAIN_ID,
-                evmBridge: address(0xE5C0),
+                evmBridge: address(escrow),
                 evmToken: tok,
                 evmDecimals: 6,
                 opnetBridge: OPNET_BRIDGE,
@@ -199,7 +200,7 @@ contract FeeSettlementTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: 0,
                 evmChainId: ETH_CHAIN_ID,
-                evmBridge: address(0xE5C0),
+                evmBridge: address(escrow),
                 evmToken: address(usdc),
                 evmDecimals: 6,
                 opnetBridge: OPNET_BRIDGE,

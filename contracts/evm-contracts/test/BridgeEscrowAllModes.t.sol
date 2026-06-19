@@ -58,6 +58,7 @@ contract BridgeEscrowAllModesTest is Test {
     address internal bob = address(0xB0B);
 
     function setUp() public virtual {
+        vm.chainId(1);
         signerAddr = vm.addr(signerPk);
 
         moto = new MockERC20("MOTO", "MOTO", 6);
@@ -93,7 +94,7 @@ contract BridgeEscrowAllModesTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: uint8(BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE),
                 evmChainId: TEST_EVM_CHAIN_ID,
-                evmBridge: TEST_EVM_BRIDGE,
+                evmBridge: address(escrow),
                 evmToken: address(moto),
                 evmDecimals: 6,
                 opnetBridge: TEST_OPNET_BRIDGE,
@@ -116,7 +117,7 @@ contract BridgeEscrowAllModesTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: uint8(BridgeEscrow.TokenMode.NATIVE_BURN_MINT),
                 evmChainId: TEST_EVM_CHAIN_ID,
-                evmBridge: TEST_EVM_BRIDGE,
+                evmBridge: address(escrow),
                 evmToken: address(wmoto),
                 evmDecimals: 6,
                 opnetBridge: TEST_OPNET_BRIDGE,
@@ -350,7 +351,7 @@ contract BridgeEscrowAllModesTest is Test {
         return BridgeEscrow.FlowAddParams({
             mode: uint8(mode),
             evmChainId: TEST_EVM_CHAIN_ID,
-            evmBridge: TEST_EVM_BRIDGE,
+            evmBridge: address(escrow),
             evmToken: evmToken,
             evmDecimals: 6,
             opnetBridge: TEST_OPNET_BRIDGE,

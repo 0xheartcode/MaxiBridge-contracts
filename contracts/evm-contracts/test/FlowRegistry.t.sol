@@ -36,6 +36,7 @@ contract FlowRegistryTest is Test {
     bytes32 internal constant OPNET_USDT = bytes32(uint256(0xBEEF));
 
     function setUp() public {
+        vm.chainId(1);
         signerAddr = vm.addr(signerPk);
 
         usdc = new MockERC20("USD Coin", "USDC", 6);
@@ -62,13 +63,13 @@ contract FlowRegistryTest is Test {
 
     function _defaultParams(address evmToken, bytes32 opnetToken)
         internal
-        pure
+        view
         returns (BridgeEscrow.FlowAddParams memory)
     {
         return BridgeEscrow.FlowAddParams({
             mode: 0, // WRAPPED
             evmChainId: ETH_CHAIN_ID,
-            evmBridge: address(0xE5C0),
+            evmBridge: address(escrow),
             evmToken: evmToken,
             evmDecimals: 6,
             opnetBridge: OPNET_BRIDGE,
@@ -95,20 +96,20 @@ contract FlowRegistryTest is Test {
     // ─── computeFlowId ─────────────────────────────────────────────────
 
     function test_ComputeFlowId_IsDeterministic() public view {
-        bytes32 a = escrow.computeFlowId(0, ETH_CHAIN_ID, address(0xE5C0), address(usdc), OPNET_BRIDGE, OPNET_USDC);
-        bytes32 b = escrow.computeFlowId(0, ETH_CHAIN_ID, address(0xE5C0), address(usdc), OPNET_BRIDGE, OPNET_USDC);
+        bytes32 a = escrow.computeFlowId(0, ETH_CHAIN_ID, address(escrow), address(usdc), OPNET_BRIDGE, OPNET_USDC);
+        bytes32 b = escrow.computeFlowId(0, ETH_CHAIN_ID, address(escrow), address(usdc), OPNET_BRIDGE, OPNET_USDC);
         assertEq(a, b);
     }
 
     function test_ComputeFlowId_DiffersByMode() public view {
-        bytes32 a = escrow.computeFlowId(0, ETH_CHAIN_ID, address(0xE5C0), address(usdc), OPNET_BRIDGE, OPNET_USDC);
-        bytes32 b = escrow.computeFlowId(2, ETH_CHAIN_ID, address(0xE5C0), address(usdc), OPNET_BRIDGE, OPNET_USDC);
+        bytes32 a = escrow.computeFlowId(0, ETH_CHAIN_ID, address(escrow), address(usdc), OPNET_BRIDGE, OPNET_USDC);
+        bytes32 b = escrow.computeFlowId(2, ETH_CHAIN_ID, address(escrow), address(usdc), OPNET_BRIDGE, OPNET_USDC);
         assertTrue(a != b, "different mode must yield different flowId");
     }
 
     function test_ComputeFlowId_DiffersByChain() public view {
-        bytes32 a = escrow.computeFlowId(0, ETH_CHAIN_ID, address(0xE5C0), address(usdc), OPNET_BRIDGE, OPNET_USDC);
-        bytes32 b = escrow.computeFlowId(0, ARB_CHAIN_ID, address(0xE5C0), address(usdc), OPNET_BRIDGE, OPNET_USDC);
+        bytes32 a = escrow.computeFlowId(0, ETH_CHAIN_ID, address(escrow), address(usdc), OPNET_BRIDGE, OPNET_USDC);
+        bytes32 b = escrow.computeFlowId(0, ARB_CHAIN_ID, address(escrow), address(usdc), OPNET_BRIDGE, OPNET_USDC);
         assertTrue(a != b, "different chain must yield different flowId");
     }
 
@@ -212,10 +213,15 @@ contract FlowRegistryTest is Test {
         // ETH USDT mode 0
         bytes32 a = _addDefault(address(usdt), OPNET_USDT);
         // ARB USDT mode 0 — different chainId → different flowId, both allowed.
+        // PVE006 binds evmChainId to block.chainid, so simulate the escrow
+        // running on Arbitrum for this registration (the registry still keys
+        // flows per-chain; same EVM token can back flows on distinct chains).
         BridgeEscrow.FlowAddParams memory p = _defaultParams(address(usdt), OPNET_USDT);
         p.evmChainId = ARB_CHAIN_ID;
+        vm.chainId(ARB_CHAIN_ID);
         vm.prank(owner);
         bytes32 b = escrow.addFlow(p);
+        vm.chainId(1);
         assertTrue(a != b);
         assertEq(escrow.flowCount(), 2);
     }
@@ -515,7 +521,7 @@ contract FlowRegistryTest is Test {
     // ─── Existence / read views ────────────────────────────────────────
 
     function test_FlowExists_FalseBeforeAdd() public view {
-        bytes32 flowId = escrow.computeFlowId(0, ETH_CHAIN_ID, address(0xE5C0), address(usdc), OPNET_BRIDGE, OPNET_USDC);
+        bytes32 flowId = escrow.computeFlowId(0, ETH_CHAIN_ID, address(escrow), address(usdc), OPNET_BRIDGE, OPNET_USDC);
         assertFalse(escrow.flowExists(flowId));
     }
 

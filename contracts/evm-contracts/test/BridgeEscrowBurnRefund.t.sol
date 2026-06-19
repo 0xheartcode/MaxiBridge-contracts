@@ -49,6 +49,7 @@ contract BridgeEscrowBurnRefundTest is Test {
     address internal burner = address(0xB0B);
 
     function setUp() public virtual {
+        vm.chainId(1);
         signerAddr = vm.addr(signerPk);
 
         moto = new MockERC20("MOTO", "MOTO", 6);
@@ -82,7 +83,7 @@ contract BridgeEscrowBurnRefundTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: uint8(BridgeEscrow.TokenMode.NATIVE_BURN_MINT),
                 evmChainId: TEST_EVM_CHAIN_ID,
-                evmBridge: TEST_EVM_BRIDGE,
+                evmBridge: address(escrow),
                 evmToken: address(wmoto),
                 evmDecimals: 6,
                 opnetBridge: TEST_OPNET_BRIDGE,
@@ -102,7 +103,7 @@ contract BridgeEscrowBurnRefundTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: uint8(BridgeEscrow.TokenMode.POOLED_LOCK_RELEASE),
                 evmChainId: TEST_EVM_CHAIN_ID,
-                evmBridge: TEST_EVM_BRIDGE,
+                evmBridge: address(escrow),
                 evmToken: address(moto),
                 evmDecimals: 6,
                 opnetBridge: TEST_OPNET_BRIDGE,
@@ -352,7 +353,7 @@ contract BridgeEscrowBurnRefundTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: uint8(BridgeEscrow.TokenMode.NATIVE_BURN_MINT),
                 evmChainId: TEST_EVM_CHAIN_ID,
-                evmBridge: TEST_EVM_BRIDGE,
+                evmBridge: address(escrow),
                 evmToken: address(wmoto2),
                 evmDecimals: 6,
                 opnetBridge: TEST_OPNET_BRIDGE,
@@ -461,7 +462,7 @@ contract BridgeEscrowBurnRefundTest is Test {
             BridgeEscrow.FlowAddParams({
                 mode: uint8(BridgeEscrow.TokenMode.NATIVE_BURN_MINT),
                 evmChainId: TEST_EVM_CHAIN_ID,
-                evmBridge: TEST_EVM_BRIDGE,
+                evmBridge: address(escrow),
                 evmToken: address(tok),
                 evmDecimals: 6,
                 opnetBridge: TEST_OPNET_BRIDGE,
