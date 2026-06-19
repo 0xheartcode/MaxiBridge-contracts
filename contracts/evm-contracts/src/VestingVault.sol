@@ -85,6 +85,7 @@ contract VestingVault is IVestingVault, ReentrancyGuard {
     error ZeroAddress();
     error ZeroAmount();
     error ZeroVestingDuration();
+    error VestingDurationTooLong(); // PVE008 — enforces the unchecked-sum precondition
     error AmountOverflow();
     error ScheduleAlreadyExists();
     error ScheduleNotFound();
@@ -134,6 +135,12 @@ contract VestingVault is IVestingVault, ReentrancyGuard {
     constructor(IERC20 token_, address bridge_, uint64 vestingBlocks_) {
         if (address(token_) == address(0) || bridge_ == address(0)) revert ZeroAddress();
         if (vestingBlocks_ == 0) revert ZeroVestingDuration();
+        // PVE008 (PeckShield) — bound the duration below 2^63 so the
+        // `depositFor` unchecked `startBlock + VESTING_BLOCKS` can never
+        // overflow uint64: block.number is realistically << 2^63, and both
+        // addends < 2^63 ⇒ sum < 2^64. Makes the unchecked block's stated
+        // precondition an enforced invariant rather than an assumption.
+        if (vestingBlocks_ >= (uint64(1) << 63)) revert VestingDurationTooLong();
         TOKEN = token_;
         BRIDGE = bridge_;
         VESTING_BLOCKS = vestingBlocks_;

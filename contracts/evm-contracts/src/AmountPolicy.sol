@@ -77,11 +77,17 @@ library AmountPolicy {
         if (srcDec == dstDec) {
             return amountSrc;
         }
+        // N3-2 (PeckShield) — parity with the OPNet `scale` guard. This leg is
+        // `internal pure` (callers pre-bound decimals to 1..MAX_DECIMALS) and
+        // a runaway `10 ** delta` would revert on checked overflow anyway, but
+        // bound the delta explicitly so the invariant is self-evident.
         if (dstDec > srcDec) {
+            if (dstDec - srcDec > MAX_DECIMALS) revert DecimalsTooLarge();
             uint256 mult = 10 ** uint256(dstDec - srcDec);
             return amountSrc * mult;
         }
         // srcDec > dstDec — strict floor with dust rejection.
+        if (srcDec - dstDec > MAX_DECIMALS) revert DecimalsTooLarge();
         uint256 div = 10 ** uint256(srcDec - dstDec);
         if (amountSrc % div != 0) revert AmountDustOnShrink();
         return amountSrc / div;
