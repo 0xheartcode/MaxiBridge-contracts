@@ -111,7 +111,13 @@ contract WrappedERC20 is ERC20, Ownable, Pausable {
     }
 
     /// @notice Mint wrapped tokens. Only the bridge may call.
-    function mintFromBridge(address to, uint256 amount) external onlyBridge {
+    /// @dev    `whenNotPaused` so an incident-response pause halts new mints at
+    ///         the token layer too. The bridge mint callers (`BridgeEscrow.claim`
+    ///         / `refundBurn`) already gate on pause at the escrow level, so this
+    ///         is defense-in-depth; it also keeps the EVM sibling symmetric with
+    ///         OPNet `WrappedOP20.mintTo`, whose minter is a grantable set and so
+    ///         genuinely needs the token-level guard (PVE009).
+    function mintFromBridge(address to, uint256 amount) external onlyBridge whenNotPaused {
         if (to == address(0)) revert ZeroRecipient();
         if (amount == 0) revert AmountZero();
         // E-1 — hard supply ceiling. `MAX_SUPPLY >= totalSupply()` is an

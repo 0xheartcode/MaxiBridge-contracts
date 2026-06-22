@@ -416,13 +416,15 @@ export class WrappedOP20 extends OP20S {
     public mintTo(calldata: Calldata): BytesWriter {
         this.onlyMinter();
         // PVE009 (PeckShield) — FIXED: honour the token-level pause switch on
-        // the mint path too, mirroring `burnForRelease` above and the EVM
-        // sibling `WrappedERC20.mintFromBridge` (`whenNotPaused`). The original
-        // decline assumed `onlyMinter` admitted only the BridgeDepository (whose
-        // claim path already gates on `requireNotPaused`), but `grantMinter`
-        // lets governance/authority add further minters, and this token is
+        // the mint path too, mirroring `burnForRelease` above. The decisive
+        // reason is the minter-set asymmetry: `onlyMinter` admits not just the
+        // BridgeDepository (whose claim path already gates on `requireNotPaused`)
+        // but any address added via `grantMinter`, and this token is
         // NON-UPGRADEABLE — so without a token-level guard a granted minter
-        // could mint with no circuit breaker once the depository is paused.
+        // could mint with no circuit breaker once the depository is paused. The
+        // EVM sibling restricts minting to a single immutable `BRIDGE` and gates
+        // every mint caller at the escrow level, so it needs this less; it still
+        // carries `whenNotPaused` on `WrappedERC20.mintFromBridge` for symmetry.
         // `_paused` is now a full freeze (mint + burn). The explicit `to`/
         // `amount` zero-checks below are retained (clear boundary errors).
         if (this._paused.value) {
